@@ -1,0 +1,127 @@
+# ===================================================================
+# 综合 .gitignore 文件
+# 适用于：Python (FastAPI) 后端 + Vue/Vite 前端项目
+# 项目：ChanTheory
+# ===================================================================
+
+# 忽略此文件自身 (在某些 git 版本中可能需要)
+# .gitignore
+
+
+# ===================================================================
+# 1. 项目特定文件 (本地数据、日志、配置)
+# ===================================================================
+
+# 忽略日志文件，例如 chan-theory.log
+*.log
+*.log.*
+
+# 忽略 var/ 目录下的所有内容。
+# 该目录包含本地数据库 (data.sqlite)、运行时生成的配置 (config.applied.json)
+# 以及它们的备份和事务文件 (.bak, .sqlite-shm, .sqlite-wal)，这些都不应纳入版本控制。
+# 建议提交一个 `config.example.json` 作为团队配置模板。
+/var/
+
+# 明确忽略数据库文件，以防万一
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+
+
+# ===================================================================
+# 2. Python (后端)
+# ===================================================================
+
+# 虚拟环境
+# 这是最重要的忽略项之一，包含了所有第三方库。
+/.venv/
+
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 单元测试和覆盖率报告
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+pytest-report.html
+
+# 打包和分发目录
+/build/
+/dist/
+*.egg-info/
+*.egg
+
+
+# ===================================================================
+# 3. Node.js / Vite (前端)
+# ===================================================================
+
+# Node.js 依赖包
+# 这是最重要的忽略项之一，包含了所有前端库。
+/frontend/chan-theory-ui/node_modules/
+
+# Vite 缓存和构建输出目录
+/frontend/chan-theory-ui/.vite/
+/frontend/chan-theory-ui/dist/
+/frontend/chan-theory-ui/dist-ssr/
+/frontend/chan-theory-ui/*.js.map
+/frontend/chan-theory-ui/*.mjs.map
+
+# 日志文件
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 临时目录
+/frontend/chan-theory-ui/temp
+
+
+# ===================================================================
+# 4. IDE 和编辑器配置
+# ===================================================================
+
+# VSCode
+# 忽略本地工作区设置，但保留 `extensions.json` 推荐团队使用的扩展。
+.vscode/*
+!.vscode/extensions.json
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+# ===================================================================
+# 5. 操作系统和通用文件
+# ===================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Thumbs.db/ehthumbs_vista.db in image and video folder
+[Tt]humbs.db
+ehthumbs_vista.db
+
+# D-Store files
+.DS_Store
+._*

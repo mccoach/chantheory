@@ -1,0 +1,195 @@
+<!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
+<!-- ============================== -->
+<!-- 说明：应用根组件（组合根） -->
+<!-- - 新增：ModalDialog 的 tabs/activeTab 接线与透传；tab-change -> dialogManager.setActiveTab -->
+<!-- - 其余逻辑保持原有设计（探活/索引/首帧加载/热键作用域管理等） -->
+<!-- ============================== -->
+
+<template>
+  <div class="page-wrap">
+    <TopTitle />
+    <SymbolPanel />
+    <MainChartPanel />
+    <TechPanels />
+
+    <WatchlistPanel v-if="backendReady" />
+    <StorageManager v-if="backendReady" />
+
+    <!-- 全局唯一设置弹窗外壳：新增 tabs/activeTab 透传与 tab-change 处理 -->
+    <ModalDialog
+      :show="!!dialogManager.activeDialog.value"
+      :title="dialogManager.activeDialog.value?.title"
+      :tabs="dialogManager.activeDialog.value?.tabs"
+      :activeTab="dialogManager.activeDialog.value?.activeTab"
+      @tab-change="(k) => dialogManager.setActiveTab(k)"
+      @close="handleModalClose"
+      @save="handleModalSave"
+    >
+      <template #body>
+        <component
+          v-if="dialogManager.activeDialog.value?.contentComponent"
+          :is="dialogManager.activeDialog.value.contentComponent"
+          v-bind="dialogManager.activeDialog.value.props"
+          :activeTab="dialogManager.activeDialog.value.activeTab"
+          :ref="dialogBodyRef"
+        />
+      </template>
+
+      <template #footer-left>
+        <component
+          v-if="dialogManager.activeDialog.value?.footerLeftComponent"
+          :is="dialogManager.activeDialog.value.footerLeftComponent"
+          v-bind="dialogManager.activeDialog.value.props"
+        />
+      </template>
+    </ModalDialog>
+
+    <div class="meta">
+      meta: {{ vm.meta && vm.meta.value ? JSON.stringify(vm.meta.value) : "" }}
+    </div>
+    <div v-if="vm.error" class="error">错误：{{ vm.error }}</div>
+    <div v-if="vm.loading" class="loading">加载中...</div>
+  </div>
+</template>
+
+<script setup>
+import { onMounted, provide, ref, inject, watch } from "vue";
+import TopTitle from "./components/features/TopTitle.vue";
+import SymbolPanel from "./components/features/SymbolPanel.vue";
+import MainChartPanel from "./components/features/MainChartPanel.vue";
+import TechPanels from "./components/features/TechPanels.vue";
+import WatchlistPanel from "@/components/features/WatchlistPanel.vue";
+import StorageManager from "@/components/features/StorageManager.vue";
+import ModalDialog from "@/components/ui/ModalDialog.vue";
+
+import { useMarketView } from "./composables/useMarketView";
+import { useExportController } from "./composables/useExportController";
+import { useDialogManager } from "./composables/useDialogManager";
+import { buildExportFilename } from "./utils/download";
+import { waitBackendAlive } from "./utils/backendReady";
+import { ensureIndexFresh } from "./composables/useSymbolIndex";
+
+const vm = useMarketView();
+provide("marketView", vm);
+
+const dialogManager = useDialogManager();
+provide("dialogManager", dialogManager);
+
+const dialogBodyRef = ref(null);
+
+const hotkeys = inject("hotkeys", null);
+if (hotkeys) {
+  hotkeys.registerHandlers("global", {
+    refresh() {
+      vm.reload(true);
+    },
+    toggleExportMenu() {
+      try {
+        window.dispatchEvent(new CustomEvent("chan:toggle-export-menu"));
+      } catch {}
+    },
+    openHotkeySettings() {
+      import("@/components/ui/HotkeySettingsDialog.vue").then((mod) => {
+        dialogManager.open({
+          title: "快捷键设置",
+          contentComponent: mod.default,
+          onSave: () => {
+            handleModalClose();
+          },
+          onClose: () => handleModalClose(),
+        });
+      });
+    },
+  });
+
+  hotkeys.registerHandlers("modal:settings", {
+    closeSettings() {
+      handleModalClose();
+    },
+    saveSettings() {
+      handleModalSave();
+    },
+  });
+}
+
+const exportController = useExportController({
+  isBusy: () => vm.loading.value,
+  filenameBuilder: (fmt) =>
+    buildExportFilename(vm.code.value, vm.freq.value, fmt),
+});
+provide("exportController", exportController);
+
+const backendReady = ref(false);
+provide("backendReady", backendReady);
+
+let modalScopePushed = false;
+watch(
+  () => dialogManager.activeDialog.value,
+  (dlg) => {
+    if (!hotkeys) return;
+    if (dlg && !modalScopePushed) {
+      hotkeys.pushScope("modal:settings");
+      modalScopePushed = true;
+    } else if (!dlg && modalScopePushed) {
+      hotkeys.popScope("modal:settings");
+      modalScopePushed = false;
+    }
+  }
+);
+
+function handleModalSave() {
+  const dlg = dialogManager.activeDialog.value;
+  if (dlg && typeof dlg.onSave === "function") {
+    try {
+      // 若内容组件提供 save()（如快捷键面板），这里也可主动调用：
+      // dialogBodyRef.value?.save?.();
+      dlg.onSave();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+}
+function handleModalClose() {
+  const dlg = dialogManager.activeDialog.value;
+  if (dlg && typeof dlg.onClose === "function") {
+    try {
+      dlg.onClose();
+    } catch (e) {
+      console.error(e);
+    }
+  } else {
+    dialogManager.close();
+  }
+}
+
+onMounted(async () => {
+  const alive = await waitBackendAlive({ timeoutMs: 10000, intervalMs: 600 });
+  backendReady.value = !!alive;
+  if (backendReady.value) {
+    await ensureIndexFresh(false);
+    vm.reload();
+    ensureIndexFresh(true);
+  } else {
+    console.warn("Backend not alive within timeout; panels gated by v-if");
+  }
+});
+</script>
+
+<style scoped>
+.page-wrap {
+  padding: 12px;
+}
+.meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #888;
+  word-break: break-all;
+}
+.error {
+  color: #c0392b;
+  margin-top: 8px;
+}
+.loading {
+  margin-top: 8px;
+}
+</style>

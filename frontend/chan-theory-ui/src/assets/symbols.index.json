@@ -1,0 +1,11 @@
+[
+  { "symbol": "600519", "name": "贵州茅台", "pinyin": "guizhoumaotai", "pinyin_abbr": "gzymt", "market": "SH", "type": "A" },
+  { "symbol": "000001", "name": "平安银行", "pinyin": "pinganyinhang", "pinyin_abbr": "payh", "market": "SZ", "type": "A" },
+  { "symbol": "300750", "name": "宁德时代", "pinyin": "ningdeshidai", "pinyin_abbr": "ndsd", "market": "SZ", "type": "A" },
+  { "symbol": "601318", "name": "中国平安", "pinyin": "zhongguopingan", "pinyin_abbr": "zgpa", "market": "SH", "type": "A" },
+  { "symbol": "000002", "name": "万科A", "pinyin": "wankea", "pinyin_abbr": "wka", "market": "SZ", "type": "A" },
+  { "symbol": "601988", "name": "中国银行", "pinyin": "zhongguoyinhang", "pinyin_abbr": "zgyh", "market": "SH", "type": "A" },
+  { "symbol": "688981", "name": "中芯国际", "pinyin": "zhongxinguoji", "pinyin_abbr": "zxgj", "market": "SH", "type": "STAR" },
+  { "symbol": "510300", "name": "沪深300ETF", "pinyin": "hushen300etf", "pinyin_abbr": "hs300etf", "market": "SH", "type": "ETF" },
+  { "symbol": "159915", "name": "创业板ETF", "pinyin": "chuangyebanetf", "pinyin_abbr": "cybetf", "market": "SZ", "type": "ETF" }
+]

@@ -1,0 +1,142 @@
+/* src/styles/global.css */
+/* ============================= */
+/* 说明：合并原 style.css 与 styles/theme.css */
+/* - 使用 CSS 变量定义主题色，预留黑/白主题覆盖 */
+/* - 基础排版/重置与原有样式统一保留 */
+/* - 本次修改（满足“页面宽度固定、左右 20px 留白”）： */
+/*   1) body 不再使用居中 flex（会导致整体布局被内容宽度影响） */
+/*   2) #app 宽度固定为 100vw-40px，左右各留 20px，避免因控制条按钮数变化导致整体宽度抖动 */
+/* ============================= */
+
+/* 主题变量（默认深色） */
+:root {
+  /* 调色板（主题映射供 charts/theme.js 读取） */
+  --bg-main: #111; /* 主背景 */
+  --fg-main: #ddd; /* 主前景 */
+  --axis-line: #555; /* 坐标轴线 */
+  --axis-label: #aaa; /* 坐标文本 */
+  --rise-color: #f56c6c; /* 上涨色（K线红） */
+  --fall-color: #26a69a; /* 下跌色（K线绿） */
+  --grid-line: #2a2a2a; /* 网格线 */
+  --panel-bg: #141414; /* 面板背景 */
+  --panel-border: #2a2a2a; /* 面板边框 */
+
+  /* 字体与排版 */
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* 色系 */
+  color-scheme: light dark;
+  color: var(--fg-main);
+  background-color: #242424; /* 页背景（保留与原 style.css 一致） */
+
+  /* 渲染优化 */
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 链接样式（保留） */
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #535bf2;
+}
+
+/* 页面基线（修改：不使用 flex 居中，避免整体宽度受内容撑开抖动） */
+body {
+  margin: 0;                /* 去默认外边距 */
+  min-width: 320px;         /* 最小宽度 */
+  min-height: 100vh;        /* 满视口高度 */
+  /* 移除 flex/居中，改为普通文档流，#app 控制宽度与居中策略 */
+  /* display: flex; */
+  /* place-items: center; */
+}
+
+/* 标题（保留） */
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+}
+
+/* 按钮（保留） */
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+  color: var(--fg-main);
+}
+button:hover {
+  border-color: #646cff;
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+/* 卡片（保留） */
+.card {
+  padding: 2em;
+}
+
+/* 应用容器（修改：固定页宽=视口宽-40px；左右各留 20px，避免被内容撑开） */
+#app {
+  width: calc(100vw - 40px);   /* 固定宽度：视口宽度 - 左右各 20px */
+  max-width: 1920px;           /* 可选：限制最大宽度（防超宽显示） */
+  margin: 0 20px;              /* 左右各 20px 余白 */
+  padding: 0;                  /* 顶部/底部由各子组件自行控制 */
+  text-align: center;          /* 原样保留 */
+}
+
+/* 浅色模式覆盖（保留） */
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+    --bg-main: #ffffff;
+    --fg-main: #213547;
+    --axis-line: #cccccc;
+    --axis-label: #666666;
+    --grid-line: #e9e9e9;
+    --panel-bg: #f7f7f7;
+    --panel-border: #e1e1e1;
+  }
+  a:hover {
+    color: #747bff;
+  }
+  button {
+    background-color: #f9f9f9;
+    color: #213547;
+  }
+}
+
+/* 通用面板样式（与现有组件一致） */
+.panel-box {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+}
+
+/* 输入项通用样式 */
+.input,
+.select {
+  background: #0f0f0f;
+  color: var(--fg-main);
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 6px 10px;
+  outline: none;
+}
