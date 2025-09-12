@@ -12,7 +12,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     CHAN_MARKER_PRESETS["tri-default"];
 
   const approxBarWidthPx =
-    hostWidth > 1 ? Math.max(2, Math.floor((hostWidth * 0.88) / visCount)) : 8;
+    hostWidth > 1 ? Math.max(1, Math.floor((hostWidth * 0.88) / visCount)) : 8;
   const markerW = Math.max(
     chan.markerMinPx,
     Math.min(chan.markerMaxPx, approxBarWidthPx)

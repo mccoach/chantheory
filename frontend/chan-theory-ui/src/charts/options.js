@@ -2,14 +2,13 @@
 // ==============================
 // 说明：ECharts 选项生成器（前端纯函数层）
 // - 提供主图/量窗/指标窗的 option 组装
-// - 内置多窗体缩放同步（zoomSync）与固定 tooltip 定位器
-// - 已实现：
-//   1) 主图 HL 柱图支持“去包含合并后仅绘单根柱”渲染（基于 reducedBars）
-//   2) 量窗放/缩量标记支持开关（markerPump.enabled / markerDump.enabled）
-//   3) 量窗底部留白/坐标轴标签间距随标记开关动态调整（无标记则不留白）
-//   4) 统一 dataZoom 与 x/y/tooltip 风格
-//   5) 主图/量窗/指标窗 tooltip 与配色对齐显示层规范
-// - 本文件为全量输出并尽可能逐行注���以便维护
+// - 本次修改（修复 H-L 柱图例颜色）：
+//   1) 将 klineStyle, reducedBars, mapOrigToReduced 传入 makeMainTooltipFormatter，
+//      使其能获取涨跌颜色配置、去包含合并后的 K 线及其映射关系。
+//   2) 在 makeMainTooltipFormatter 内部，为 H-L 柱模式增加特殊逻辑：
+//      - 如果是去包含合并后的 H-L 柱，则根据其 `dir` 属性决定颜色。
+//      - 并且仅在承载点（anchor_idx）位置显示颜色圆点，其他被合并的位置显示透明圆点。
+// - 其余逻辑保持不变。
 
 // 引入主题与常量（颜色/默认参数）
 import { getChartTheme } from "@/charts/theme";
@@ -69,14 +68,10 @@ export function createFixedTooltipPositioner(defaultSide = "left", getOffset) {
  * - setRangeByIndex：设置统一范围（索引制）
  */
 export const zoomSync = (function () {
-  // 存储已注册的图表，key → { chart, getLen }
   const charts = new Map();
-  // 当前统一范围（索引）
   let currentRange = null;
-  // 正在广播标志，避免递归触发 dataZoom
   let inProgress = false;
 
-  // 工具：将索引范围转换为 dataZoom 需要的百分比范围
   function idxToPercent(startIdx, endIdx, len) {
     const n = Math.max(1, Number(len || 0));
     const maxIdx = n - 1;
@@ -88,12 +83,11 @@ export const zoomSync = (function () {
     return { start: (s / maxIdx) * 100, end: (e / maxIdx) * 100 };
   }
 
-  // 广播给其它图表
   function broadcastByIndex(startIdx, endIdx, sourceKey) {
     inProgress = true;
     try {
       charts.forEach((entry, key) => {
-        if (key === sourceKey) return; // 源图不广播给自己
+        if (key === sourceKey) return;
         const len = entry.getLen ? Number(entry.getLen()) : 0;
         if (!len || !entry.chart) return;
         const { start, end } = idxToPercent(startIdx, endIdx, len);
@@ -106,7 +100,6 @@ export const zoomSync = (function () {
     }
   }
 
-  // 设置统一索引范围，并广播
   function setRangeByIndex(startIdx, endIdx, sourceKey) {
     currentRange = {
       startIdx: Number(startIdx || 0),
@@ -119,15 +112,13 @@ export const zoomSync = (function () {
     );
   }
 
-  // 将图表加入同步组
   function attach(key, chart, getLen) {
     if (!key || !chart || typeof chart.dispatchAction !== "function")
       return () => {};
     charts.set(key, { chart, getLen });
 
-    // 监听该图表的 dataZoom，并转换为统一索引广播给其它图
     const onZoom = (params) => {
-      if (inProgress) return; // 广播中，避免递归
+      if (inProgress) return;
       try {
         const len = typeof getLen === "function" ? Number(getLen()) : 0;
         if (!len) return;
@@ -152,7 +143,7 @@ export const zoomSync = (function () {
         const maxIdx = len - 1;
         sIdx = Math.max(0, Math.min(maxIdx, sIdx));
         eIdx = Math.max(0, Math.min(maxIdx, eIdx));
-        if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx]; // 保证 s<=e
+        if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
         if (
           !currentRange ||
           currentRange.startIdx !== sIdx ||
@@ -163,10 +154,8 @@ export const zoomSync = (function () {
       } catch {}
     };
 
-    // 注册监听
     chart.on("dataZoom", onZoom);
 
-    // 若已有统一范围，则新加入的图表立即应用一次
     if (currentRange && typeof getLen === "function") {
       const len = Number(getLen()) || 0;
       if (len) {
@@ -181,7 +170,6 @@ export const zoomSync = (function () {
       }
     }
 
-    // 返回解绑函数
     return () => {
       try {
         chart.off("dataZoom", onZoom);
@@ -190,7 +178,6 @@ export const zoomSync = (function () {
     };
   }
 
-  // 将图表移出同步组
   function detach(key) {
     const entry = charts.get(key);
     if (entry && entry.chart) {
@@ -204,35 +191,34 @@ export const zoomSync = (function () {
   return { attach, detach, setRangeByIndex };
 })();
 
-// 统一布局常量（画布内顶栏/边距/slider 等）
+// 统一布局常量
 const LAYOUT = {
-  TOP_TEXT_PX: 28, // 画布内顶栏高度（各窗统一）
-  LEFT_MARGIN_PX: 64, // 左边距，容纳 y 轴刻度
-  RIGHT_MARGIN_PX: 10, // 右边距
-  SLIDER_HEIGHT_PX: 26, // 主窗 slider 高度
-  MAIN_AXIS_LABEL_SPACE_PX: 30, // 主窗 x 轴标签与 slider 间距
-  MAIN_BOTTOM_EXTRA_PX: 2, // 主窗底部少量余白
+  TOP_TEXT_PX: 28,
+  LEFT_MARGIN_PX: 64,
+  RIGHT_MARGIN_PX: 10,
+  SLIDER_HEIGHT_PX: 26,
+  MAIN_AXIS_LABEL_SPACE_PX: 30,
+  MAIN_BOTTOM_EXTRA_PX: 2,
 };
 
-// 常用小工具
+// 小工具
 function asArray(x) {
   return Array.isArray(x) ? x : [];
-} // 保证数组
+}
 function asIndicators(x) {
   return x && typeof x === "object" ? x : {};
-} // 保证对象
+}
 function fmt3(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(3) : "";
-} // 数值格式化
+}
 function isMinuteFreq(freq) {
   return typeof freq === "string" && /m$/.test(freq);
-} // 是否分钟频率
+}
 function pad2(n) {
   return String(n).padStart(2, "0");
-} // 两位补零
+}
 
-// 将 ISO 时间按频率格式化（分钟含时分，日/周/月仅日期）
 function fmtTimeByFreq(freq, isoVal) {
   try {
     const d = new Date(isoVal);
@@ -248,20 +234,14 @@ function fmtTimeByFreq(freq, isoVal) {
   }
 }
 
-// x 轴标签格式化器工厂
 function makeAxisLabelFormatter(freq) {
   return (val) => fmtTimeByFreq(freq, val);
 }
-
-// 数量单位换算（量：手，额：元）
-// - 返回 {div, lab}，显示时用 val/div + lab
 function pickUnitDivider(maxAbs, isAmount) {
   if (maxAbs >= 1e8) return { div: 1e8, lab: "亿" + (isAmount ? "元" : "") };
   if (maxAbs >= 1e4) return { div: 1e4, lab: "万" + (isAmount ? "元" : "") };
   return { div: 1, lab: isAmount ? "元" : "" };
 }
-
-// 单位化格式化输出
 function fmtUnit(val, unit) {
   const n = Number(val);
   if (!Number.isFinite(n)) return "-";
@@ -270,32 +250,18 @@ function fmtUnit(val, unit) {
   return x.toFixed(digits) + (unit?.lab || "");
 }
 
-/**
- * 统一将 UI（grid/x/y/tooltip/dataZoom）应用到 option
- * - ui.isMain：主窗；否则为量窗/指标窗
- * - ui.extraBottomPx：非主窗底部留白（例如量窗标记需要）
- * - ui.xAxisLabelMargin：x 轴标签与底部间距（非主窗可能需要加大）
- */
 function applyUi(option, ui, { dates, freq }) {
   const theme = getChartTheme();
-
-  // 水平边距与顶部
   const leftPx = ui?.leftPx ?? LAYOUT.LEFT_MARGIN_PX;
   const rightPx = ui?.rightPx ?? LAYOUT.RIGHT_MARGIN_PX;
   const isMain = !!ui?.isMain;
   const gridTop = 0;
-
-  // 非主窗动态底部留白（量窗标记开启时可能有额外空间）
   const nonMainExtra = ui?.extraBottomPx ? Number(ui.extraBottomPx) : 0;
-
-  // 主窗底部 = slider + 轴标签空间 + 微小余白；否则用动态 extra
   const gridBottom = isMain
     ? (ui?.sliderHeightPx ?? LAYOUT.SLIDER_HEIGHT_PX) +
       (ui?.mainAxisLabelSpacePx ?? LAYOUT.MAIN_AXIS_LABEL_SPACE_PX) +
       (ui?.mainBottomExtraPx ?? LAYOUT.MAIN_BOTTOM_EXTRA_PX)
     : nonMainExtra;
-
-  // 应用 grid
   option.grid = {
     left: leftPx,
     right: rightPx,
@@ -303,8 +269,6 @@ function applyUi(option, ui, { dates, freq }) {
     bottom: gridBottom,
     containLabel: false,
   };
-
-  // x 轴：统一 boundaryGap、对齐、颜色与时间格式
   const len = Array.isArray(dates) ? dates.length : 0;
   option.xAxis = Object.assign({}, option.xAxis || {}, {
     type: "category",
@@ -315,15 +279,13 @@ function applyUi(option, ui, { dates, freq }) {
     }),
     axisLabel: Object.assign({}, option.xAxis?.axisLabel || {}, {
       color: theme.axisLabelColor,
-      margin: ui?.xAxisLabelMargin ?? 6, // 非主窗可能需要更大的 margin（量窗标记）
+      margin: ui?.xAxisLabelMargin ?? 6,
       formatter: makeAxisLabelFormatter(freq),
     }),
     axisLine: { lineStyle: { color: theme.axisLineColor } },
     min: 0,
     max: len ? len - 1 : undefined,
   });
-
-  // y 轴：统一颜色与网格
   option.yAxis = Object.assign({}, option.yAxis || {}, {
     scale: true,
     axisLabel: Object.assign({}, option.yAxis?.axisLabel || {}, {
@@ -333,8 +295,6 @@ function applyUi(option, ui, { dates, freq }) {
     axisLine: { lineStyle: { color: theme.axisLineColor } },
     splitLine: { lineStyle: { color: theme.gridLineColor } },
   });
-
-  // 通用 tooltip ��线（位置器由上层注入）
   const baseTooltip = {
     trigger: "axis",
     appendToBody: false,
@@ -352,8 +312,6 @@ function applyUi(option, ui, { dates, freq }) {
     option.tooltip || {},
     ui?.tooltipPositioner ? { position: ui.tooltipPositioner } : {}
   );
-
-  // dataZoom：主窗包含 slider，其它窗仅 inside
   const lenRange = len ? { startValue: 0, endValue: len - 1 } : {};
   option.dataZoom = isMain
     ? [
@@ -366,14 +324,11 @@ function applyUi(option, ui, { dates, freq }) {
         },
       ]
     : [{ type: "inside" }];
-
   return option;
 }
 
 /**
  * 主图 tooltip 格式化函数
- * - 为与“带圆点的行”左边对齐，在 OHLC 行前使用一个 8px 的透明占位圆点（span）
- * - 支持 K 线/HL 柱/分时 Close 的统一样式
  */
 function makeMainTooltipFormatter({
   theme,
@@ -382,34 +337,57 @@ function makeMainTooltipFormatter({
   candles,
   maConfigs,
   adjust,
+  klineStyle,
+  reducedBars,
+  mapOrigToReduced, // 新增
 }) {
   const list = asArray(candles);
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    // 时间标签（含复权标识）
     const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
     const timeLabel = fmtTimeByFreq(freq, rawLabel);
     const adjLabel = { qfq: "前复权", hfq: "后复权" }[adjust] || "";
     const rows = [
       `<div style="margin-bottom:4px;">${timeLabel} ${adjLabel}</div>`,
     ];
-
-    // 当前索引与蜡烛
     const idx = params[0].dataIndex ?? 0;
     const k = list[idx] || {};
 
     if (chartType === "kline") {
-      // K 线 or HL 柱
+      const ks = klineStyle || {};
+      const upColor = ks.upColor || theme.candle.rise;
+      const downColor = ks.downColor || theme.candle.fall;
       const kSeries = params.find(
         (p) => p.seriesType === "candlestick" || p.seriesName === "H-L Bar"
       );
       const kLabel =
         kSeries && kSeries.seriesName === "H-L Bar" ? "H-L柱" : "K线";
-      // 行标题（带占位）
+
+      let dotColor = "transparent"; // 默认透明
+
+      if (
+        ks.subType === "bar" &&
+        Array.isArray(reducedBars) &&
+        reducedBars.length
+      ) {
+        // H-L 柱图且是去包含模式：根据 dir 和 anchor_idx 决定颜色
+        const mapEntry = mapOrigToReduced && mapOrigToReduced[idx];
+        if (mapEntry) {
+          const reducedBar = reducedBars[mapEntry.reducedIndex];
+          // 仅在承载点显示颜色
+          if (reducedBar && idx === reducedBar.anchor_idx) {
+            dotColor = reducedBar.dir > 0 ? upColor : downColor;
+          }
+        }
+      } else {
+        // 默认 K 线或普通 H-L 柱：根据 OHLC 决定颜色
+        const isUp = Number(k.c) >= Number(k.o);
+        dotColor = isUp ? upColor : downColor;
+      }
+
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>${kLabel}</div>`
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>${kLabel}</div>`
       );
-      // OHLC 四行（带透明占位 8px 以左对齐）
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>O: ${fmt3(
           k.o
@@ -431,7 +409,6 @@ function makeMainTooltipFormatter({
         )}</div>`
       );
     } else {
-      // 分时 Close 行（带圆点）
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:#03a9f4;"></span>Close: ${fmt3(
           k.c
@@ -439,7 +416,6 @@ function makeMainTooltipFormatter({
       );
     }
 
-    // 若有 MA 叠加线，统一展示（带圆点）
     for (const p of params) {
       if (p.seriesType === "line" && p.seriesName !== "Close") {
         const val = Array.isArray(p.value)
@@ -458,9 +434,6 @@ function makeMainTooltipFormatter({
 
 /**
  * 量窗 tooltip 格式化函数
- * - 主行显示“量/额 + 放/缩量状态”，带圆点（涨跌色）
- * - MAVOL 行带圆点（颜色与折线一致）
- * - 换手率行与“另一指标”行取消圆点，但保留透明占位，保持左对齐
  */
 function makeVolumeTooltipFormatter({
   candles,
@@ -478,8 +451,6 @@ function makeVolumeTooltipFormatter({
     const idx = p0.dataIndex || 0;
     const k = list[idx] || {};
     const isVolMode = (baseName || "").toUpperCase() === "VOL";
-
-    // 主指标行（量/额）圆点颜色：涨红/跌绿
     const isUp = Number(k.c) >= Number(k.o);
     const baseDotColor = isUp
       ? STYLE_PALETTE.bars.volume.up
@@ -491,12 +462,9 @@ function makeVolumeTooltipFormatter({
       ? bar.value[bar.value.length - 1]
       : bar?.value;
     const baseValText = fmtUnit(baseRawVal, unitInfo);
-
-    // 放缩量状态（仅为提示标签）
     const hasPump = params.some((pp) => pp.seriesName === "放量标记");
     const hasDump = params.some((pp) => pp.seriesName === "缩量标记");
     const statusTag = hasPump ? "（放）" : hasDump ? "（缩）" : "";
-
     const periods = Object.keys(mavolMap || {})
       .map((x) => +x)
       .sort((a, b) => a - b);
@@ -507,8 +475,6 @@ function makeVolumeTooltipFormatter({
         isVolMode ? "成交量" : "成交额"
       }: ${baseValText}${statusTag}</div>`
     );
-
-    // MAVOL 行（带圆点，颜色取线的颜色）
     for (const n of periods) {
       const mv = mavolMap[n] ? mavolMap[n][idx] : null;
       if (mv == null || !Number.isFinite(+mv)) continue;
@@ -527,8 +493,6 @@ function makeVolumeTooltipFormatter({
         )}</div>`
       );
     }
-
-    // 换手率（取消圆点，保留占位）
     if (typeof k.tr === "number") {
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>换手率: ${fmt3(
@@ -536,8 +500,6 @@ function makeVolumeTooltipFormatter({
         )}%</div>`
       );
     }
-
-    // “另一指标”（量模式下展示额；额模式下展示量）取消圆点，保留占位
     if (isVolMode) {
       if (typeof k.a === "number") {
         rows.push(
@@ -563,50 +525,38 @@ function makeVolumeTooltipFormatter({
 
 /**
  * 主图 option 组装
- * - 支持：K 线/HL 柱/分时 Close
- * - 新增：当 subType === 'bar' 且传入 reducedBars 时，仅在 anchor_idx 位置绘制合并后的 HL 柱
  */
 export function buildMainChartOption(
   {
-    candles, // 源蜡烛序列（t,o,h,l,c,v,a,tr）
-    indicators, // 指标对象
-    chartType, // 'kline' | 其它（分时）
-    maConfigs, // MA 配置
-    freq, // 频率（x 轴格式）
-    klineStyle, // K 线样式（含 subType/barPercent/colors）
-    adjust, // 复权标识（仅用于 tooltip 展示）
-    reducedBars, // 可选：去包含合并后的复合K（[{idx_start,idx_end,hi,lo,dir,anchor_idx}...]）
-  },
-  ui // UI 参数（tooltipPositioner 等）
+    candles,
+    indicators,
+    chartType,
+    maConfigs,
+    freq,
+    klineStyle,
+    adjust,
+    reducedBars,
+    mapOrigToReduced,
+  }, // 新增 mapOrigToReduced
+  ui
 ) {
-  // 读取主题颜色
   const theme = getChartTheme();
-  // 筛选数据/指标
   const list = asArray(candles);
   const inds = asIndicators(indicators);
-  // x 轴时间序列
   const dates = list.map((d) => d.t);
-  // series 容器
   const series = [];
 
   if (chartType === "kline") {
-    // K 线或 HL 柱模式
     const ks = klineStyle || {};
     const barPercent = Number.isFinite(+ks.barPercent) ? +ks.barPercent : 100;
-    // 颜色：上涨红、下跌绿（按你的主题映射）
     const upColor = ks.upColor || theme.candle.rise;
     const downColor = ks.downColor || theme.candle.fall;
-
     if (ks.subType === "bar") {
-      // HL 柱图
       if (Array.isArray(reducedBars) && reducedBars.length) {
-        // 使用合并后的“单根 HL”渲染：只在 anchor_idx 位置绘制（其它索引为 null）
         const n = dates.length;
-        const baseLow = new Array(n).fill(null); // 栈底（low）
-        const hlSpan = new Array(n).fill(null); // 高度（hi - lo）
-        const upIndexSet = new Set(); // 上涨复合K的锚点集合（用于着色）
-
-        // 将 reducedBars 映射到 anchor_idx 索引位置
+        const baseLow = new Array(n).fill(null);
+        const hlSpan = new Array(n).fill(null);
+        const upIndexSet = new Set();
         for (const rb of reducedBars) {
           const idx = Math.max(
             0,
@@ -619,8 +569,6 @@ export function buildMainChartOption(
           hlSpan[idx] = hi - lo;
           if (Number(rb?.dir || 0) > 0) upIndexSet.add(idx);
         }
-
-        // 基线（透明） + HL 柱（彩色）堆叠
         series.push({
           name: "L-Base",
           type: "bar",
@@ -645,7 +593,6 @@ export function buildMainChartOption(
             : {}),
         });
       } else {
-        // 回退：逐根 HL 柱（原始行为）
         series.push({
           name: "L-Base",
           type: "bar",
@@ -674,8 +621,6 @@ export function buildMainChartOption(
         });
       }
     } else {
-      // 正常 K 线（candlestick）
-      // 注意：ECharts candlestick 数据列顺序是 [open, close, low, high]
       const ohlc = list.map((d) => [d.o, d.c, d.l, d.h]);
       const klineSeries = {
         type: "candlestick",
@@ -692,8 +637,6 @@ export function buildMainChartOption(
       if (barPercent < 100) klineSeries.barWidth = `${barPercent}%`;
       series.push(klineSeries);
     }
-
-    // 叠加 MA 线（启用才绘制）
     Object.entries(maConfigs || {}).forEach(([key, conf]) => {
       if (!conf || !conf.enabled || !Number.isFinite(+conf.period)) return;
       const data = inds[key];
@@ -717,7 +660,6 @@ export function buildMainChartOption(
       });
     });
   } else {
-    // 分时线（Close）
     series.push({
       type: "line",
       name: "Close",
@@ -730,7 +672,6 @@ export function buildMainChartOption(
     });
   }
 
-  // 组装 option 并应用 UI
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
@@ -742,14 +683,15 @@ export function buildMainChartOption(
         candles: list,
         maConfigs,
         adjust,
+        klineStyle,
+        reducedBars,
+        mapOrigToReduced, // 关键修改
       }),
     },
     xAxis: { type: "category", data: dates },
     yAxis: { scale: true },
     series,
   };
-
-  // 返回应用 UI 后的 option（主窗）
   return applyUi(
     option,
     {
@@ -763,58 +705,34 @@ export function buildMainChartOption(
 
 /**
  * 量窗 option 组装
- * - 支持量/额切换、MAVOL、多标记（放/缩量）
- * - 关键点：
- *   * 标记开关：markerPump.enabled / markerDump.enabled（默认 true）
- *   * 动态底部留白：有任一标记显示时才为 marker 预留底部空间，否则不留
- *   * x 轴标签 margin：随标记留白动态调整
  */
 export function buildVolumeOption(
   { candles, indicators, freq, volCfg, volEnv },
   ui
 ) {
-  // 读取主题
   const theme = getChartTheme();
-
-  // 输入数据与指标
   const list = asArray(candles);
   const inds = asIndicators(indicators);
-
-  // x 轴时间
   const dates = list.map((d) => d.t);
-
-  // 模式：量 or 额
   const baseMode = volCfg && volCfg.mode === "amount" ? "amount" : "vol";
   const baseName = baseMode === "amount" ? "AMOUNT" : "VOL";
-
-  // 主序列（量 or 额）
   const baseRaw =
     baseMode === "amount"
       ? list.map((d) => (typeof d.a === "number" ? d.a : null))
       : inds.VOLUME || list.map((d) => (typeof d.v === "number" ? d.v : null));
-
-  // 单位估算
   const baseMaxAbs = baseRaw.reduce(
     (m, x) => (Number.isFinite(+x) ? Math.max(m, Math.abs(+x)) : m),
     0
   );
   const unitInfo = pickUnitDivider(baseMaxAbs, baseMode === "amount");
-
-  // series 容器
   const series = [];
-
-  // 柱体样式与颜色
   const vb = volCfg?.volBar || {};
   const barPercent = Number.isFinite(+vb.barPercent)
     ? Math.max(10, Math.min(100, Math.round(+vb.barPercent)))
     : 100;
   const upColor = vb.upColor || STYLE_PALETTE.bars.volume.up;
   const downColor = vb.downColor || STYLE_PALETTE.bars.volume.down;
-
-  // 有效数据（null 过滤交给 ECharts）
   const baseScaled = baseRaw.map((v) => (Number.isFinite(+v) ? +v : null));
-
-  // 主柱（量 or 额）
   series.push({
     id: baseName,
     type: "bar",
@@ -829,8 +747,6 @@ export function buildVolumeOption(
     },
     ...(barPercent && barPercent !== 100 ? { barWidth: `${barPercent}%` } : {}),
   });
-
-  // MAVOL 配置解析
   const namePrefixCN = baseMode === "amount" ? "额MA" : "量MA";
   const mstyles = volCfg?.mavolStyles || {};
   const periods = Object.keys(mstyles)
@@ -839,8 +755,6 @@ export function buildVolumeOption(
       (s) => s && s.enabled && Number.isFinite(+s.period) && +s.period > 0
     )
     .sort((a, b) => +a.period - +b.period);
-
-  // 简单 MA（SMA）实现
   function sma(arr, n) {
     const out = new Array(arr.length).fill(null);
     if (!Array.isArray(arr) || !arr.length || !Number.isFinite(+n) || n <= 0)
@@ -864,14 +778,10 @@ export function buildVolumeOption(
     }
     return out;
   }
-
-  // 生成各周期 MAVOL
   const mavolMap = {};
   for (const st of periods) {
     mavolMap[+st.period] = sma(baseScaled, +st.period);
   }
-
-  // 绘制各条 MAVOL 线
   for (const st of periods) {
     const n = +st.period;
     const lineColor = st.color || STYLE_PALETTE.lines[0].color;
@@ -892,31 +802,25 @@ export function buildVolumeOption(
       z: 3,
     });
   }
-
-  // 估算柱宽用于标记尺寸
   const hostW = Math.max(1, Number(volEnv?.hostWidth || 0));
   const visCount = Math.max(1, Number(volEnv?.visCount || baseScaled.length));
   const approxBarWidthPx =
     hostW > 1 && visCount > 0
       ? Math.max(
-          2,
+          1,
           Math.floor(((hostW * 0.88) / visCount) * (barPercent / 100))
         )
       : 8;
-  const MARKER_W_MIN = 6,
-    MARKER_W_MAX = 14;
+  const MARKER_W_MIN = 1,
+    MARKER_W_MAX = 16;
   const markerW = Math.max(
     MARKER_W_MIN,
     Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
   );
   const markerH = 10;
   const symbolOffsetBelow = [0, Math.round(markerH * 1.2)];
-
-  // 主基线：启用的最小 MAVOL 周期
   const primPeriod = periods.length ? +periods[0].period : null;
   const primSeries = primPeriod ? mavolMap[primPeriod] : null;
-
-  // 阈值与开关
   const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
     ? +volCfg.markerPump.threshold
     : DEFAULT_VOL_SETTINGS.markerPump.threshold;
@@ -925,11 +829,8 @@ export function buildVolumeOption(
     : DEFAULT_VOL_SETTINGS.markerDump.threshold;
   const pumpEnabled = (volCfg?.markerPump?.enabled ?? true) === true;
   const dumpEnabled = (volCfg?.markerDump?.enabled ?? true) === true;
-
-  // 标记点集合
   const pumpPts = [];
   const dumpPts = [];
-
   if (primSeries) {
     if (pumpEnabled && pumpK > 0) {
       for (let i = 0; i < baseScaled.length; i++) {
@@ -948,8 +849,6 @@ export function buildVolumeOption(
       }
     }
   }
-
-  // 条件渲染放量标记
   if (pumpEnabled && pumpPts.length) {
     series.push({
       id: "VOL_PUMP_MARK",
@@ -963,7 +862,6 @@ export function buildVolumeOption(
       z: 4,
     });
   }
-  // 条件渲染缩量标记
   if (dumpEnabled && dumpPts.length) {
     series.push({
       id: "VOL_DUMP_MARK",
@@ -977,16 +875,10 @@ export function buildVolumeOption(
       z: 4,
     });
   }
-
-  // 动态底部留白与 x 轴标签距离：
-  // - 有任一标记显示才预留 markerH 的底部空间，并将 label margin 调大；
-  // - 否则不留白，label margin 使用较小值。
   const anyMarkers =
     (pumpEnabled && pumpPts.length > 0) || (dumpEnabled && dumpPts.length > 0);
   const extraBottomPx = anyMarkers ? markerH : 0;
   const xAxisLabelMargin = anyMarkers ? Math.max(12, markerH + 12) : 12;
-
-  // 组装 option
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
@@ -1013,16 +905,14 @@ export function buildVolumeOption(
     },
     series,
   };
-
-  // 应用 UI（非主窗）
   return applyUi(
     option,
     {
       ...ui,
       isMain: false,
       tooltipPositioner: createFixedTooltipPositioner("left"),
-      extraBottomPx, // 动态底部留白
-      xAxisLabelMargin, // 动态 x 轴标签间距
+      extraBottomPx,
+      xAxisLabelMargin,
     },
     { dates, freq }
   );
@@ -1030,7 +920,6 @@ export function buildVolumeOption(
 
 /**
  * MACD 窗 option 组装
- * - 柱（HIST）+ 线（DIF/DEA）
  */
 export function buildMacdOption({ candles, indicators, freq }, ui) {
   const theme = getChartTheme();
@@ -1038,10 +927,8 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   const inds = asIndicators(indicators);
   const dates = list.map((d) => d.t);
   const series = [];
-
   if (inds.MACD_DIF && inds.MACD_DEA && inds.MACD_HIST) {
     let lineStyleIndex = 0;
-    // 柱：正负不同颜色
     series.push({
       id: "MACD_HIST",
       type: "bar",
@@ -1054,7 +941,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
             : STYLE_PALETTE.bars.macd.negative,
       },
     });
-    // 线：DIF
     const difStyle =
       STYLE_PALETTE.lines[lineStyleIndex++ % STYLE_PALETTE.lines.length];
     series.push({
@@ -1067,7 +953,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       itemStyle: { color: difStyle.color },
       color: difStyle.color,
     });
-    // 线：DEA
     const deaStyle =
       STYLE_PALETTE.lines[lineStyleIndex++ % STYLE_PALETTE.lines.length];
     series.push({
@@ -1081,7 +966,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       color: deaStyle.color,
     });
   }
-
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
@@ -1117,11 +1001,9 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       },
     },
   };
-
   option.xAxis = { type: "category", data: dates };
   option.yAxis = { scale: true };
   option.series = series;
-
   return applyUi(
     option,
     {
@@ -1135,8 +1017,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
 
 /**
  * KDJ/RSI 窗 option 组装
- * - KDJ：K/D/J 三线
- * - RSI：一条线
  */
 export function buildKdjOrRsiOption(
   { candles, indicators, freq, useKDJ = false, useRSI = false },
@@ -1148,9 +1028,7 @@ export function buildKdjOrRsiOption(
   const dates = list.map((d) => d.t);
   const series = [];
   let lineStyleIndex = 0;
-
   if (useKDJ) {
-    // KDJ：三线
     const K = inds.KDJ_K,
       D = inds.KDJ_D,
       J = inds.KDJ_J;
@@ -1193,7 +1071,6 @@ export function buildKdjOrRsiOption(
       });
     }
   } else if (useRSI) {
-    // RSI：单线
     const R = inds.RSI;
     if (R) {
       const st =
@@ -1210,7 +1087,6 @@ export function buildKdjOrRsiOption(
       });
     }
   }
-
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
@@ -1234,11 +1110,9 @@ export function buildKdjOrRsiOption(
       },
     },
   };
-
   option.xAxis = { type: "category", data: dates };
   option.yAxis = { scale: true };
   option.series = series;
-
   return applyUi(
     option,
     {

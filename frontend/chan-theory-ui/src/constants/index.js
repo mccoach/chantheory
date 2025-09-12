@@ -151,7 +151,7 @@ export const CHAN_DEFAULTS = {
   showUpDownMarkers: true, // 是否显示“去包含后”的涨跌标记（默认开启）
   anchorPolicy: "right", // 承载点策略：'right' | 'extreme'（右端或极值）
   visualPreset: "tri-default", // 视觉预设键（见 CHAN_MARKER_PRESETS）
-  markerMinPx: 6, // 标记最小像素
+  markerMinPx: 1, // 标记最小像素
   markerMaxPx: 14, // 标记最大像素
   opacity: 0.9, // 标记透明度
   // borderColor: "#99aabb", // 标记边框色（淡灰蓝）

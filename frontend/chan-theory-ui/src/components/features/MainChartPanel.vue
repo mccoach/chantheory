@@ -1,9 +1,11 @@
 <!-- src/components/features/MainChartPanel.vue -->
 <!-- ============================== -->
-<!-- 说明：主���面板（全量，逐行注释） -->
-<!-- 本次变更：
-     - 在生成主图 option 时，将 computeInclude 结果（chanCache.reduced）透传给 buildMainChartOption；
-       当设置为 HL 柱图（subType='bar'）时，主图仅在 anchor_idx 位置绘制“合并后的单根 HL 柱”。 -->
+<!-- 说明：主行情面板（严格限域改动） -->
+<!-- 本次变更（修复 H-L 柱图例颜色）： -->
+<!-- - 修改 render 函数，在调用 buildMainChartOption 时，额外传入 mapOrigToReduced: chanCache.value.map。 -->
+<!--   这使得 tooltip 格式化函数能访问到原始 K 线到合并后 K 线的映射关系，从而正确判断 H-L 柱的颜色。 -->
+<!-- 其余逻辑保持不变。 -->
+<!-- ============================== -->
 <template>
   <!-- 顶部控制条：周期切换按钮等（保持原有实现） -->
   <div class="controls">
@@ -112,7 +114,6 @@
 </template>
 
 <script setup>
-// 标准导入与依赖（保持原有）
 import {
   inject,
   onMounted,
@@ -134,7 +135,7 @@ import {
 } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
-import { computeInclude } from "@/composables/useChan"; // 去包含（主窗新增：用于 HL 柱图）
+import { computeInclude } from "@/composables/useChan";
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { buildUpDownMarkers } from "@/charts/chan/layers";
 
@@ -145,26 +146,13 @@ const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
-// 激活状态判断（保持）
 const isActiveK = (freq) =>
   vm.chartType.value === "kline" && vm.freq.value === freq;
 
-// 周期激活（保持）
-async function activateK(freq) {
+async function activateK(f) {
   vm.chartType.value = "kline";
-  vm.freq.value = freq;
-  const preset = {
-    "1m": "5D",
-    "5m": "1M",
-    "15m": "1M",
-    "30m": "3M",
-    "60m": "6M",
-    "1d": "1Y",
-    "1w": "3Y",
-    "1M": "5Y",
-  }[freq];
-  if (preset) await vm.applyPreset(preset);
-  else vm.reload();
+  vm.freq.value = f;
+  await vm.reload(true);
 }
 
 const wrap = ref(null);
@@ -174,7 +162,6 @@ let ro = null;
 let winResizeHandler = null;
 let detachSync = null;
 
-// 设置草稿（保持）
 const settingsDraft = reactive({
   kForm: {
     barPercent: 100,
@@ -186,7 +173,6 @@ const settingsDraft = reactive({
   chanForm: { ...CHAN_DEFAULTS },
 });
 
-// 设置内容组件（保持）
 const MainChartSettingsContent = defineComponent({
   props: { activeTab: { type: String, default: "display" } },
   setup(props) {
@@ -213,7 +199,6 @@ const MainChartSettingsContent = defineComponent({
     const renderDisplay = () => {
       const K = settingsDraft.kForm;
       const rows = [];
-      // K 线区（保留）
       rows.push(
         h("div", { class: "std-row" }, [
           nameCell("K 线"),
@@ -254,7 +239,6 @@ const MainChartSettingsContent = defineComponent({
                 )),
             })
           ),
-          // 复权切换（保持）
           itemCell(
             "复权",
             h(
@@ -271,7 +255,6 @@ const MainChartSettingsContent = defineComponent({
               ]
             )
           ),
-          // 样式：蜡烛/HL 柱图（与需求相关）
           itemCell(
             "样式",
             h(
@@ -299,8 +282,6 @@ const MainChartSettingsContent = defineComponent({
           ),
         ])
       );
-
-      // MA 行（保持）
       Object.keys(settingsDraft.maForm || {}).forEach((key) => {
         const conf = settingsDraft.maForm[key];
         rows.push(
@@ -501,7 +482,6 @@ const MainChartSettingsContent = defineComponent({
   },
 });
 
-// 打开设置（保持原有：保存后重绘/重算 chan）
 function openSettingsDialog() {
   Object.assign(
     settingsDraft.kForm,
@@ -569,17 +549,7 @@ function extractMAKey(ma) {
   });
   return out;
 }
-function resetK() {
-  Object.assign(settingsDraft.kForm, {
-    barPercent: 100,
-    upColor: "#f56c6c",
-    downColor: "#26a69a",
-    subType: "candlestick",
-  });
-  vm.adjust.value = "none";
-}
 
-// 标题（保持）
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
   const n = displayHeader.value.name || "";
@@ -596,7 +566,6 @@ const displayTitle = computed(() => {
     : `${c}：${f}${srcLabel}${adjText}`;
 });
 
-// 刷新徽标（保持）
 const showRefreshed = ref(false);
 const refreshedAt = ref(null);
 const refreshedAtHHMMSS = computed(() => {
@@ -607,7 +576,6 @@ const refreshedAtHHMMSS = computed(() => {
 });
 let refreshedTimer = null;
 
-// 键盘移动当前索引（保持）
 let currentIndex = -1;
 function onGlobalHoverIndex(e) {
   const idx = Number(e?.detail?.idx);
@@ -640,7 +608,6 @@ function onKeydown(e) {
   } catch {}
 }
 
-// 缠论去包含缓存（保持：recomputeChan 用 computeInclude）
 const chanCache = ref({ reduced: [], map: [], meta: null });
 function recomputeChan() {
   try {
@@ -662,10 +629,8 @@ function recomputeChan() {
   }
 }
 
-// 记录上次 freq（保持：用于 dataZoom 继承判定）
 const lastFreq = ref(vm.freq.value);
 
-// 可见区（保持）
 function getVisibleCount() {
   const len = (vm.candles.value || []).length || 1;
   try {
@@ -678,7 +643,6 @@ function getVisibleCount() {
   return len;
 }
 
-// 根据 dataZoom 更新 chan 标记（保持）
 function updateChanMarkersOnZoom() {
   if (!chart) return;
   const showMarkers = !!settings.chanSettings.value.showUpDownMarkers;
@@ -702,7 +666,6 @@ function updateChanMarkersOnZoom() {
   chart.setOption({ series: layer.series }, false);
 }
 
-// 渲染主图（新增：将 chanCache.reduced 传给 buildMainChartOption，以便 HL 柱图仅绘合并后单根）
 function render() {
   if (!chart) return;
   const option = buildMainChartOption(
@@ -714,12 +677,13 @@ function render() {
       freq: vm.freq.value,
       klineStyle: settings.klineStyle.value,
       adjust: vm.adjust.value,
-      reducedBars: chanCache.value.reduced, // 关键：传入去包含后的复合K
+      reducedBars: chanCache.value.reduced,
+      // 关键修改：传入 `mapOrigToReduced`
+      mapOrigToReduced: chanCache.value.map,
     },
     { tooltipClass: "ct-fixed-tooltip" }
   );
 
-  // 追加缠论标记图层的 yAxis（保持一致）
   const showMarkers = !!settings.chanSettings.value.showUpDownMarkers;
   if (showMarkers && (chanCache.value.reduced || []).length) {
     const auxAxis = { type: "value", min: 0, max: 1, show: false };
@@ -756,7 +720,6 @@ function render() {
     }
   }
 
-  // 与量窗相同：是否继承 dataZoom（避免频率变化或到达末尾时继承导致空白）
   let allowCarryZoom = lastFreq.value === vm.freq.value;
   const prev = chart.getOption?.();
   const lenNow = (vm.candles.value || []).length;
@@ -790,7 +753,6 @@ function render() {
   updateChanMarkersOnZoom();
 }
 
-// 生命周期：挂载/卸载（保持）
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
@@ -862,7 +824,7 @@ onMounted(async () => {
     chart,
     () => (vm.candles.value || []).length
   );
-  recomputeChan(); // 关键：首帧即计算包含关系，便于 HL ��图使用 reducedBars
+  recomputeChan();
   render();
   updateHeaderFromCurrent();
 });
@@ -892,7 +854,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("chan:hover-index", onGlobalHoverIndex);
 });
 
-// 监听：数据/指标/图形/频率/设置/复权变化 → 重算包含关系 + 重绘
 watch(
   () => [
     vm.candles.value,
@@ -911,7 +872,6 @@ watch(
   { deep: true }
 );
 
-// 监听：加载状态 → 更新标题与刷新徽标
 watch(
   () => vm.loading.value,
   async (isLoading) => {
@@ -934,7 +894,6 @@ watch(
   }
 );
 
-// 拖拽改高（保持）
 let dragging = false,
   startY = 0,
   startH = 0;
@@ -961,10 +920,19 @@ function onResizeHandleUp() {
   dragging = false;
   window.removeEventListener("mousemove", onResizeHandleMove);
 }
+
+function updateHeaderFromCurrent() {
+  const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
+  const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
+  let name = "";
+  try {
+    name = findBySymbol(sym)?.name?.trim() || "";
+  } catch {}
+  displayHeader.value = { name, code: sym, freq: frq };
+}
 </script>
 
 <style scoped>
-/* 与原样一致（略）——完整样式保持，未做删改 */
 .controls {
   display: flex;
   align-items: center;

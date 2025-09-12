@@ -1,30 +1,30 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useMarketView.js
-// ==============================
-// 说明：页面核心状态与行为（修复复权响应式 + 移除 120m）
-// 变更点：
-// - 不再创建本地 adjust ref，直接使用并监听 useUserSettings 中的全局响应式 adjust 状态。
-// - 从所有预设和计算逻辑中移除 120m。
-// ==============================
+/* E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useMarketView.js */
+/* ============================== */
+/* 说明：页面核心状态与行为（统一窗长 + 切频不跳变） */
+/* 变更点（严格限域、最小必要改动）： */
+/* - 固定统一窗长列表 UNIFIED_PRESETS（扩展款 10 项：5D、10D、1M、3M、6M、YTD、1Y、3Y、5Y、ALL） */
+/* - getPresetsForCurrentFreq() 统一返回 UNIFIED_PRESETS，按钮在 SymbolPanel 固定不变 */
+/* - 初始无 lastStart/lastEnd 时，rng 默认 preset='ALL'（UI 高亮 ALL），符合“默认选 ALL” */
+/* 其余逻辑保持不变：start/end 仍持久化，applyPreset/applyManual 等沿用原实现。 */
+/* ============================== */
 
 import { ref, watch, computed } from "vue";                   // Vue 响应式 API
 import { fetchCandles } from "@/services/marketService";      // 后端行情服务
 import { useUserSettings } from "@/composables/useUserSettings"; // 用户本地设置
 
-const PRESETS_BY_FREQ = {                                     // 频率 → 快捷预设
-  "1m":  ["5D", "10D", "30D", "60D", "ALL"],
-  "5m":  ["1M", "3M", "6M", "YTD", "ALL"],
-  "15m": ["1M", "3M", "6M", "YTD", "ALL"],
-  "30m": ["1M", "3M", "6M", "YTD", "ALL"],
-  "60m": ["1M", "3M", "6M", "YTD", "ALL"],
-  "1d":  ["1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "10Y", "ALL"],
-  "1w":  ["YTD", "1Y", "3Y", "5Y", "10Y", "ALL"],
-  "1M":  ["YTD", "1Y", "3Y", "5Y", "10Y", "ALL"],
-};
+/* 统一窗长列表（扩展款 10 项） */
+const UNIFIED_PRESETS = [
+  "5D", "10D",
+  "1M", "3M", "6M",
+  "YTD", "1Y", "3Y", "5Y",
+  "ALL",
+];
 
-const GRACE_MIN_SEC = 5;
-const GRACE_DAILY_SEC = 180;
-const DEFAULT_COOLDOWN_SEC = 10;
+const GRACE_MIN_SEC = 5;          // 分钟级宽限（秒）
+const GRACE_DAILY_SEC = 180;      // 日/周/月宽限（秒）
+const DEFAULT_COOLDOWN_SEC = 10;  // 轻冷却
 
+/* 计算下一数据边界时刻（用于自动刷新调度） */
 function computeNextBoundaryTs(freq) {
   const now = new Date();
   const hm = now.getHours() * 60 + now.getMinutes();
@@ -52,14 +52,14 @@ function computeNextBoundaryTs(freq) {
 
 export function useMarketView() {
   const settings = useUserSettings();                          // 用户设置
-  const code = ref(settings.lastSymbol.value || "");
-  const freq = ref(settings.freq?.value || "1d");
-  // 修复：直接使用 settings 中的 adjust 响应式引用，不再创建本地 ref
-  const adjust = settings.adjust;
-  const start = ref(settings.lastStart.value || "");
-  const end = ref(settings.lastEnd.value || "");
-  const chartType = ref(settings.chartType?.value || "kline");
+  const code = ref(settings.lastSymbol.value || "");           // 标的代码
+  const freq = ref(settings.freq?.value || "1d");              // 频率
+  const adjust = settings.adjust;                               // 复权（直接用全局响应式）
+  const start = ref(settings.lastStart.value || "");           // 开始日期（YYYY-MM-DD）
+  const end = ref(settings.lastEnd.value || "");               // 结束日期（YYYY-MM-DD）
+  const chartType = ref(settings.chartType?.value || "kline"); // 图形类型
 
+  /* MA 周期映射（固定键 → 周期） */
   const maPeriodsMap = computed(() => {
     const configs = settings.maConfigs.value || {};
     return Object.entries(configs)
@@ -70,27 +70,39 @@ export function useMarketView() {
       }, {});
   });
 
+  /* 其它指标开关（保持原有） */
   const useMACD = ref(settings.useMACD?.value ?? true);
   const useKDJ = ref(settings.useKDJ?.value ?? false);
   const useRSI = ref(settings.useRSI?.value ?? false);
   const useBOLL = ref(settings.useBOLL?.value ?? false);
 
+  /* 加载状态与数据容器 */
   const loading = ref(false);
   const error = ref("");
   const meta = ref(null);
   const candles = ref([]);
   const indicators = ref({});
 
+  /* 区间模型：新增默认 ALL 的初始化（当且仅当没有持久化 start/end 时） */
+  const noSavedRange = !(start.value || end.value);
   const rng = ref({
-    mode: start.value || end.value ? "manual" : "preset",
-    preset: "", bars: null, startStr: start.value || "", endStr: end.value || "",
+    mode: noSavedRange ? "preset" : "preset",     // 维持 preset 模式；若用户手动修改，会在 applyManual 中置 "manual"
+    preset: noSavedRange ? "ALL" : "",            // 无保存则默认 ALL；有保存则保持空（显示为“自定义/手动”）
+    bars: null,
+    startStr: start.value || "",
+    endStr: end.value || "",
     visible: { startStr: "", endStr: "" },
   });
 
+  /* 当前 hover 索引（跨窗体联动） */
   const focusIndex = ref(-1);
 
-  function getPresetsForCurrentFreq() { return PRESETS_BY_FREQ[freq.value] || []; }
+  /* 统一窗长列表（供 UI 按钮使用） */
+  function getPresetsForCurrentFreq() {
+    return UNIFIED_PRESETS.slice(); // 固定列表，跨频率不变
+  }
 
+  /* 自动刷新调度（保持原有） */
   let autoTimer = null;
   function scheduleAutoRefresh() {
     if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
@@ -103,9 +115,10 @@ export function useMarketView() {
     }, delay);
   }
 
+  /* 轻冷却（同一查询 10s 内避免过度请求） */
   const lastFetchAt = new Map();
   function withinCooldown() {
-    const key = `${code.value}|${freq.value}|${adjust.value}|${start.value || ""}|${end.value || ""}`; // 加上 adjust
+    const key = `${code.value}|${freq.value}|${adjust.value}|${start.value || ""}|${end.value || ""}`;
     const prev = lastFetchAt.get(key) || 0;
     const now = Date.now();
     if (now - prev < DEFAULT_COOLDOWN_SEC * 1000) return true;
@@ -113,6 +126,7 @@ export function useMarketView() {
     return false;
   }
 
+  /* 主动刷新（保留逻辑；不改变 start/end） */
   async function reload(force = false) {
     if (!code.value) return;
     if (withinCooldown() && !force) return;
@@ -122,7 +136,7 @@ export function useMarketView() {
       const data = await fetchCandles({
         code: code.value,
         freq: freq.value,
-        adjust: adjust.value, // 使用全局响应式状态的值
+        adjust: adjust.value,
         start: start.value || undefined,
         end: end.value || undefined,
         include: buildIncludeParam(),
@@ -138,7 +152,10 @@ export function useMarketView() {
     }
   }
 
+  /* 日期字符串工具 */
   function toDateStr(d){ const p=(n)=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
+
+  /* 预设 → 日期窗口 */
   function rangeFromPreset(preset){
     const today=new Date(), endStr=toDateStr(today);
     const s=(preset||"").toUpperCase().trim();
@@ -151,6 +168,8 @@ export function useMarketView() {
     const start=new Date(today); start.setDate(today.getDate()-(days-1));
     return{startStr:toDateStr(start),endStr};
   }
+
+  /* 近 N 根（保留逻辑，用于“最近 N 根”按钮） */
   function rangeFromBars(f,bars){
     const b=Math.max(1,parseInt(bars||0,10));
     const today=new Date(), endStr=toDateStr(today);
@@ -160,6 +179,8 @@ export function useMarketView() {
     const start=new Date(today); start.setDate(today.getDate()-(days-1));
     return{startStr:toDateStr(start),endStr};
   }
+
+  /* include 参数拼装 */
   function buildIncludeParam(){
     const arr=["vol"];
     if (Object.keys(maPeriodsMap.value).length > 0) arr.push("ma");
@@ -167,29 +188,39 @@ export function useMarketView() {
     if(useRSI.value)arr.push("rsi"); if(useBOLL.value)arr.push("boll");
     return arr.join(",");
   }
+
+  /* 应用预设：设置 rng 并刷新（start/end 持久化由 watcher 完成） */
   async function applyPreset(preset){
     const{startStr,endStr}=rangeFromPreset(preset);
     rng.value={mode:"preset",preset,bars:null,startStr,endStr,visible:{startStr:"",endStr:""}};
     start.value=startStr||""; end.value=endStr||"";
-    await reload();
+    await reload(true);
   }
+
+  /* 最近 N 根 → 日期窗口（保留） */
   async function applyBars(n){
     const{startStr,endStr}=rangeFromBars(freq.value,n);
     rng.value={mode:"preset",preset:"",bars:Math.max(1,parseInt(n||0,10)),startStr,endStr,visible:{startStr:"",endStr:""}};
     start.value=startStr||""; end.value=endStr||"";
-    await reload();
+    await reload(true);
   }
+
+  /* 手动日期 → 进入 manual 模式（保留） */
   async function applyManual(s,e){
     rng.value={mode:"manual",preset:"",bars:null,startStr:s||"",endStr:e||"",visible:{startStr:"",endStr:""}};
     start.value=s||""; end.value=e||"";
-    await reload();
+    await reload(true);
   }
+
+  /* 记录可见窗口（由图表联动传入） */
   function applyZoomWindow(visibleStartStr,visibleEndStr){ rng.value.visible={startStr:visibleStartStr||"",endStr:visibleEndStr||""}; }
+
+  /* 将可见窗口作为数据窗口（保留） */
   async function applyVisibleAsDataWindow(){ const vs=rng.value.visible||{}; await applyManual(vs.startStr||"",vs.endStr||""); }
 
+  /* —— 持久化与联动 —— */
   watch(code, (v)=>{ settings.setLastSymbol(v||""); reload(); });
   watch(freq, (v)=>{ settings.setFreq?.(v); scheduleAutoRefresh(); });
-  // 修复：监听从 settings 中导入的全局 adjust 状态
   watch(adjust, (v)=>{ settings.setAdjust?.(v); reload(); });
   watch(start, (v)=>settings.setLastStart(v||""));
   watch(end, (v)=>settings.setLastEnd(v||""));
@@ -201,8 +232,10 @@ export function useMarketView() {
   }, { deep:true });
   watch(maPeriodsMap, (newVal, oldVal) => { if (JSON.stringify(newVal) !== JSON.stringify(oldVal)) reload(); }, { deep: true });
 
+  /* 首次调度自动刷新 */
   scheduleAutoRefresh();
 
+  /* 导出接口 */
   return {
     code, freq, adjust, start, end, chartType, maPeriodsMap,
     useMACD, useKDJ, useRSI, useBOLL,

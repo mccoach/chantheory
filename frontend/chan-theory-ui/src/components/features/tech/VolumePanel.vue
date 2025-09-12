@@ -1,9 +1,12 @@
 <!-- src/components/features/tech/VolumePanel.vue -->
 <!-- 全量（含注释） -->
 <!-- 变更要点：
-1) render 中“是否继承 dataZoom”逻辑按主窗实现，设置变更不重置缩放；
-2) 量窗设置新增“缩量标记启用”勾选（同时也为放量标记补充勾选，保持一致性）；
-3) buildVolumeOption 已支持 enabled 开关 + 动态底部留白，面板无需再手工处理留白。
+1) 新增 lastDataLength ref，与 lastFreq 一起，用于在渲染时精确判断数据是否发生根本性变化。
+2) 重构 render 函数，当检测到频率或K线总数变化时：
+   - 强制 visCount 使用新数据的总长度计算，确保标记宽度被正确重算。
+   - 调用 setOption 时，设置 notMerge=true，重置图表（特别是 dataZoom），避免继承旧的缩放状态。
+3) 将 dataZoom 事件处理器直接指向 render，确保用户手动缩放也能实时更新标记宽度。
+4) 这确保了无论K线数量因何种原因（切换周期、调整窗长、用户缩放）增加还是减少，标记宽度都能立即、正确地自适应。
 -->
 <template>
   <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
@@ -113,7 +116,7 @@ function switchMode(next) {
   settings.patchVolSettings({ mode: m });
   mode.value = m;
   modeLabel.value = m === "amount" ? "额" : "量";
-  render(); // 由 render 内部决定是否继承 dataZoom
+  // watch 会自动触发 render
 }
 
 // 设置草稿
@@ -142,8 +145,8 @@ const settingsDraftVol = reactive({
       color: "#5470c6",
     },
   },
-  markerPump: { ...DEFAULT_VOL_SETTINGS.markerPump }, // 包含 enabled
-  markerDump: { ...DEFAULT_VOL_SETTINGS.markerDump }, // 包含 enabled
+  markerPump: { ...DEFAULT_VOL_SETTINGS.markerPump },
+  markerDump: { ...DEFAULT_VOL_SETTINGS.markerDump },
 });
 const draftRev = ref(0);
 
@@ -298,7 +301,7 @@ const VolumeSettingsContent = defineComponent({
           ])
         );
       });
-      // 放量标记（新增 enabled 勾选）
+      // 放量标记
       const pump = settingsDraftVol.markerPump;
       rows.push(
         h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
@@ -365,7 +368,7 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
-      // 缩量标记（新增 enabled 勾选 —— 需求点）
+      // 缩量标记
       const dump = settingsDraftVol.markerDump;
       rows.push(
         h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
@@ -441,7 +444,6 @@ const VolumeSettingsContent = defineComponent({
 // 打开设置
 function openSettingsDialog() {
   const vs = settings.volSettings.value || {};
-  // 柱体
   Object.assign(settingsDraftVol.volBar, {
     barPercent: Number.isFinite(+vs?.volBar?.barPercent)
       ? Math.max(10, Math.min(100, Math.round(+vs.volBar.barPercent)))
@@ -449,7 +451,6 @@ function openSettingsDialog() {
     upColor: vs?.volBar?.upColor || DEFAULT_VOL_SETTINGS.volBar.upColor,
     downColor: vs?.volBar?.downColor || DEFAULT_VOL_SETTINGS.volBar.downColor,
   });
-  // MAVOL
   const form = {};
   ["MAVOL5", "MAVOL10", "MAVOL20"].forEach((key) => {
     const d = DEFAULT_VOL_SETTINGS.mavolStyles[key];
@@ -463,7 +464,6 @@ function openSettingsDialog() {
     };
   });
   settingsDraftVol.mavolForm = form;
-  // 放/缩量标记（含 enabled）
   Object.assign(settingsDraftVol.markerPump, {
     enabled: (vs?.markerPump?.enabled ?? true) === true,
     shape: vs?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
@@ -515,30 +515,42 @@ function openSettingsDialog() {
             DEFAULT_VOL_SETTINGS.volBar.downColor,
         },
         mavolStyles,
-        markerPump: { ...settingsDraftVol.markerPump }, // 包含 enabled
-        markerDump: { ...settingsDraftVol.markerDump }, // 包含 enabled
+        markerPump: { ...settingsDraftVol.markerPump },
+        markerDump: { ...settingsDraftVol.markerDump },
       });
       dialogManager.close();
-      render();
     },
     onClose: () => dialogManager.close(),
   });
 }
 
-// 频率记录（用于是否继承 dataZoom 的判断）
+// 新增：追踪上一次的频率和数据总数
 const lastFreq = ref(vm.freq.value);
-const visibleRange = ref({ sIdx: 0, eIdx: 0 });
+const lastDataLength = ref(0);
 
-// 渲染（按主窗逻辑决定是否继承 dataZoom）
+// 渲染核心函数
 function render() {
   if (!chart) return;
-  const dzCurrent = getCurrentZoomIndexRange();
-  const totalLen = (vm.candles.value || []).length || 1;
-  const sIdx = Number.isFinite(+dzCurrent?.sIdx) ? +dzCurrent.sIdx : 0;
-  const eIdx = Number.isFinite(+dzCurrent?.eIdx)
-    ? +dzCurrent.eIdx
-    : totalLen - 1;
-  const visCount = Math.max(1, eIdx - sIdx + 1);
+
+  const totalLen = (vm.candles.value || []).length;
+  const isFreqChanged = lastFreq.value !== vm.freq.value;
+  const isDataLengthChanged = lastDataLength.value !== totalLen;
+  const forceReset = isFreqChanged || isDataLengthChanged;
+
+  let visCount;
+  if (forceReset) {
+    // 如果是数据重置场景（切换频率、调整窗长），visCount 使用新数据总长度
+    visCount = totalLen > 0 ? totalLen : 1;
+  } else {
+    // 否则（用户缩放），从 ECharts 实例获取当前可见范围
+    const dzCurrent = getCurrentZoomIndexRange();
+    const sIdx = Number.isFinite(+dzCurrent?.sIdx) ? +dzCurrent.sIdx : 0;
+    const eIdx = Number.isFinite(+dzCurrent?.eIdx)
+      ? +dzCurrent.eIdx
+      : totalLen - 1;
+    visCount = Math.max(1, eIdx - sIdx + 1);
+  }
+
   const hostWidth = host.value ? host.value.clientWidth : 0;
 
   const option = buildVolumeOption(
@@ -552,47 +564,15 @@ function render() {
     {}
   );
 
-  // 与主窗一致：是否允许继承上次 dataZoom
-  let allowCarryZoom = lastFreq.value === vm.freq.value;
-  const prevOpt = chart.getOption?.();
-  const lenNow = (vm.candles.value || []).length;
-  if (
-    allowCarryZoom &&
-    prevOpt &&
-    Array.isArray(prevOpt.dataZoom) &&
-    prevOpt.dataZoom.length
-  ) {
-    const z = prevOpt.dataZoom.find((x) => typeof x.startValue !== "undefined");
-    if (
-      z &&
-      typeof z.endValue !== "undefined" &&
-      lenNow > 0 &&
-      Number(z.endValue) >= lenNow - 1
-    ) {
-      allowCarryZoom = false;
-    }
-  } else if (lastFreq.value !== vm.freq.value) {
-    allowCarryZoom = false;
-  }
-  if (
-    allowCarryZoom &&
-    prevOpt &&
-    Array.isArray(prevOpt.dataZoom) &&
-    prevOpt.dataZoom.length
-  ) {
-    option.dataZoom = prevOpt.dataZoom;
-  }
+  // 如果需要重置，第二个参数为 true
+  chart.setOption(option, forceReset);
 
-  chart.setOption(option, true);
+  // 渲染后更新状态
   lastFreq.value = vm.freq.value;
+  lastDataLength.value = totalLen;
 
-  const dz2 = getCurrentZoomIndexRange();
-  if (dz2) {
-    visibleRange.value = { sIdx: dz2.sIdx, eIdx: dz2.eIdx };
-    recomputeVisibleStats({ startValue: dz2.sIdx, endValue: dz2.eIdx });
-  } else {
-    recomputeVisibleStats({ startValue: sIdx, endValue: eIdx });
-  }
+  // 更新统计信息
+  recomputeVisibleStats();
 }
 
 function getCurrentZoomIndexRange() {
@@ -616,7 +596,7 @@ function getCurrentZoomIndexRange() {
       const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
       return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
     }
-    const z2 = dz[0];
+    const z2 = dz.find((x) => typeof x.start === "number");
     if (z2 && typeof z2.start === "number" && typeof z2.end === "number") {
       const maxIdx = len - 1;
       const sIdx = Math.round((z2.start / 100) * maxIdx);
@@ -630,11 +610,12 @@ function getCurrentZoomIndexRange() {
   return null;
 }
 
-function recomputeVisibleStats(params) {
+function recomputeVisibleStats() {
   try {
-    const dates = (vm.candles.value || []).map((d) => d.t);
-    const len = dates.length;
-    if (!len) {
+    const range = getCurrentZoomIndexRange();
+    const len = (vm.candles.value || []).length;
+
+    if (!len || !range) {
       stat.value = {
         total: "-",
         mean: "-",
@@ -642,27 +623,9 @@ function recomputeVisibleStats(params) {
         pumpDays: 0,
         maxConsecDump: 0,
       };
-      visibleRange.value = { sIdx: 0, eIdx: 0 };
       return;
     }
-    const info = (params && params.batch && params.batch[0]) || params || {};
-    let sIdx = 0,
-      eIdx = len - 1;
-    if (
-      typeof info.startValue !== "undefined" &&
-      typeof info.endValue !== "undefined"
-    ) {
-      sIdx = Math.max(0, Math.min(len - 1, Number(info.startValue)));
-      eIdx = Math.max(0, Math.min(len - 1, Number(info.endValue)));
-    } else if (typeof info.start === "number" && typeof info.end === "number") {
-      const maxIdx = len - 1;
-      sIdx = Math.round((info.start / 100) * maxIdx);
-      eIdx = Math.round((info.end / 100) * maxIdx);
-      sIdx = Math.max(0, Math.min(maxIdx, sIdx));
-      eIdx = Math.max(0, Math.min(maxIdx, eIdx));
-    }
-    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
-    visibleRange.value = { sIdx, eIdx };
+    const { sIdx, eIdx } = range;
 
     const vs = settings.volSettings.value || {};
     const baseSeries =
@@ -811,28 +774,14 @@ onMounted(async () => {
     });
   } catch {}
   try {
-    ro = new ResizeObserver(() =>
-      chart?.resize({
-        width: host.value.clientWidth,
-        height: host.value.clientHeight,
-      })
-    );
+    ro = new ResizeObserver(render); // 尺寸变化时重绘
     ro.observe(el);
   } catch {}
-  winResizeHandler = () =>
-    chart?.resize({
-      width: host.value.clientWidth,
-      height: host.value.clientHeight,
-    });
+  winResizeHandler = render; // 窗口变化时重绘
   window.addEventListener("resize", winResizeHandler);
 
   await nextTick();
-  requestAnimationFrame(() =>
-    chart?.resize({
-      width: host.value.clientWidth,
-      height: host.value.clientHeight,
-    })
-  );
+  requestAnimationFrame(render);
 
   detachSync = zoomSync.attach(
     "volume",
@@ -840,31 +789,9 @@ onMounted(async () => {
     () => (vm.candles.value || []).length
   );
 
-  chart.on("dataZoom", (params) => {
-    recomputeVisibleStats(params);
-    const info = (params && params.batch && params.batch[0]) || params || {};
-    if (
-      typeof info.startValue !== "undefined" &&
-      typeof info.endValue !== "undefined"
-    ) {
-      visibleRange.value = { sIdx: info.startValue, eIdx: info.endValue };
-    } else if (typeof info.start === "number" && typeof info.end === "number") {
-      const len = (vm.candles.value || []).length;
-      const maxIdx = Math.max(0, len - 1);
-      const sIdx = Math.round((info.start / 100) * maxIdx);
-      const eIdx = Math.round((info.end / 100) * maxIdx);
-      visibleRange.value = {
-        sIdx: Math.max(0, Math.min(maxIdx, Math.min(sIdx, eIdx))),
-        eIdx: Math.max(0, Math.min(maxIdx, Math.max(sIdx, eIdx))),
-      };
-    }
-    render();
-  });
+  // 关键：dataZoom 事件直接触发 render
+  chart.on("dataZoom", render);
 
-  visibleRange.value = {
-    sIdx: 0,
-    eIdx: Math.max(0, (vm.candles.value || []).length - 1),
-  };
   render();
   updateHeaderFromCurrent();
 });
@@ -890,7 +817,6 @@ onBeforeUnmount(() => {
   }
 });
 
-// 统一 watcher：交由 render 内部决定是否继承 dataZoom
 watch(
   () => [
     vm.candles.value,
@@ -927,11 +853,7 @@ function onResizeHandleMove(e) {
   const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
   if (wrap.value) {
     wrap.value.style.height = `${Math.floor(next)}px`;
-    if (chart && host.value)
-      chart.resize({
-        width: host.value.clientWidth,
-        height: host.value.clientHeight,
-      });
+    render(); // 拖拽时也重绘
   }
 }
 function onResizeHandleUp() {
