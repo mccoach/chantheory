@@ -1,106 +1,165 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\constants\index.js  // 文件路径
-// ==============================                                          // 说明：前端全局常量与默认方案（全量+新增缠论默认）
-// 说明：本文件在原有基础上，追加 CHAN_DEFAULTS 与 CHAN_MARKER_PRESETS 两个导出常量。 // 本次仅追加，原导出保持不变
-// ==============================                                          // 结束头注释
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\constants\index.js
+// ==============================
+// 说明：集中管理“前端可见设置项”与“设置性质的不可见控制参数”的默认值。
+// - 本文件是“唯一可信源”，所有默认值由此导出，其他文件一律引用这里的默认。
+// - 组织顺序按“功能与逻辑”分组：应用偏好 → 主题/调色 → 导出/交互 → 图表默认 → 指标默认（MA/量窗）→ 缠论默认与预设 → 窗口预设。
+// - 本轮扩展：
+//   * 新增 DEFAULT_APP_PREFERENCES，含 freq/windowPreset 等（窗长与频率解耦，窗口预设默认 'ALL'，频率默认 '1d'）。
+//   * 新增 DEFAULT_EXPORT_SETTINGS（导出背景/像素比/HTML是否嵌数据）。
+//   * 新增 DEFAULT_VOL_MARKER_SIZE（量/额放缩量标记尺寸与偏移控制，之前分散在 options.js 内部常量）。
+//   * 保留并集中 DEFAULT_KLINE_STYLE / DEFAULT_MA_CONFIGS / DEFAULT_VOL_SETTINGS / CHAN_DEFAULTS / CHAN_MARKER_PRESETS。
+//   * 统一窗口按钮集合 WINDOW_PRESETS。
+// ==============================
 
-// 统一样式调色板（线/柱）                                               // 原有导出：STYLE_PALETTE
+// ------------------------------
+// 一、应用偏好（用户可操作的全局偏好）
+// ------------------------------
+export const DEFAULT_APP_PREFERENCES = {
+  // 主图类型（kline|line），用户可切换，启动时从本地读取，失败回退此值
+  chartType: "kline",
+  // 频率（与窗长解耦），启动时从本地读取，失败回退 '1d'
+  freq: "1d",
+  // 复权选项（none|qfq|hfq），启动时从本地读取，失败回退 'none'
+  adjust: "qfq",
+  // 窗长预设（与频率解耦），启动时从本地读取，失败回退 'ALL'
+  windowPreset: "ALL",
+  // 指标开关（默认仅启用 MACD）
+  useMACD: true,
+  useKDJ: false,
+  useRSI: false,
+  useBOLL: false,
+};
+
+// ------------------------------
+// 二、主题与调色（供图表/组件使用）
+// ------------------------------
 export const STYLE_PALETTE = {
-  // 样式调色板对象
+  // 折线配色与样式（颜色尽量与 ECharts 默认风格相近）
   lines: [
-    // 折线颜色/样式预设
-    { color: "#ee6666", width: 1, style: "solid" }, // 线1：红
-    { color: "#fac858", width: 1, style: "solid" }, // 线2：黄
-    { color: "#5470c6", width: 1, style: "solid" }, // 线3：蓝
-    { color: "#91cc75", width: 1, style: "solid" }, // 线4：绿
-    { color: "#fc8452", width: 1, style: "solid" }, // 线5：橙
-    { color: "#73c0de", width: 1, style: "solid" }, // 线6：青
-    { color: "#9a60b4", width: 1, style: "solid" }, // 线7：紫
-    { color: "#ea7ccc", width: 1, style: "solid" }, // 线8：粉
-  ], // 结束 lines
+    { color: "#ee6666", width: 1, style: "solid" },
+    { color: "#fac858", width: 1, style: "solid" },
+    { color: "#5470c6", width: 1, style: "solid" },
+    { color: "#91cc75", width: 1, style: "solid" },
+    { color: "#fc8452", width: 1, style: "solid" },
+    { color: "#73c0de", width: 1, style: "solid" },
+    { color: "#9a60b4", width: 1, style: "solid" },
+    { color: "#ea7ccc", width: 1, style: "solid" },
+  ],
+  // 柱图配色（量窗与 MACD 柱使用）
   bars: {
-    // 柱图配色
     volume: { up: "#ef5350", down: "#26a69a" }, // 量柱：涨红/跌绿
-    macd: { positive: "#d94e4e", negative: "#47a69b" }, // MACD 柱：正/负色
-  }, // 结束 bars
-}; // 结束 STYLE_PALETTE
+    macd: { positive: "#d94e4e", negative: "#47a69b" }, // MACD 柱：正/负
+  },
+};
 
-// 主窗 MA 默认配置（固定 key → 属性）                                 // 原有导出：DEFAULT_MA_CONFIGS
+// ------------------------------
+// 三、导出与交互控制（不可见但具“设置”性质的参数）
+// ------------------------------
+export const DEFAULT_EXPORT_SETTINGS = {
+  // 图片导出背景色（与页面主背景一致）
+  background: "#111",
+  // PNG/JPG 像素比（内插缩放）
+  pixelRatio: 2,
+  // HTML 快照是否默认内嵌数据（合规默认不内嵌）
+  includeDataDefault: false,
+};
+
+// 量/额标记（放量/缩量）的可视尺寸控制（图内不可见设置项，集中管理以便统一调整）
+export const DEFAULT_VOL_MARKER_SIZE = {
+  // 宽度像素下限/上限（根据可见柱数与容器宽度估算后再夹取）
+  minPx: 1,
+  maxPx: 16,
+  // 基准高度（像素）
+  baseHeightPx: 10,
+  // 垂直偏移倍数（用于将标记与柱底对齐，留出视觉间距）
+  offsetK: 1.2,
+};
+
+// ------------------------------
+// 四、图表默认（主 K 线样式）
+// ------------------------------
+export const DEFAULT_KLINE_STYLE = {
+  // 柱宽百分比（仅当 subType='candlestick' 或 'bar' 时生效）
+  barPercent: 100,
+  // 主图阳/阴颜色（与主题涨跌色对应）
+  upColor: "#f56c6c",
+  downColor: "#26a69a",
+  // K 线子类型：'candlestick'（蜡烛图）或 'bar'（H-L 柱）
+  subType: "candlestick",
+};
+
+// ------------------------------
+// 五、指标默认（MA / 量窗）
+// ------------------------------
+// 5.1 MA 默认（固定 key → 属性）
 export const DEFAULT_MA_CONFIGS = {
-  // MA 默认配置
   MA5: {
-    // MA5
-    enabled: true, // 启用
-    period: 5, // 周期
-    color: STYLE_PALETTE.lines[0].color, // 颜色
-    width: 1, // 线宽
-    style: "solid", // 线型
-  }, // 结束 MA5
+    enabled: true,
+    period: 5,
+    color: STYLE_PALETTE.lines[0].color,
+    width: 1,
+    style: "solid",
+  },
   MA10: {
-    // MA10
-    enabled: true, // 启用
-    period: 10, // 周期
-    color: STYLE_PALETTE.lines[1].color, // 颜色
-    width: 1, // 线宽
-    style: "solid", // 线型
-  }, // 结束 MA10
+    enabled: true,
+    period: 10,
+    color: STYLE_PALETTE.lines[1].color,
+    width: 1,
+    style: "solid",
+  },
   MA20: {
-    // MA20
-    enabled: true, // 启用
-    period: 20, // 周期
-    color: STYLE_PALETTE.lines[2].color, // 颜色
-    width: 1, // 线宽
-    style: "solid", // 线型
-  }, // 结束 MA20
+    enabled: true,
+    period: 20,
+    color: STYLE_PALETTE.lines[2].color,
+    width: 1,
+    style: "solid",
+  },
   MA30: {
-    // MA30
-    enabled: true, // 启用
-    period: 30, // 周期
-    color: STYLE_PALETTE.lines[3].color, // 颜色
-    width: 1, // 线宽
-    style: "dashed", // 线型
-  }, // 结束 MA30
+    enabled: true,
+    period: 30,
+    color: STYLE_PALETTE.lines[3].color,
+    width: 1,
+    style: "dashed",
+  },
   MA60: {
-    // MA60
-    enabled: true, // 启用
-    period: 60, // 周期
-    color: STYLE_PALETTE.lines[4].color, // 颜色
-    width: 1, // 线宽
-    style: "dashed", // 线型
-  }, // 结束 MA60
+    enabled: true,
+    period: 60,
+    color: STYLE_PALETTE.lines[4].color,
+    width: 1,
+    style: "dashed",
+  },
   MA120: {
-    // MA120
-    enabled: true, // 启用
-    period: 120, // 周期
-    color: STYLE_PALETTE.lines[5].color, // 颜色
-    width: 1, // 线宽
-    style: "dotted", // 线型
-  }, // 结束 MA120
+    enabled: true,
+    period: 120,
+    color: STYLE_PALETTE.lines[5].color,
+    width: 1,
+    style: "dotted",
+  },
   MA250: {
-    // MA250
-    enabled: true, // 启用
-    period: 250, // 周期
-    color: STYLE_PALETTE.lines[6].color, // 颜色
-    width: 1, // 线宽
-    style: "dotted", // 线型
-  }, // 结束 MA250
-}; // 结束 DEFAULT_MA_CONFIGS
+    enabled: true,
+    period: 250,
+    color: STYLE_PALETTE.lines[6].color,
+    width: 1,
+    style: "dotted",
+  },
+};
 
-// 量窗默认配置（行为+样式）                                            // 原有导出：DEFAULT_VOL_SETTINGS
+// 5.2 量窗默认（模式、柱样式、MAVOL 三线、放/缩量标记）
 export const DEFAULT_VOL_SETTINGS = {
-  // VOL 默认配置
-  mode: "vol", // 模式：'vol' | 'amount'
-  unit: "auto", // 单位策略（当前仅 auto）
-  rvolN: 20, // RVOL 基数天数（仅日线）
-
+  // 模式（'vol'/'amount'），默认显示成交量
+  mode: "vol",
+  // 单位策略（保留占位，目前仅 'auto'）
+  unit: "auto",
+  // RVOL 计算的基期（仅日线可见时用于提示/统计，当前逻辑中仅占位）
+  rvolN: 20,
+  // 柱体样式
   volBar: {
-    // 柱体样式
-    barPercent: 100, // 柱宽百分比
-    upColor: STYLE_PALETTE.bars.volume.up, // 阳线色
-    downColor: STYLE_PALETTE.bars.volume.down, // 阴线色
-  }, // 结束 volBar
-
+    barPercent: 100,
+    upColor: STYLE_PALETTE.bars.volume.up,
+    downColor: STYLE_PALETTE.bars.volume.down,
+  },
+  // MAVOL 三条线样式（开启/周期/线宽/线型/颜色）
   mavolStyles: {
-    // MAVOL 三条
     MAVOL5: {
       enabled: true,
       period: 5,
@@ -108,7 +167,7 @@ export const DEFAULT_VOL_SETTINGS = {
       style: "solid",
       color: STYLE_PALETTE.lines[0].color,
       namePrefix: "MAVOL",
-    }, // MAVOL5
+    },
     MAVOL10: {
       enabled: true,
       period: 10,
@@ -116,7 +175,7 @@ export const DEFAULT_VOL_SETTINGS = {
       style: "solid",
       color: STYLE_PALETTE.lines[1].color,
       namePrefix: "MAVOL",
-    }, // MAVOL10
+    },
     MAVOL20: {
       enabled: true,
       period: 20,
@@ -124,65 +183,83 @@ export const DEFAULT_VOL_SETTINGS = {
       style: "solid",
       color: STYLE_PALETTE.lines[2].color,
       namePrefix: "MAVOL",
-    }, // MAVOL20
-  }, // 结束 mavolStyles
+    },
+  },
+  // 放量/缩量标记（启用/符号/颜色/阈值）
+  markerPump: {
+    enabled: true,
+    shape: "triangle",
+    color: "#FFFF00",
+    threshold: 1.5,
+  },
+  markerDump: {
+    enabled: true,
+    shape: "diamond",
+    color: "#00ff00",
+    threshold: 0.7,
+  },
+};
 
-  markerPump: { enabled: true, shape: "triangle", color: "#FFFF00", threshold: 1.5 }, // 放量标记默认
-  markerDump: { enabled: true, shape: "diamond", color: "#00ff00", threshold: 0.7 }, // 缩量标记默认
-}; // 结束 DEFAULT_VOL_SETTINGS
-
-// 每种 K 线周期对应的“默认时间窗口预设”                               // 原有导出：DEFAULT_WINDOW_BY_FREQ
-export const DEFAULT_WINDOW_BY_FREQ = {
-  // 周期默认窗口
-  "1m": "ALL", // 1 分钟 → 近 5 天
-  "5m": "ALL", // 5 分钟 → 近 1 月
-  "15m": "ALL", // 15 分钟 → 近 1 月
-  "30m": "ALL", // 30 分钟 → 近 3 月
-  "60m": "ALL", // 60 分钟 → 近 6 月
-  "1d": "ALL", // 日线 → 近 1 年
-  "1w": "ALL", // 周线 → 近 3 年
-  "1M": "ALL", // 月线 → 近 5 年
-}; // 结束 DEFAULT_WINDOW_BY_FREQ
-
-// ==============================                                          // 追加区域：缠论（Chan）相关默认与视觉预设
-// 追加：缠论标记默认与视觉预设（Chan）                                   // 注：仅新增导出，不影响已有导出
+// ------------------------------
+// 六、缠论默认与视觉预设
+// ------------------------------
 export const CHAN_DEFAULTS = {
-  // 缠论默认设置
-  showUpDownMarkers: true, // 是否显示“去包含后”的涨跌标记（默认开启）
-  anchorPolicy: "right", // 承载点策略：'right' | 'extreme'（右端或极值）
-  visualPreset: "tri-default", // 视觉预设键（见 CHAN_MARKER_PRESETS）
-  markerMinPx: 1, // 标记最小像素
-  markerMaxPx: 14, // 标记最大像素
-  opacity: 0.9, // 标记透明度
-  // borderColor: "#99aabb", // 标记边框色（淡灰蓝）
-  maxVisibleMarkers: 1000, // 可见窗口内最大标记数（超过触发抽稀）
-  // 新增：单独配置上涨/下跌标记的形状与颜色（可覆盖预设）
+  // 启用“去包含后涨跌标记”叠加层
+  showUpDownMarkers: true,
+  // 承载点策略（'right' | 'extreme'）
+  anchorPolicy: "extreme",
+  // 视觉预设键（参见 CHAN_MARKER_PRESETS）
+  visualPreset: "tri-default",
+  // 标记尺寸边界（像素）
+  markerMinPx: 1,
+  markerMaxPx: 14,
+  // 标记透明度
+  opacity: 0.9,
+  // 上涨/下跌标记的形状与颜色（可与预设不同步，优先级更高）
   upShape: "triangle",
   upColor: "#f56c6c",
   downShape: "triangle",
   downColor: "#00ff00",
-}; // 结束 CHAN_DEFAULTS
+  // 可见窗口最大标记数（超过则抽稀）
+  maxVisibleMarkers: 1000,
+};
 
+// 缠论标记视觉预设（shape/rotate/fill）
 export const CHAN_MARKER_PRESETS = {
-  // 缠论标记视觉预设
   "tri-default": {
-    // 三角预设（与 K 线涨跌色一致）
-    up: { shape: "triangle", rotate: 0, fill: "#f56c6c" }, // 上涨：正三角（红）
-    down: { shape: "triangle", rotate: 180, fill: "#00ff00" }, // 下跌：倒三角（绿）
-  }, // 结束 tri-default
+    up: { shape: "triangle", rotate: 0, fill: "#f56c6c" },
+    down: { shape: "triangle", rotate: 180, fill: "#00ff00" },
+  },
   diamond: {
-    // 菱形预设
-    up: { shape: "diamond", rotate: 0, fill: "#f56c6c" }, // 上涨：菱形红
-    down: { shape: "diamond", rotate: 0, fill: "#00ff00" }, // 下跌：菱形绿
-  }, // 结束 diamond
+    up: { shape: "diamond", rotate: 0, fill: "#f56c6c" },
+    down: { shape: "diamond", rotate: 0, fill: "#00ff00" },
+  },
   dot: {
-    // 圆点预设
-    up: { shape: "circle", rotate: 0, fill: "#f56c6c" }, // 上涨：圆点红
-    down: { shape: "circle", rotate: 0, fill: "#00ff00" }, // 下跌：圆点绿
-  }, // 结束 dot
+    up: { shape: "circle", rotate: 0, fill: "#f56c6c" },
+    down: { shape: "circle", rotate: 0, fill: "#00ff00" },
+  },
   square: {
-    // 方块预设
-    up: { shape: "rect", rotate: 0, fill: "#f56c6c" }, // 上涨：方块红
-    down: { shape: "rect", rotate: 0, fill: "#00ff00" }, // 下跌：方块绿
-  }, // 结束 square
-}; // 结束 CHAN_MARKER_PRESETS
+    up: { shape: "rect", rotate: 0, fill: "#f56c6c" },
+    down: { shape: "rect", rotate: 0, fill: "#00ff00" },
+  },
+};
+
+// ------------------------------
+// 七、窗口预设（主窗控制条按钮集合）
+// ------------------------------
+export const WINDOW_PRESETS = [
+  "5D",
+  "10D", // 近 5、10 天
+  "1M",
+  "3M",
+  "6M", // 近 1、3、6 月（近似）
+  "YTD", // 年初至今
+  "1Y",
+  "3Y",
+  "5Y", // 近 1、3、5 年（近似）
+  "ALL", // 全部（默认预设）
+];
+
+// 备注：历史上曾存在“按频率选择默认窗长”的映射（DEFAULT_WINDOW_BY_FREQ），现已与频率解绑，
+//       由本文件 DEFAULT_APP_PREFERENCES.windowPreset 与 WINDOW_PRESETS 统一管理窗口预设逻辑。
+//       若外部仍有残留引用该映射的代码，应当移除（本轮已删去相关依赖）。

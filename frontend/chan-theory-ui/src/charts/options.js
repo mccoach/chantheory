@@ -1,71 +1,56 @@
-// src/charts/options.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options.js
 // ==============================
-// 说明：ECharts 选项生成器（前端纯函数层）
-// - 提供主图/量窗/指标窗的 option 组装
-// - 本次修改（修复 H-L 柱图例颜色）：
-//   1) 将 klineStyle, reducedBars, mapOrigToReduced 传入 makeMainTooltipFormatter，
-//      使其能获取涨跌颜色配置、去包含合并后的 K 线及其映射关系。
-//   2) 在 makeMainTooltipFormatter 内部，为 H-L 柱模式增加特殊逻辑：
-//      - 如果是去包含合并后的 H-L 柱，则根据其 `dir` 属性决定颜色。
-//      - 并且仅在承载点（anchor_idx）位置显示颜色圆点，其他被合并的位置显示透明圆点。
-// - 其余逻辑保持不变。
+// 说明：ECharts 选项生成（主/量/指标）。
+// 本版改动（与前文一致、补全中断部分）：
+// 1) 量窗“放/缩量标记”尺寸控制由 constants/index.js 的 DEFAULT_VOL_MARKER_SIZE 提供，去除写死常量；
+// 2) HL 柱模式下且当前位置为“去包含后承载点”时，主窗浮窗在 HL柱 行之后、O 之前追加两行：
+//    G（处理完包含关系后的高点价格 reducedBar.hi）/ D（处理完包含关系后的低点价格 reducedBar.lo）。
+// 其它渲染逻辑保持不变。
+// ==============================
 
-// 引入主题与常量（颜色/默认参数）
-import { getChartTheme } from "@/charts/theme";
-import { STYLE_PALETTE, DEFAULT_VOL_SETTINGS } from "@/constants";
+import { getChartTheme } from "@/charts/theme"; // 主题读取
+import {
+  STYLE_PALETTE,
+  DEFAULT_VOL_SETTINGS,
+  DEFAULT_VOL_MARKER_SIZE,
+} from "@/constants"; // 集中默认
 
-// 固定 tooltip 显示侧的全局状态（left/right）
+// 全局 tooltip 侧边（固定定位）
 let GLOBAL_TIP_SIDE = "left";
 
 /**
- * 创建一个固定位置的 tooltip 定位器（主/量/指标复用）
- * - defaultSide：初始侧（left/right）
- * - getOffset：可选函数返回 {x,y} 偏移
+ * 创建固定 tooltip 定位器（主/量/指标复用）
  */
 export function createFixedTooltipPositioner(defaultSide = "left", getOffset) {
-  // 如果全局未设置过侧边，则采用传入默认值
   if (GLOBAL_TIP_SIDE !== "left" && GLOBAL_TIP_SIDE !== "right") {
     GLOBAL_TIP_SIDE = defaultSide === "right" ? "right" : "left";
   }
-  // 返回实际供 ECharts 调用的定位函数
   return function (pos, _params, dom, _rect, size) {
-    // 读取宿主元素与宽度
     const host = dom && dom.parentElement ? dom.parentElement : null;
     const hostRect = host ? host.getBoundingClientRect() : { width: 800 };
-    // 当前 tooltip 内容宽度（估算）
     const tipW = (size && size.contentSize && size.contentSize[0]) || 260;
     const margin = 8;
     const x = Array.isArray(pos) ? pos[0] : 0;
-    // 判断是否靠近左右边界，决定显示侧
     const nearLeft = x <= tipW + margin + 12;
     const nearRight = hostRect.width - x <= tipW + margin + 12;
     if (nearLeft) GLOBAL_TIP_SIDE = "right";
     else if (nearRight) GLOBAL_TIP_SIDE = "left";
-
-    // 计算固定位置（左上 or 右上）
     const baseX =
       GLOBAL_TIP_SIDE === "left"
         ? margin
         : Math.max(margin, hostRect.width - tipW - margin);
     const baseY = 8;
-
-    // 可选偏移
     let off = { x: 0, y: 0 };
     try {
       const t = typeof getOffset === "function" ? getOffset() : null;
       if (t && typeof t.x === "number" && typeof t.y === "number") off = t;
     } catch {}
-
-    // 返回绝对位置（相对画布）
     return [baseX + (off.x || 0), baseY + (off.y || 0)];
   };
 }
 
 /**
  * 多窗体缩放同步（主/量/指标）
- * - attach：图表加入同步组
- * - detach：图表移除同步组
- * - setRangeByIndex：设置统一范围（索引制）
  */
 export const zoomSync = (function () {
   const charts = new Map();
@@ -329,6 +314,7 @@ function applyUi(option, ui, { dates, freq }) {
 
 /**
  * 主图 tooltip 格式化函数
+ * 新增：HL 柱模式下、承载点位置追加 G/D 行（reducedBar.hi / reducedBar.lo）。
  */
 function makeMainTooltipFormatter({
   theme,
@@ -339,7 +325,7 @@ function makeMainTooltipFormatter({
   adjust,
   klineStyle,
   reducedBars,
-  mapOrigToReduced, // 新增
+  mapOrigToReduced, // 用于确定当前 idx 是否为承载点
 }) {
   const list = asArray(candles);
   return function (params) {
@@ -363,31 +349,61 @@ function makeMainTooltipFormatter({
       const kLabel =
         kSeries && kSeries.seriesName === "H-L Bar" ? "H-L柱" : "K线";
 
-      let dotColor = "transparent"; // 默认透明
-
+      // 颜色小点
+      let dotColor = "transparent";
       if (
         ks.subType === "bar" &&
         Array.isArray(reducedBars) &&
         reducedBars.length
       ) {
-        // H-L 柱图且是去包含模式：根据 dir 和 anchor_idx 决定颜色
         const mapEntry = mapOrigToReduced && mapOrigToReduced[idx];
         if (mapEntry) {
           const reducedBar = reducedBars[mapEntry.reducedIndex];
-          // 仅在承载点显示颜色
           if (reducedBar && idx === reducedBar.anchor_idx) {
             dotColor = reducedBar.dir > 0 ? upColor : downColor;
           }
         }
       } else {
-        // 默认 K 线或普通 H-L 柱：根据 OHLC 决定颜色
         const isUp = Number(k.c) >= Number(k.o);
         dotColor = isUp ? upColor : downColor;
       }
 
+      // 输出 K/H-L 标题行
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>${kLabel}</div>`
       );
+
+      // 新增：在 HL 柱模式且当前位置为“去包含后承载点”时，追加 G/D 两行（位于 O 行之前）
+      if (
+        ks.subType === "bar" &&
+        Array.isArray(reducedBars) &&
+        reducedBars.length &&
+        mapOrigToReduced &&
+        mapOrigToReduced[idx]
+      ) {
+        const entry = mapOrigToReduced[idx];
+        const rb =
+          entry && typeof entry.reducedIndex === "number"
+            ? reducedBars[entry.reducedIndex]
+            : null;
+        // 必须要求当前 idx 为承载点，保证“有 HL 柱”
+        if (rb && idx === rb.anchor_idx) {
+          // G = 去包含后的高点价格（rb.hi）
+          rows.push(
+            `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>G: ${fmt3(
+              rb.hi
+            )}</div>`
+          );
+          // D = 去包含后的低点价格（rb.lo）
+          rows.push(
+            `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>D: ${fmt3(
+              rb.lo
+            )}</div>`
+          );
+        }
+      }
+
+      // 继续输出 O/H/L/C（保持原顺序与样式）
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>O: ${fmt3(
           k.o
@@ -409,6 +425,7 @@ function makeMainTooltipFormatter({
         )}</div>`
       );
     } else {
+      // 折线模式（Close）
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:#03a9f4;"></span>Close: ${fmt3(
           k.c
@@ -416,6 +433,7 @@ function makeMainTooltipFormatter({
       );
     }
 
+    // 追加各条 MA（或其它线）的值
     for (const p of params) {
       if (p.seriesType === "line" && p.seriesName !== "Close") {
         const val = Array.isArray(p.value)
@@ -463,7 +481,7 @@ function makeVolumeTooltipFormatter({
       : bar?.value;
     const baseValText = fmtUnit(baseRawVal, unitInfo);
     const hasPump = params.some((pp) => pp.seriesName === "放量标记");
-    const hasDump = params.some((pp) => pp.seriesName === "缩量标记");
+    const hasDump = params.some((pp) => pp.seriesName === "缩量���记");
     const statusTag = hasPump ? "（放）" : hasDump ? "（缩）" : "";
     const periods = Object.keys(mavolMap || {})
       .map((x) => +x)
@@ -537,7 +555,7 @@ export function buildMainChartOption(
     adjust,
     reducedBars,
     mapOrigToReduced,
-  }, // 新增 mapOrigToReduced
+  },
   ui
 ) {
   const theme = getChartTheme();
@@ -685,7 +703,7 @@ export function buildMainChartOption(
         adjust,
         klineStyle,
         reducedBars,
-        mapOrigToReduced, // 关键修改
+        mapOrigToReduced, // 关键修改：提供映射以判断是否承载点
       }),
     },
     xAxis: { type: "category", data: dates },
@@ -811,14 +829,18 @@ export function buildVolumeOption(
           Math.floor(((hostW * 0.88) / visCount) * (barPercent / 100))
         )
       : 8;
-  const MARKER_W_MIN = 1,
-    MARKER_W_MAX = 16;
+  // 改为引用集中默认（最小/最大宽度、基准高度、偏移倍数）
+  const MARKER_W_MIN = DEFAULT_VOL_MARKER_SIZE.minPx;
+  const MARKER_W_MAX = DEFAULT_VOL_MARKER_SIZE.maxPx;
   const markerW = Math.max(
     MARKER_W_MIN,
     Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
   );
-  const markerH = 10;
-  const symbolOffsetBelow = [0, Math.round(markerH * 1.2)];
+  const markerH = DEFAULT_VOL_MARKER_SIZE.baseHeightPx;
+  const symbolOffsetBelow = [
+    0,
+    Math.round(markerH * DEFAULT_VOL_MARKER_SIZE.offsetK),
+  ];
   const primPeriod = periods.length ? +periods[0].period : null;
   const primSeries = primPeriod ? mavolMap[primPeriod] : null;
   const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
