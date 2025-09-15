@@ -63,7 +63,7 @@ def health() -> Dict[str, Any]:  # 函数声明
         "ok": True,  # 应用可用
         "time": datetime.now().isoformat(),  # 当前时间（ISO）
         "timezone": settings.timezone,  # 时区（Asia/Shanghai）
-        "db_path": str(settings.db_path),  # DB 路径
+        "db_path": str(settings.db_path) if settings.debug else "[hidden]",  # DB 路径
         "background_tasks": get_task_status(),  # 后台任务状态快照
     }
 

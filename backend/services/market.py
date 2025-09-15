@@ -41,7 +41,7 @@ from backend.utils.time import (  # 时间工具
 )
 from backend.services.indicators import ma, macd, kdj, rsi, boll  # 指标
 from backend.datasource.fetchers import fetch_period_ms  # 抓取入口
-from backend.utils.logger import get_logger  # 日志
+from backend.utils.logger import get_logger, log_event  # 日志（结构化）
 
 _LOG = get_logger("market")  # 命名 logger
 
@@ -182,10 +182,14 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
         this_fri = now + timedelta(days=days_to_fri)
         d = this_fri
         for _ in range(7):
-            if _lazy_is_trading_day(d): break
+            if _lazy_is_trading_day(d):
+                break
             d = d - timedelta(days=1)
         d_1500 = d.replace(hour=15, minute=0, second=0, microsecond=0)
-        return _ms_from_dt(d_1500 if (now - grace) >= d_1500 else datetime.fromtimestamp(_prev_week_last_trading_1500(now)/1000.0, tz=d.tzinfo))
+        if (now - grace) >= d_1500:
+            return _ms_from_dt(d_1500)
+        prev_week_1500 = _last_week_last_trading_1500(now)  # NEW: 可读性更好
+        return _ms_from_dt(prev_week_1500)
 
     if freq == "1M":
         # 月：自然月末，若休市则前移到最近交易日；未到点则上月末
@@ -229,6 +233,19 @@ def _prev_week_last_trading_1500(now: datetime) -> int:
         if _lazy_is_trading_day(x): break
         x = x - timedelta(days=1)
     return _ms_from_dt(x.replace(hour=15, minute=0, second=0, microsecond=0))
+
+def _last_week_last_trading_1500(now: datetime) -> datetime:
+    """上周最后一个交易日的 15:00（返回 datetime）。"""
+    d = now - timedelta(days=7)
+    weekday = d.weekday()
+    days_to_fri = 4 - weekday
+    fri = d + timedelta(days=days_to_fri)
+    x = fri
+    for _ in range(7):
+        if _lazy_is_trading_day(x):
+            break
+        x = x - timedelta(days=1)
+    return x.replace(hour=15, minute=0, second=0, microsecond=0)
 
 def _to_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     """SQLite 行 → DataFrame（齐列 + 升序）。"""
@@ -373,7 +390,14 @@ def _fallback_resample_from_1m(symbol: str, target_freq: str, sec_type: str, pre
         upsert_cache_candles(rows)
         rebuild_cache_meta(symbol, target_freq, "none")
         try:
-            _LOG.info(f'{{"event":"fallback.resample","symbol":"{symbol}","freq":"{target_freq}","from":"1m","rows":{len(rows)}}}')
+            log_event(
+                _LOG, service="market", level="INFO",
+                file=__file__, func="_fallback_resample_from_1m", line=0, trace_id=None,
+                event="fallback.resample", message="resampled minutes",
+                extra={"category": "resample", "action": "done",
+                       "request": {"symbol": symbol, "from": "1m", "target_freq": target_freq},
+                       "result": {"rows": len(rows), "summary": f"1m->{target_freq}"}}
+            )
         except Exception:
             pass
         return ("resample", f"resample_1m_to_{target_freq}")
@@ -452,7 +476,14 @@ def _fallback_resample_from_1d(symbol: str, target_freq: str) -> Tuple[Optional[
         upsert_cache_candles(rows)
         rebuild_cache_meta(symbol, target_freq, "none")
         try:
-            _LOG.info(f'{{"event":"fallback.resample","symbol":"{symbol}","freq":"{target_freq}","from":"1d","rows":{len(rows)}}}')
+            log_event(
+                _LOG, service="market", level="INFO",
+                file=__file__, func="_fallback_resample_from_1d", line=0, trace_id=None,
+                event="fallback.resample", message="resampled daily",
+                extra={"category": "resample", "action": "done",
+                       "request": {"symbol": symbol, "from": "1d", "target_freq": target_freq},
+                       "result": {"rows": len(rows), "summary": f"1d->{target_freq}"}}
+            )
         except Exception:
             pass
         return ("resample", f"resample_1d_to_{target_freq}")

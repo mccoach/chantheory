@@ -23,7 +23,7 @@ def test_a_stock_day():
     data = _get("/api/candles", {
         "code": "600519", "freq":"1d",
         "start": "2024-12-20", "end": "2025-01-10",
-        "include": "vol,ma", "ma_periods": "5,10",
+        "include": "vol,ma", "ma_periods": "{\"MA5\":5,\"MA10\":10}",
     })
     assert data["meta"]["freq"] == "1d"
     assert data["meta"]["symbol"] == "600519"
@@ -46,6 +46,6 @@ def test_lof_week():
     d1w = _get("/api/candles", {
         "code": "166009", "freq":"1w",
         "start": "2024-10-01", "end": "2025-01-10",
-        "include": "vol,ma", "ma_periods":"5,10",
+        "include": "vol,ma", "ma_periods": "{\"MA5\":5,\"MA10\":10}",
     })
     assert d1w["meta"]["rows"] >= 1

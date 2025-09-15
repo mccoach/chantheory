@@ -9,6 +9,7 @@
 
 from __future__ import annotations  # 允许前置注解（兼容 3.8+）
 
+import time                     # 计时
 import json                     # 解析 ma_periods JSON
 import traceback                # 调试堆栈（DEBUG 时）
 from typing import Optional     # 可选类型
@@ -16,11 +17,14 @@ from typing import Optional     # 可选类型
 from fastapi import APIRouter, Query, Request  # FastAPI 工具
 from backend.services.market import get_candles  # 核心服务
 from backend.utils.errors import http_500_from_exc  # 统一错误包装
+from backend.utils.logger import get_logger, log_event  # 结构化日志
 from backend.utils.time import (                   # 时间工具
     normalize_yyyymmdd_range,  # 规范化日期范围
     ms_from_yyyymmdd,          # YYYYMMDD -> 该日 00:00:00 毫秒
     shift_days_yyyymmdd,       # 对 YYYYMMDD 偏移天数
 )
+
+_LOG = get_logger("candles")  # 命名 logger
 
 router = APIRouter(prefix="/api", tags=["candles"])  # 路由器
 
@@ -41,6 +45,17 @@ def api_candles(
     # x-trace-id 优先于 query.trace_id
     tid = request.headers.get("x-trace-id") or trace_id  # 取链路ID
 
+    t0 = time.time()
+    # 入参日志
+    log_event(
+        _LOG, service="candles", level="INFO",
+        file=__file__, func="api_candles", line=0, trace_id=tid,
+        event="api.candles.start", message="incoming /api/candles",
+        extra={"category": "api", "action": "start",
+               "request": {"endpoint": "/api/candles", "method": "GET",
+                           "query": {"code": code, "freq": freq, "start": start, "end": end,
+                                     "adjust": adjust, "include": include, "iface_key": iface_key}}}
+    )
     try:
         # 1) 规范化日期窗（整窗右端为“结束日次日 00:00:00 - 1ms”）
         s_ymd, e_ymd = normalize_yyyymmdd_range(start, end)  # 归一化
@@ -60,18 +75,36 @@ def api_candles(
             except json.JSONDecodeError:
                 ma_periods_dict = {}  # 解析失败兜底
 
-        # 4) 调用服务层（透传 adjust 和 iface_key）
-        return get_candles(
-            symbol=code,  # 标的
-            freq=freq,  # 频率
-            adjust=adjust,  # 复权
-            start_ms=start_ms,  # 起毫秒
-            end_ms=end_ms,  # 止毫秒
-            include=include_set,  # 指标集合
-            ma_periods_map=ma_periods_dict,  # MA 参数
-            trace_id=tid,  # 链路 ID
-            preferred_iface_key=iface_key,  # 稳定方法键
+        # 4) 调用服务层
+        resp = get_candles(
+            symbol=code,
+            freq=freq,
+            adjust=adjust,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            include=include_set,
+            ma_periods_map=ma_periods_dict,
+            trace_id=tid,
+            preferred_iface_key=iface_key,
         )
+        rows = int(resp.get("meta", {}).get("rows") or 0)
+        # 出参摘要日志
+        log_event(
+            _LOG, service="candles", level="INFO",
+            file=__file__, func="api_candles", line=0, trace_id=tid,
+            event="api.candles.done", message="served /api/candles",
+            extra={"category": "api", "action": "done",
+                   "duration_ms": int((time.time() - t0) * 1000),
+                   "result": {"rows": rows, "status_code": 200}}
+        )
+        return resp
     except Exception as e:
-        traceback.print_exc()  # 打印堆栈（便于开发调试）
-        raise http_500_from_exc(e, trace_id=tid)  # 统一错误
+        # 错误日志（脱敏）
+        log_event(
+            _LOG, service="candles", level="ERROR",
+            file=__file__, func="api_candles", line=0, trace_id=tid,
+            event="api.candles.fail", message="failed /api/candles",
+            extra={"category": "api", "action": "fail",
+                   "error_code": "API_CANDLES_FAIL", "error_message": str(e)}
+        )
+        raise http_500_from_exc(e, trace_id=tid)

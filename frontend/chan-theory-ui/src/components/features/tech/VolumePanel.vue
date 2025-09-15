@@ -610,6 +610,22 @@ function getCurrentZoomIndexRange() {
   return null;
 }
 
+// NEW: 窗口尺寸变化时安全重绘（先 chart.resize 再统计，可避免宽度增加后显示半窗）
+function safeResizeAndRepaint() {
+  if (!chart || !host.value) return;
+  // 用 rAF 等待浏览器完成布局，拿到正确的 clientWidth/Height
+  requestAnimationFrame(() => {
+    try {
+      chart.resize({
+        width: host.value.clientWidth,
+        height: host.value.clientHeight,
+      });
+      // 尺寸变化会影响 dataZoom 的像素映射，重算可见统计
+      recomputeVisibleStats();
+    } catch {}
+  });
+}
+
 function recomputeVisibleStats() {
   try {
     const range = getCurrentZoomIndexRange();
@@ -774,10 +790,16 @@ onMounted(async () => {
     });
   } catch {}
   try {
-    ro = new ResizeObserver(render); // 尺寸变化时重绘
+    // NEW: 改为优先 resize，再按需统计（避免仅 setOption 导致画布宽度未扩展）
+    ro = new ResizeObserver(() => {
+      safeResizeAndRepaint();
+    });
     ro.observe(el);
   } catch {}
-  winResizeHandler = render; // 窗口变化时重绘
+  // NEW: 窗口尺寸变化时优先 resize，再统计
+  winResizeHandler = () => {
+    safeResizeAndRepaint();
+  };
   window.addEventListener("resize", winResizeHandler);
 
   await nextTick();
@@ -853,9 +875,19 @@ function onResizeHandleMove(e) {
   const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
   if (wrap.value) {
     wrap.value.style.height = `${Math.floor(next)}px`;
-    render(); // 拖拽时也重绘
+    // NEW: 先 resize 以应用新的高度，再渲染（柱体/标记宽度逻辑仍沿用 render）
+    if (chart && host.value) {
+      try {
+        chart.resize({
+          width: host.value.clientWidth,
+          height: host.value.clientHeight,
+        });
+      } catch {}
+    }
+    render();
   }
 }
+
 function onResizeHandleUp() {
   dragging = false;
   window.removeEventListener("mousemove", onResizeHandleMove);

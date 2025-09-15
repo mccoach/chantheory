@@ -52,7 +52,6 @@ class Settings:
 
     # ---- 1d 近端判定 ----
     daily_fresh_cutoff_hour: int = int(os.getenv("CHAN_DAILY_FRESH_CUTOFF_HOUR", "18"))  # 当日最新的截止小时
-    include_intraday_daily: bool = os.getenv("CHAN_INCLUDE_INTRADAY_DAILY", "0") == "1"  # 是否盘中写 1d
 
     # ---- 时区与后台任务 ----
     timezone: str = "Asia/Shanghai"  # 时区

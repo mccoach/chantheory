@@ -19,6 +19,7 @@ _TASKS: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
 _BG_THREAD: threading.Thread | None = None
 _CLEANUP_THREAD: threading.Thread | None = None
+_STOP_EVENT = threading.Event()  # 后台守护线程停止信号
 
 def _set_task(name: str, **patch: Any) -> None:
     with _LOCK:
@@ -48,21 +49,25 @@ def _task_cache_cleanup_daemon() -> None:
     _set_task(name, running=True, started_at=datetime.now().isoformat(), last_run=None, error=None)
     try:
         interval = max(1, int(settings.cache_cleanup_interval_min))
-        while True:
+        while not _STOP_EVENT.is_set():  # NEW
             try:
                 res = cleanup_cache()
                 _set_task(name, last_run=datetime.now().isoformat(), last_result=res)
             except Exception as e:
                 _set_task(name, error=str(e))
-            time.sleep(interval * 60)
+            _STOP_EVENT.wait(interval * 60)  # NEW: 可中断等待
     except Exception as e:
         _set_task(name, running=False, finished_at=datetime.now().isoformat(), error=str(e))
 
 def start_background_tasks() -> None:
     global _BG_THREAD, _CLEANUP_THREAD
+    _STOP_EVENT.clear()  # NEW
     if _BG_THREAD is None or not _BG_THREAD.is_alive():
         t = threading.Thread(target=_task_watchlist_bootstrap, name="init-tasks", daemon=True)
         t.start(); _BG_THREAD = t
     if _CLEANUP_THREAD is None or not _CLEANUP_THREAD.is_alive():
         c = threading.Thread(target=_task_cache_cleanup_daemon, name="cache-cleanup", daemon=True)
         c.start(); _CLEANUP_THREAD = c
+
+def stop_background_tasks() -> None:  # NEW: 可用于测试/热重载场景
+    _STOP_EVENT.set()

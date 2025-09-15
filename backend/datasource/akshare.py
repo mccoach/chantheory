@@ -18,8 +18,6 @@ from backend.datasource.fetchers import _norm_daily_df, _norm_minute_df  # 归�
 # 时间工具：用于日期与字符串互转
 from backend.utils.time import (
     today_yyyymmdd,        # 今天的 YYYYMMDD（整型）
-    ms_from_yyyymmdd,      # YYYYMMDD → 毫秒（当日 00:00:00）
-    yyyymmdd_from_ms,      # 毫秒 → YYYYMMDD（整型）
     yyyymmdd_from_str,     # 字符串 → YYYYMMDD（整型）
 )
 
