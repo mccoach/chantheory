@@ -348,7 +348,9 @@ const MainChartSettingsContent = defineComponent({
               })
             ),
             h("div"),
-            h("div", { class: "std-check" }),
+            checkCell(!!conf.enabled, (e) => {
+              settingsDraft.maForm[key].enabled = !!e.target.checked;
+            }),
             resetBtn(() => {
               const def = DEFAULT_MA_CONFIGS[key] || {
                 enabled: true,
