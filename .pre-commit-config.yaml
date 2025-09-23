@@ -21,7 +21,7 @@ repos:
         entry: python scripts/guards/run_guards.py   # 执行入口（统一跑 Fence + Invariants）
         language: system                # 直接用系统 Python 运行
         pass_filenames: false           # 不传文件名，入口脚本会自行解析 git 暂存内容
-        stages: [commit]                # 在 commit 阶段触发
+        stages: [pre-commit]                # 在 commit 阶段触发
         # 注意：如果希望提交时使用“开发宽松���式”，可以改为：
         # entry: bash -lc "export GUARDS_MODE=dev; python scripts/guards/run_guards.py"
         # 保持当前严格默认，日常建议手动在命令行跑 --lenient 或设置环境变量 GUARDS_MODE=dev
