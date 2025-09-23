@@ -440,7 +440,6 @@ const MainChartSettingsContent = defineComponent({
         h(
           "button",
           { class: "btn icon", title: "恢复默认", type: "button", onClick },
-          "⟲"
         ),
       ]);
 
