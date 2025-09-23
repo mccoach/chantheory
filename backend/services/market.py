@@ -1,16 +1,11 @@
-# backend/services/market.py  # 行情服务（精准结束时间 + 近端保障 + 兜底重采样）
+# backend/services/market.py  # 行情服务（服务端一次成型：计算可视切片 s_idx/e_idx）
 # ==============================
-# 本版要点：
-# - 精确结束时间口径：
-#   * 日/周/月：每根 K 的 ts 严格为该 K 对应“最近交易日的 15:00:00”（Asia/Shanghai）
-#   * 分钟族：每根 K 的 ts 为该分钟窗口的右端时刻（来自源或重采样窗口的最后一条）
-# - 近端判定：直接用 expected_last_end_ts（严格 15:00 或分钟右端）与本地 last_ts 精确比对，无需近似或对齐
-# - 兜底重采样：
-#   * 分钟族（5/15/30/60m）：全窗拉 1m → 本地重采样 → 缓存（source='resample'，source_key='resample_1m_to_{freq}'）
-#   * 周/月（1w/1M）：从本地 1d → 本地重采样为 1w/1M（W-FRI/月末），ts 设为该周/月最后一天的 15:00（source='resample'，source_key='resample_1d_to_{freq}'）
-# - 日志：仅当触发兜底时写 1 条 INFO（JSON 行），其余保持安静
-# ==============================
-
+# 本版要点（相对原实现的根因重构）：
+# - 继续保障“近端达标 + 缓存 + 复权/重采样”的数据完整性（ALL 序列）
+# - 新增：服务端统一计算“终端可见切片”的索引窗口（右端锚定），并在 meta 返回：
+#   * all_rows, view_rows, view_start_idx, view_end_idx, window_preset_effective
+#   * start/end（可见切片左右端时间）
+# - 前端仅渲染“ALL 序列”并按 meta.view_* 设置 dataZoom；不再参与切片计算
 from __future__ import annotations  # 允许前置注解（兼容 3.8+）
 
 from typing import Optional, Dict, Any, List, Tuple, Set  # 类型注解
@@ -23,25 +18,26 @@ import pandas as pd  # DataFrame
 import numpy as np  # 数值
 
 from backend.settings import settings  # 全局配置
-from backend.db.sqlite import (  # DB 访问
-    select_candles,             # 读取 1d 永久表
-    select_cache_candles,       # 读取缓存
-    upsert_cache_candles,       # 写缓存
-    get_cache_meta,             # 读取缓存分区元
-    touch_cache_meta,           # 触碰缓存元
-    rebuild_cache_meta,         # 重建缓存元
-    get_conn,                   # 原始连接
-    select_factors,             # 复权因子
+from backend.db.sqlite import (  # 数据库接口
+    select_candles,
+    select_cache_candles,
+    upsert_cache_candles,
+    get_cache_meta,
+    touch_cache_meta,
+    rebuild_cache_meta,
+    get_conn,
+    select_factors,
 )
 from backend.services.storage import ensure_daily_recent  # 保障 1d 近端（供 1w/1M 兜底）
 from backend.utils.time import (  # 时间工具
-    TZ_SHANGHAI,                 # 时区名称
-    ms_from_yyyymmdd,            # 19900101 -> 毫秒 (00:00)
-    yyyymmdd_from_ms,            # 毫秒 -> YYYYMMDD
+    TZ_SHANGHAI,
+    ms_from_yyyymmdd,
+    yyyymmdd_from_ms,
 )
 from backend.services.indicators import ma, macd, kdj, rsi, boll  # 指标
 from backend.datasource.fetchers import fetch_period_ms  # 抓取入口
 from backend.utils.logger import get_logger, log_event  # 日志（结构化）
+from backend.utils.window_preset import preset_to_bars  # NEW: 预设→bars 查表（服务端唯一可信）
 
 _LOG = get_logger("market")  # 命名 logger
 
@@ -51,51 +47,51 @@ START_1990_MS = ms_from_yyyymmdd(19900101)  # 全窗左端
 
 def _retry(fn, attempts: int = None, base_ms: int = None):
     """指数退避：失败 attempts 次后抛出。"""
-    a = int(getattr(settings, "retry_max_attempts", 0) if attempts is None else attempts)  # 次数
-    base = int(getattr(settings, "retry_base_delay_ms", 500) if base_ms is None else base_ms)  # 基延迟
-    last = None  # 最后异常
-    for i in range(a + 1):  # 尝试 a+1 次
+    a = int(getattr(settings, "retry_max_attempts", 0) if attempts is None else attempts)
+    base = int(getattr(settings, "retry_base_delay_ms", 500) if base_ms is None else base_ms)
+    last = None
+    for i in range(a + 1):
         try:
-            return fn()  # 执行
+            return fn()
         except Exception as e:
-            last = e  # 保存
+            last = e
             if i >= a:
-                break  # 结束
-            delay = (base * (2 ** i)) * (0.8 + 0.4 * random.random())  # 指数退避+抖动
-            time.sleep(delay / 1000.0)  # 转秒
+                break
+            delay = (base * (2 ** i)) * (0.8 + 0.4 * random.random())
+            time.sleep(delay / 1000.0)
     if last:
-        raise last  # 抛出
-    return None  # 理论不到达
+        raise last
+    return None
 
 _trade_calendar_cache: Dict[str, set] = {}  # 年→交易日集合缓存
 
 def _lazy_is_trading_day(d: datetime) -> bool:
     """轻量交易日判定：优先 ak 日历，失败回退 Mon–Fri。"""
-    y = d.year  # 年
-    key = f"{y}"  # 键
-    if key not in _trade_calendar_cache:  # 缓存不存在
+    y = d.year
+    key = f"{y}"
+    if key not in _trade_calendar_cache:
         try:
-            import akshare as ak  # 延迟导入
-            df = ak.tool_trade_date_hist_sina()  # 日历
-            df = pd.DataFrame(df)  # DF
-            df.columns = [str(c).strip() for c in df.columns]  # 去空白
-            date_col = next((c for c in ["trade_date","日期","date"] if c in df.columns), None)  # 日期列
-            st = set()  # 集合
+            import akshare as ak
+            df = ak.tool_trade_date_hist_sina()
+            df = pd.DataFrame(df)
+            df.columns = [str(c).strip() for c in df.columns]
+            date_col = next((c for c in ["trade_date","日期","date"] if c in df.columns), None)
+            st = set()
             if date_col:
                 for s in df[date_col].astype(str):
                     if len(s) >= 10 and int(s[:4]) == y:
-                        st.add(s[:10])  # 'YYYY-MM-DD'
-            _trade_calendar_cache[key] = st  # 缓存
+                        st.add(s[:10])
+            _trade_calendar_cache[key] = st
         except Exception:
-            _trade_calendar_cache[key] = set()  # 失败：置空
-    s = f"{d.year:04d}-{d.month:02d}-{d.day:02d}"  # 当日字符串
-    if _trade_calendar_cache.get(key):  # 若有日历
-        return s in _trade_calendar_cache[key]  # 查表
-    return d.weekday() < 5  # 回退：工作日
+            _trade_calendar_cache[key] = set()
+    s = f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
+    if _trade_calendar_cache.get(key):
+        return s in _trade_calendar_cache[key]
+    return d.weekday() < 5
 
 def _today_shanghai() -> datetime:
     """返回 Asia/Shanghai 的当前时间（与 pandas 时区一致）。"""
-    return datetime.now().astimezone(pd.Timestamp.now(tz=TZ_SHANGHAI).tz)  # 含时区
+    return datetime.now().astimezone(pd.Timestamp.now(tz=TZ_SHANGHAI).tz)
 
 def _ms_from_dt(dt: datetime) -> int:
     """datetime → 毫秒整数。"""
@@ -103,32 +99,24 @@ def _ms_from_dt(dt: datetime) -> int:
 
 def _session_ranges_for(d: datetime) -> List[Tuple[datetime, datetime]]:
     """返回当天上午/下午会话（带时区）。"""
-    tz = pd.Timestamp.now(tz=TZ_SHANGHAI).tz  # 时区对象
-    s1 = d.replace(hour=9, minute=30, second=0, microsecond=0, tzinfo=tz)   # 09:30
-    e1 = d.replace(hour=11, minute=30, second=0, microsecond=0, tzinfo=tz)  # 11:30
-    s2 = d.replace(hour=13, minute=0, second=0, microsecond=0, tzinfo=tz)   # 13:00
-    e2 = d.replace(hour=15, minute=0, second=0, microsecond=0, tzinfo=tz)   # 15:00
-    return [(s1, e1), (s2, e2)]  # 返回
+    tz = pd.Timestamp.now(tz=TZ_SHANGHAI).tz
+    s1 = d.replace(hour=9, minute=30, second=0, microsecond=0, tzinfo=tz)
+    e1 = d.replace(hour=11, minute=30, second=0, microsecond=0, tzinfo=tz)
+    s2 = d.replace(hour=13, minute=0, second=0, microsecond=0, tzinfo=tz)
+    e2 = d.replace(hour=15, minute=0, second=0, microsecond=0, tzinfo=tz)
+    return [(s1, e1), (s2, e2)]
 
 def _align_right_edge(t: datetime, minutes: int) -> datetime:
     """按步长对齐到“右端”分钟边界（不越界会话）。"""
-    tm = t.replace(second=0, microsecond=0)  # 去秒
-    minutes_since_midnight = tm.hour * 60 + tm.minute  # 当天分钟数
-    k = (minutes_since_midnight // minutes) * minutes  # 对齐
-    hh, mm = k // 60, k % 60  # 时分
-    return tm.replace(hour=hh, minute=mm)  # 返回
+    tm = t.replace(second=0, microsecond=0)
+    minutes_since_midnight = tm.hour * 60 + tm.minute
+    k = (minutes_since_midnight // minutes) * minutes
+    hh, mm = k // 60, k % 60
+    return tm.replace(hour=hh, minute=mm)
 
 def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) -> Optional[int]:
-    """计算应当已生成的最后一根 K 的结束时刻（毫秒）。
-    精确语义：
-    - 分钟族：在会话内按步长向右端对齐；午休/盘前/收盘后按规则取 11:30 / 上一日 15:00 / 当日 15:00。
-    - 日：到点（15:00+宽限）取今日 15:00，否则上一交易日 15:00。
-    - 周：以周五为周末（W-FRI），若周五休市则取前一最近交易日；到点取本周末 15:00，否则上一周末 15:00。
-    - 月：以自然月末为末日，若末日休市则取前一最近交易日；到点取本月末 15:00，否则上月末 15:00。
-    """
-    now = now or _today_shanghai()  # 当前（含时区）
-
-    # 非交易日：分钟族直接 None；日/周/月回退到上一交易日后继续算
+    """计算应当已生成的最后一根 K 的结束时刻（毫秒）。"""
+    now = now or _today_shanghai()
     if not _lazy_is_trading_day(now):
         if freq in {"1d","1w","1M"}:
             d = now
@@ -139,11 +127,9 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
                     break
         else:
             return None
-
-    # 分钟族
     if freq in {"1m","5m","15m","30m","60m"}:
         minutes = int(freq.replace("m",""))
-        t = now - timedelta(seconds=MINUTE_GRACE_SEC)  # 宽限
+        t = now - timedelta(seconds=MINUTE_GRACE_SEC)
         for s, e in _session_ranges_for(now):
             if s <= t <= e:
                 edge = _align_right_edge(t, minutes)
@@ -153,31 +139,22 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
         s_am, e_am = _session_ranges_for(now)[0]
         s_pm, e_pm = _session_ranges_for(now)[1]
         if t < s_am:
-            # 开盘前 → 上一交易日 15:00
             prev = now
             while True:
                 prev = prev - timedelta(days=1)
                 if _lazy_is_trading_day(prev):
                     return _ms_from_dt(_session_ranges_for(prev)[1][1])
         if e_am < t < s_pm:
-            # 午休 → 11:30
             return _ms_from_dt(e_am)
         if t > e_pm:
-            # 收盘后 → 15:00
             return _ms_from_dt(e_pm)
-        return None  # 其他（几乎不会）
-
-    # 15:00 参考点
+        return None
     grace = timedelta(seconds=DAILY_GRACE_SEC)
     today_1500 = now.replace(hour=15, minute=0, second=0, microsecond=0)
-
     if freq == "1d":
-        # 日：到点取今日 15:00，否则上一交易日 15:00
         return _ms_from_dt(today_1500 if (now - grace) >= today_1500 else _last_trading_day_1500(now))
-
     if freq == "1w":
-        # 周：以周五为末，若周五休市则前移到最近交易日；未到点则上一周末
-        weekday = now.weekday()  # 0=Mon
+        weekday = now.weekday()
         days_to_fri = 4 - weekday
         this_fri = now + timedelta(days=days_to_fri)
         d = this_fri
@@ -188,11 +165,9 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
         d_1500 = d.replace(hour=15, minute=0, second=0, microsecond=0)
         if (now - grace) >= d_1500:
             return _ms_from_dt(d_1500)
-        prev_week_1500 = _last_week_last_trading_1500(now)  # NEW: 可读性更好
+        prev_week_1500 = _last_week_last_trading_1500(now)
         return _ms_from_dt(prev_week_1500)
-
     if freq == "1M":
-        # 月：自然月末，若休市则前移到最近交易日；未到点则上月末
         if now.month == 12:
             next_month = datetime(now.year + 1, 1, 1, tzinfo=now.tzinfo)
         else:
@@ -211,8 +186,7 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
             if _lazy_is_trading_day(d): break
             d = d - timedelta(days=1)
         return _ms_from_dt(d.replace(hour=15, minute=0, second=0, microsecond=0))
-
-    return None  # 其他频率
+    return None
 
 def _last_trading_day_1500(now: datetime) -> datetime:
     """上一交易日 15:00（datetime）。"""
@@ -316,9 +290,6 @@ def _read_local(symbol: str, freq: str, start_ms: Optional[int], end_ms: Optiona
 def _nn(x):  # NaN→None，否则 float
     return None if pd.isna(x) else float(x)
 
-# ------------------------------
-# 分钟族兜底：1m → 5/15/30/60m
-# ------------------------------
 def _resample_minutes_series(df_1m: pd.DataFrame, target_minutes: int) -> pd.DataFrame:
     """将 1m 序列重采样为 target_minutes（会话切片，右端对齐）。"""
     if df_1m is None or df_1m.empty:
@@ -403,18 +374,13 @@ def _fallback_resample_from_1m(symbol: str, target_freq: str, sec_type: str, pre
         return ("resample", f"resample_1m_to_{target_freq}")
     return (None, None)
 
-# ------------------------------
-# 日→周/月兜底（ts 设为该周/月末 15:00）
-# ------------------------------
 def _resample_daily_to(df_1d: pd.DataFrame, target_freq: str) -> pd.DataFrame:
     """将 1d 序列重采样为 1w/1M（W-FRI / 月末），ts 为该组最后一天的 15:00。"""
     if df_1d is None or df_1d.empty:
         return pd.DataFrame(columns=["ts","open","high","low","close","volume","amount","turnover_rate","source"])
     x = df_1d.copy().sort_values("ts").reset_index(drop=True)
-    # 若 1d 的 ts 不是 15:00（历史库可能是 00:00），依日期 + 15:00 生成基准时刻
     dt0 = pd.to_datetime(x["ts"], unit="ms", utc=False).dt.tz_localize(TZ_SHANGHAI, nonexistent="shift_forward", ambiguous="infer")
     date_str = dt0.dt.strftime("%Y-%m-%d")
-    # 分组键：周= W-FRI；月=自然月
     if target_freq == "1w":
         key = pd.to_datetime(date_str).to_period("W-FRI").astype(str)
     elif target_freq == "1M":
@@ -426,7 +392,6 @@ def _resample_daily_to(df_1d: pd.DataFrame, target_freq: str) -> pd.DataFrame:
     rows = []
     for _, g in grp:
         g = g.sort_values("ts")
-        # 取组内最后一天的“自然日字符串”，并构造当日 15:00 的毫秒戳（与近端判定一致）
         last_ts = int(g["ts"].iloc[-1])
         last_date = pd.to_datetime(last_ts, unit="ms", utc=False).tz_localize(TZ_SHANGHAI, nonexistent="shift_forward", ambiguous="infer")
         last_date_1500 = last_date.normalize() + pd.Timedelta(hours=15)
@@ -449,7 +414,6 @@ def _fallback_resample_from_1d(symbol: str, target_freq: str) -> Tuple[Optional[
     """周/月兜底：从本地 1d 重采样为 1w/1M；返回 (provider, source_key)。"""
     if target_freq not in {"1w","1M"}:
         return (None, None)
-    # 保障 1d 近端（便于读取最新日线）
     try:
         ensure_daily_recent(symbol)
     except Exception:
@@ -489,26 +453,22 @@ def _fallback_resample_from_1d(symbol: str, target_freq: str) -> Tuple[Optional[
         return ("resample", f"resample_1d_to_{target_freq}")
     return (None, None)
 
-# ------------------------------
-# 近端保障 + 兜底
-# ------------------------------
-def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_key: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_iface_key: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """保证非 1d 周期近端达标（整窗拉取，失败时兜底重采样）。"""
     if freq == "1d":
         return (None, None)
     now = _today_shanghai()
-    expected_ts = _expected_last_end_ts_for_freq(freq, now)  # 精确 15:00 / 分钟右端
+    expected_ts = _expected_last_end_ts_for_freq(freq, now)
     meta = get_cache_meta(symbol, freq, "none")
     last_ts = int(meta["last_ts"]) if meta and meta.get("last_ts") is not None else None
-    if expected_ts is None:  # 分钟族非交易日等
+    if expected_ts is None:
         return (None, None)
-    if last_ts is not None and last_ts >= int(expected_ts):  # 已达标
+    if last_ts is not None and last_ts >= int(expected_ts):
         return (None, None)
-    # 整窗直拉
     start_ms = START_1990_MS
     end_ms = int(time.time() * 1000)
     def _fetch():
-        return fetch_period_ms(symbol, freq, start_ms, end_ms, sec_type=sec_type, iface_key=preferred_key)
+        return fetch_period_ms(symbol, freq, start_ms, end_ms, sec_type=sec_type, iface_key=preferred_iface_key)
     df_fetch, provider, src_key = _retry(_fetch) or (pd.DataFrame(), "", None)
     if df_fetch is not None and not df_fetch.empty:
         x = df_fetch.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
@@ -530,22 +490,17 @@ def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_k
             upsert_cache_candles(rows)
             rebuild_cache_meta(symbol, freq, "none")
         return (provider or None, src_key)
-    # 主抓取为空 → 兜底重采样
     if freq in {"5m","15m","30m","60m"}:
-        prov, key = _fallback_resample_from_1m(symbol, freq, sec_type, preferred_key)
+        prov, key = _fallback_resample_from_1m(symbol, freq, sec_type, preferred_iface_key)
         if prov:
             return (prov, key)
     if freq in {"1w","1M"}:
         prov, key = _fallback_resample_from_1d(symbol, freq)
         if prov:
             return (prov, key)
-    # 兜底失败
     touch_cache_meta(symbol, freq, "none")
     return (None, None)
 
-# ------------------------------
-# 复权（按因子）
-# ------------------------------
 def _apply_adjustment(df_none: pd.DataFrame, symbol: str, adjust: str) -> pd.DataFrame:
     """对不复权 DataFrame 应用前/后复权。"""
     if df_none.empty or adjust not in ('qfq', 'hfq'):
@@ -567,31 +522,38 @@ def _apply_adjustment(df_none: pd.DataFrame, symbol: str, adjust: str) -> pd.Dat
     df_adj['volume'] = df_adj['volume'] / df_adj[factor_col]
     return df_adj.drop(columns=['date', factor_col])
 
-# ------------------------------
-# 响应组装
-# ------------------------------
 def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
                       include: Set[str], ma_periods_map: Dict[str, int], trace_id: Optional[str],
                       downsample_from: Optional[str] = None,
-                      source: Optional[str] = None, source_key: Optional[str] = None) -> Dict[str, Any]:
-    """组装 /api/candles 响应。"""
+                      source: Optional[str] = None, source_key: Optional[str] = None,
+                      # NEW: 统一可视窗口（索引基于 ALL）
+                      view_start_idx: int = 0, view_end_idx: int = -1,
+                      window_preset_effective: str = "ALL") -> Dict[str, Any]:
+    """组装 /api/candles 响应（返回 ALL 序列 + 可视窗口索引）。"""
     if df is None or df.empty:
         return {
             "meta": {
                 "symbol": symbol, "freq": freq, "adjust": adjust, "rows": 0,
                 "start": None, "end": None,
                 "generated_at": pd.Timestamp.now(tz=TZ_SHANGHAI).isoformat(),
-                "algo_version": "market_v2.7",
+                "algo_version": "market_v2.8",
                 "timezone": settings.timezone,
                 "source": source or "",
                 "source_key": source_key,
                 "downsample_from": downsample_from,
                 "is_cached": True,
-                "trace_id": trace_id
+                "trace_id": trace_id,
+                # NEW
+                "all_rows": 0,
+                "view_rows": 0,
+                "view_start_idx": 0,
+                "view_end_idx": -1,
+                "window_preset_effective": "ALL",
             },
             "candles": [],
             "indicators": {"VOLUME": []}
         }
+
     vol = df["volume"]
     amt = df["amount"] if "amount" in df.columns else pd.Series([pd.NA]*len(df))
     tvr = df["turnover_rate"] if "turnover_rate" in df.columns else pd.Series([pd.NA]*len(df))
@@ -600,6 +562,7 @@ def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
         "o": _nn(o), "h": _nn(h), "l": _nn(l), "c": _nn(c),
         "v": _nn(v), "a": _nn(a), "tr": _nn(tr),
     } for ms, o, h, l, c, v, a, tr in zip(df["ts"], df["open"], df["high"], df["low"], df["close"], vol, amt, tvr)]
+
     inds: Dict[str, List[Optional[float]]] = {}
     inds["VOLUME"] = [None if pd.isna(x) else float(x) for x in vol]
     close = df["close"].astype(float); high = df["high"].astype(float); low = df["low"].astype(float)
@@ -618,33 +581,54 @@ def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
     if "boll" in include:
         for k, s in boll(close).items():
             inds[k] = [None if pd.isna(x) else float(x) for x in s]
+
+    all_rows = int(len(df))
+    v_s = max(0, int(view_start_idx))
+    v_e = min(all_rows - 1, int(view_end_idx)) if all_rows > 0 else -1
+    if v_s > v_e:
+        v_s, v_e = 0, all_rows - 1
+    view_rows = max(0, v_e - v_s + 1) if all_rows > 0 else 0
+
+    start_iso = pd.Timestamp(df["ts"].iloc[v_s], unit="ms", tz=TZ_SHANGHAI).isoformat() if view_rows > 0 else None
+    end_iso   = pd.Timestamp(df["ts"].iloc[v_e], unit="ms", tz=TZ_SHANGHAI).isoformat() if view_rows > 0 else None
+
     src = source or _dominant_source(df)
     meta = {
         "symbol": symbol, "freq": freq, "adjust": adjust,
         "rows": int(len(df)),
-        "start": pd.Timestamp(df["ts"].iloc[0], unit="ms", tz=TZ_SHANGHAI).isoformat(),
-        "end": pd.Timestamp(df["ts"].iloc[-1], unit="ms", tz=TZ_SHANGHAI).isoformat(),
+        "start": start_iso,
+        "end": end_iso,
         "generated_at": pd.Timestamp.now(tz=TZ_SHANGHAI).isoformat(),
-        "algo_version": "market_v2.7",
+        "algo_version": "market_v2.8",
         "timezone": settings.timezone,
         "source": src,
         "source_key": source_key,
         "downsample_from": downsample_from,
         "is_cached": True,
-        "trace_id": trace_id
+        "trace_id": trace_id,
+        # NEW：统一视图窗口
+        "all_rows": all_rows,
+        "view_rows": view_rows,
+        "view_start_idx": v_s,
+        "view_end_idx": v_e,
+        "window_preset_effective": str(window_preset_effective or "ALL"),
     }
     return {"meta": meta, "candles": candles_payload, "indicators": inds}
 
-# ------------------------------
-# 对外主入口
-# ------------------------------
 def get_candles(symbol: str, freq: str, adjust: str = "none",
                 start_ms: Optional[int] = None, end_ms: Optional[int] = None,
                 include: Optional[Set[str]] = None,
                 ma_periods_map: Optional[Dict[str, int]] = None,
                 trace_id: Optional[str] = None,
-                preferred_iface_key: Optional[str] = None) -> Dict[str, Any]:
-    """主入口：严格结束时间口径 + 近端保障 + 兜底重采样 + 复权。"""
+                preferred_iface_key: Optional[str] = None,
+                # NEW：统一视窗计算参数
+                window_preset: Optional[str] = None,
+                bars: Optional[int] = None,
+                anchor_ts: Optional[int] = None) -> Dict[str, Any]:
+    """
+    主入口：继续保障 ALL 数据正确，同时服务端一次成型计算“可视切片”的 v_s/v_e。
+    - 返回 ALL candles（不裁剪），meta 中提供 view_*，前端仅应用 dataZoom。
+    """
     # 先保障 1d（供 1w/1M 兜底）
     try:
         ensure_daily_recent(symbol, preferred_iface_key)
@@ -653,31 +637,61 @@ def get_candles(symbol: str, freq: str, adjust: str = "none",
 
     sec_type = _get_symbol_type(symbol)
 
-    if freq == "1d":
-        df = _read_local(symbol, "1d", start_ms, end_ms, sec_type)
-        df_final = _apply_adjustment(df, symbol, adjust)
-        return assemble_response(symbol, freq, adjust, df_final, include or set(), ma_periods_map or {}, trace_id,
-                                 downsample_from=None, source=None, source_key=None)
-
-    if freq.endswith("m"):
-        src_prov, src_key = (None, None)
-        try:
-            src_prov, src_key = _ensure_near_end_for_freq(symbol, freq, sec_type, preferred_iface_key)
-        except Exception:
-            pass
-        df = _read_local(symbol, freq, start_ms, end_ms, sec_type)
-        df_final = _apply_adjustment(df, symbol, adjust)
-        return assemble_response(symbol, freq, adjust, df_final, include or set(), ma_periods_map or {}, trace_id,
-                                 downsample_from="1m" if (src_prov == "resample") else None,
-                                 source=src_prov, source_key=src_key)
-
+    # 保障非 1d 的近端
     src_prov, src_key = (None, None)
     try:
         src_prov, src_key = _ensure_near_end_for_freq(symbol, freq, sec_type, preferred_iface_key)
     except Exception:
         pass
-    df = _read_local(symbol, freq, start_ms, end_ms, sec_type)
+
+    # 读取 ALL（不裁剪）
+    df = _read_local(symbol, freq, None, None, sec_type)
     df_final = _apply_adjustment(df, symbol, adjust)
-    return assemble_response(symbol, freq, adjust, df_final, include or set(), ma_periods_map or {}, trace_id,
-                             downsample_from="1d" if (src_prov == "resample") else None,
-                             source=src_prov, source_key=src_key)
+
+    all_rows = int(len(df_final))
+    if all_rows <= 0:
+        return assemble_response(symbol, freq, adjust, df_final,
+                                 include or set(), ma_periods_map or {}, trace_id,
+                                 downsample_from="1m" if (src_prov == "resample") else None,
+                                 source=src_prov, source_key=src_key,
+                                 view_start_idx=0, view_end_idx=-1,
+                                 window_preset_effective="ALL")
+
+    # 1) bars_target：bars 优先；否则按 window_preset 查表；都无 → ALL
+    if bars is not None and int(bars) > 0:
+        bars_target = max(1, min(int(bars), all_rows))
+        wp_eff = window_preset or "ALL"
+    else:
+        wp = (window_preset or "ALL").upper()
+        bars_target = preset_to_bars(freq, wp, all_rows)
+        wp_eff = "ALL" if bars_target >= all_rows else wp
+
+    # 2) e_idx（右端）：按 anchor_ts，否则最右
+    if anchor_ts is not None:
+        try:
+            ts_series = df_final["ts"].astype("int64").tolist()
+            e_idx = all_rows - 1
+            for i in range(all_rows - 1, -1, -1):
+                if int(ts_series[i]) <= int(anchor_ts):
+                    e_idx = i
+                    break
+        except Exception:
+            e_idx = all_rows - 1
+    else:
+        e_idx = all_rows - 1
+
+    # 3) s_idx：右端锚定向左推；如左端越界且不足 bars_target，则反推右端
+    s_idx = max(0, e_idx - bars_target + 1)
+    if s_idx == 0 and (e_idx - s_idx + 1) < bars_target:
+        e_idx = min(all_rows - 1, bars_target - 1)
+
+    view_rows = max(1, min(all_rows, e_idx - s_idx + 1))
+    if view_rows >= all_rows:
+        wp_eff = "ALL"
+
+    return assemble_response(symbol, freq, adjust, df_final,
+                             include or set(), ma_periods_map or {}, trace_id,
+                             downsample_from="1m" if (src_prov == "resample") else None,
+                             source=src_prov, source_key=src_key,
+                             view_start_idx=s_idx, view_end_idx=e_idx,
+                             window_preset_effective=wp_eff)

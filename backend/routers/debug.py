@@ -50,8 +50,8 @@ def api_debug_daily_columns(
             extra={"category": "api", "action": "start", "request": {"code": code, "start": start, "end": end, "adjust": adjust}}
         )
 
-        # 统一补齐/交换：缺省则 start=19960101，end=今天；若 start>end 自动交换
-        s_ymd, e_ymd = normalize_yyyymmdd_range(start, end, default_start=19960101)
+        # 统一补齐/交换：缺省则 start=19900101，end=今天；若 start>end 自动交换
+        s_ymd, e_ymd = normalize_yyyymmdd_range(start, end, default_start=19900101)
         start_s = f"{s_ymd:08d}"  # AkShare 需要 YYYYMMDD 字符串
         end_s = f"{e_ymd:08d}"
 

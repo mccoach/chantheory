@@ -1,76 +1,84 @@
 // src/services/marketService.js
 // ==============================
-// 说明：行情服务（前端调用后端 /api/candles）
-// - 本轮变更：请求快照日志仅在开发模式打印（import.meta.env.DEV），避免生产环境噪音。
-// ==============================
+// 说明：行情服务（前端仅转发“频率/窗宽/锚点/或bars”到后端；不再本地计算视窗）
+// - 新增：支持传入 options.signal（AbortController.signal），通过 axios meta.signal 透传给底层请求。
+// - 依然支持 include / ma_periods；start/end 在新模式下不再使用（保持参数兼容）
+import { api } from "@/api/client"; // 统一 axios 客户端（含 trace_id 拦截)
 
-import { api } from "@/api/client"; // 统一 axios 客户端（含 trace_id 拦截）
-
-// 工具：YYYY-MM-DD 字符串化
+// 工具：YYYY-MM-DD（保留兼容）
 function toDateStr(d) {
-  const pad = (n) => String(n).padStart(2, "0"); // 两位补零
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; // 组装日期
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
-
-// 默认起止（严格）
-const DEFAULT_START = "1996-01-01"; // 默认最早日期
+const DEFAULT_START = "1990-01-01";
 function todayStr() {
-  return toDateStr(new Date()); // 今日 YYYY-MM-DD
+  return toDateStr(new Date());
 }
 
-// 解析：若为 YYYY-MM-DD 返回 Date；若为毫秒/数字串，转 Date；否则返回 null
 function parseToDate(x) {
-  if (x == null || x === "") return null;               // 空值
-  const s = String(x).trim();                            // 规范化
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {                   // YYYY-MM-DD
-    const d = new Date(`${s}T00:00:00`);                 // 当天 00:00
-    return isNaN(d.getTime()) ? null : d;                // 失败则 null
+  if (x == null || x === "") return null;
+  const s = String(x).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const d = new Date(`${s}T00:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
-  if (!Number.isNaN(Number(s))) {                        // 数字（毫秒）
-    const ms = Number(s);                                 // 转数值
-    const d = new Date(ms);                               // 毫秒→Date
-    return isNaN(d.getTime()) ? null : d;                 // 失败则 null
+  if (!Number.isNaN(Number(s))) {
+    const ms = Number(s);
+    const d = new Date(ms);
+    return isNaN(d.getTime()) ? null : d;
   }
-  return null;                                           // 无法解析
+  return null;
 }
 
-export async function fetchCandles(params) {
-  const q = { ...params }; // 拷贝参数
+/**
+ * fetchCandles(params, options?)
+ * params: 见调用处（code/freq/adjust/include/ma_periods/window_preset/bars/anchor_ts）
+ * options: { signal?: AbortSignal }
+ */
+export async function fetchCandles(params, options = {}) {
+  // 仅组装后端所需：code/freq/adjust/include/ma_periods + window_preset/bars/anchor_ts
+  const q = { ...params };
 
-  // 1) 统一强制 start/end 存在
+  // 新模式：不依赖 start/end；保留兼容（不传亦可）
   let dStart = parseToDate(q.start);
   let dEnd = parseToDate(q.end);
-  if (!dStart) dStart = new Date(`${DEFAULT_START}T00:00:00`); // 默认起始
-  if (!dEnd) dEnd = new Date(`${todayStr()}T00:00:00`);        // 默认结束
-
-  // 2) 若反向，自动交换
+  if (!dStart) dStart = new Date(`${DEFAULT_START}T00:00:00`);
+  if (!dEnd) dEnd = new Date(`${todayStr()}T00:00:00`);
   if (dStart.getTime() > dEnd.getTime()) {
-    const t = dStart; dStart = dEnd; dEnd = t;
+    const t = dStart;
+    dStart = dEnd;
+    dEnd = t;
   }
 
-  // 3) 以 YYYY-MM-DD 传参（后端已能兜底毫秒/日期，但前端也保证规范）
-  q.start = toDateStr(dStart);
-  q.end = toDateStr(dEnd);
-
-  // 4) 组装查询串
+  // 构造查询串（含 window_preset/bars/anchor_ts）
   const search = new URLSearchParams();
+  const allowKeys = new Set([
+    "code",
+    "freq",
+    "adjust",
+    "include",
+    "ma_periods",
+    "window_preset",
+    "bars",
+    "anchor_ts",
+  ]);
   Object.entries(q).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== "") search.set(k, v);
+    if (v === undefined || v === null || v === "") return;
+    if (!allowKeys.has(k)) return;
+    search.set(k, v);
   });
 
-  // 开发期打印请求快照（生产关闭，避免噪音）
   if (import.meta.env?.DEV) {
-    // NEW: 统一毫秒时间戳 + url 快照（仅开发模式）
-    // eslint-disable-next-line no-console
     console.log(
-      `[${Date.now()}][frontend/services/marketService.js] GET /api/candles?${search.toString()} (normalized params)`,
+      `[${Date.now()}][frontend/services/marketService.js] GET /api/candles?${search.toString()}`,
       q
     );
   }
 
-  // 实际请求
+  // 关键点：通过 meta.signal 传入 axios -> config.signal（由 api/client.js 拦截器完成）
   const { data } = await api.get(`/api/candles?${search.toString()}`, {
     timeout: 15000,
+    meta: options.signal ? { signal: options.signal } : undefined,
   });
-  return data; // 返回后端数据
+  return data;
 }

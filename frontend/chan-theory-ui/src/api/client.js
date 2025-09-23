@@ -29,10 +29,11 @@ api.interceptors.request.use(
 
     // 可选：开发时打印一次出站请求（便于对拍）
     if (import.meta.env.DEV) {
-      // NEW: 统一毫秒时间戳 + url 快照
       console.log(
-        `[${Date.now()}][frontend/api/client.js] request ${config.method?.toUpperCase()} ${config.url} trace_id=${tid}`
-      ); // NEW
+        `[${Date.now()}][frontend/api/client.js] request ${config.method?.toUpperCase()} ${
+          config.url
+        } trace_id=${tid}`
+      );
       // eslint-disable-next-line no-console
       console.debug("[api] req", {
         url: config.url,
@@ -46,26 +47,50 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// 响应拦截：统一错误结构 + 调试输出
+// 响应拦截：统一错误结构 + 调试输出（取消请求静默）
 api.interceptors.response.use(
   (resp) => resp,
   (err) => {
     const detail = err?.response?.data?.detail || err?.response?.data || {};
-    const code = detail?.code || "HTTP_ERROR";
-    const message = detail?.message || err?.message || "request failed";
+    const isCanceled =
+      err?.code === "ERR_CANCELED" ||
+      err?.name === "CanceledError" ||
+      err?.name === "AbortError" ||
+      String(err?.message || "")
+        .toLowerCase()
+        .includes("canceled") ||
+      String(err?.message || "")
+        .toLowerCase()
+        .includes("aborted");
+
+    const code = isCanceled ? "CANCELED" : detail?.code || "HTTP_ERROR";
+    const message = isCanceled
+      ? "canceled"
+      : detail?.message || err?.message || "request failed";
     const trace_id = detail?.trace_id || err?.config?.meta?.trace_id || null;
 
-    // 开发场景打印 trace 片段，便于快速定位
+    // 开发场景打印 trace 片段，便于快速定位（取消类错误静默不打 error）
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
-      console.error("[api] err", {
-        url: err?.config?.url,
-        status: err?.response?.status,
-        code,
-        message,
-        trace_id,
-        trace: detail?.trace?.slice?.(0, 800), // 预览部分堆栈
-      });
+      if (!isCanceled) {
+        // eslint-disable-next-line no-console
+        console.error("[api] err", {
+          url: err?.config?.url,
+          status: err?.response?.status,
+          code,
+          message,
+          trace_id,
+          trace: detail?.trace?.slice?.(0, 800),
+        });
+      } else {
+        // 取消行为仅做 debug 级别输出，避免污染控制台
+        // eslint-disable-next-line no-console
+        console.debug("[api] canceled", {
+          url: err?.config?.url,
+          code,
+          message,
+          trace_id,
+        });
+      }
     }
 
     return Promise.reject({

@@ -1,8 +1,7 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
 <!-- 说明：应用根组件（组合根） -->
-<!-- - 新增：ModalDialog 的 tabs/activeTab 接线与透传；tab-change -> dialogManager.setActiveTab -->
-<!-- - 其余逻辑保持原有设计（探活/索引/首帧加载/热键作用域管理等） -->
+<!-- - 变更点：useMarketView({ autoStart:false })，等待后端探活成功后再触发 vm.reload()。 -->
 <!-- ============================== -->
 
 <template>
@@ -69,7 +68,7 @@ import { buildExportFilename } from "./utils/download";
 import { waitBackendAlive } from "./utils/backendReady";
 import { ensureIndexFresh } from "./composables/useSymbolIndex";
 
-const vm = useMarketView();
+const vm = useMarketView({ autoStart: false }); // 关键变更：延迟首刷
 provide("marketView", vm);
 
 const dialogManager = useDialogManager();
@@ -141,8 +140,6 @@ function handleModalSave() {
   const dlg = dialogManager.activeDialog.value;
   if (dlg && typeof dlg.onSave === "function") {
     try {
-      // 若内容组件提供 save()（如快捷键面板），这里也可主动调用：
-      // dialogBodyRef.value?.save?.();
       dlg.onSave();
     } catch (e) {
       console.error(e);
@@ -167,7 +164,7 @@ onMounted(async () => {
   backendReady.value = !!alive;
   if (backendReady.value) {
     await ensureIndexFresh(false);
-    vm.reload();
+    vm.reload({ force: true }); // 探活成功后首刷
     ensureIndexFresh(true);
   } else {
     console.warn("Backend not alive within timeout; panels gated by v-if");
