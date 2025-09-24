@@ -1,49 +1,51 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers.js  // 全量输出：缠论覆盖图层
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers.js
 // ==============================
 // 缠论覆盖图层（逐行注释）
-// - 涨跌标记：改为使用“第二条隐藏 yAxis（index=1，范围 0~1）”定位，彻底与主价格 y 轴解耦；不再影响主轴自适应。
-// - 分型标记：仍使用主轴（yAxisIndex=0）；如需解绑可按需扩展。
-// - 顶/底三角顶点精确落在 G-2px / D+2px（通过 symbolOffset = ±(markerH/2+2) 实现）
+// - 新增：支持 env.symbolWidthPx 外部宽度覆盖（来自主窗广播的统一符号宽度）。
+// - 涨跌标记：绑定隐藏 yAxis=1（不变量），优先使用 env.symbolWidthPx；否则根据 hostWidth+visCount 估算。
+// - 分型标记：绑定主价格轴 yAxisIndex=0（不变量），同样支持外部宽度覆盖；高度按比例随宽度调整。
 // ==============================
 
 import {
-  CHAN_MARKER_PRESETS, // 视觉预设
-  CHAN_DEFAULTS, // 缺省参数
-  FRACTAL_DEFAULTS, // 分型缺省
-} from "@/constants"; // 常量源
+  CHAN_MARKER_PRESETS, // 视觉预设集合
+  CHAN_DEFAULTS, // 缺省参数（包含图形/颜色/最大数量）
+  FRACTAL_DEFAULTS, // 分型默认（包含样式与间距）
+} from "@/constants";
 
-/* 涨跌标记（横坐标 = anchor_idx 原始索引；绑定到隐藏 yAxis=1，y 固定为 0） */
+// 涨跌标记（横坐标 = anchor_idx；绑定隐藏 yAxis=1；支持外部 width 覆盖）
 export function buildUpDownMarkers(reducedBars, env = {}) {
   const chan = Object.assign({}, CHAN_DEFAULTS, env.chanSettings || {}); // 合并设置
   const hostWidth = Math.max(1, Number(env.hostWidth || 0)); // 宿主宽度
   const visCount = Math.max(1, Number(env.visCount || 1)); // 可见根数
   const preset =
     CHAN_MARKER_PRESETS[chan.visualPreset] ||
-    CHAN_MARKER_PRESETS["tri-default"]; // 视觉预设
+    CHAN_MARKER_PRESETS["tri-default"];
 
-  const approxBarWidthPx =
-    hostWidth > 1 ? Math.max(1, Math.floor((hostWidth * 0.88) / visCount)) : 8; // 粗估柱宽
-  const markerW = Math.max(
-    chan.markerMinPx,
-    Math.min(chan.markerMaxPx, approxBarWidthPx)
-  ); // 标记宽
-  const markerH = 10; // 标记高
-  const offsetDownPx = Math.round(markerH * 1.2); // 向下偏移（相对隐藏轴底部）
+  // NEW: 符号宽度统一覆盖（若提供）
+  const extW = Number(env.symbolWidthPx || NaN); // 外部宽度像素
+  const approxW =
+    hostWidth > 1 && visCount > 0
+      ? Math.floor((hostWidth * 0.88) / visCount)
+      : 8; // 估算宽度
+  const markerW = Number.isFinite(extW)
+    ? Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, Math.round(extW))) // 使用外部宽度
+    : Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, approxW)); // 使用估算宽度
 
-  // 收集上涨/下跌 anchor 点
-  const upPoints = []; // 上涨承载点
-  const downPoints = []; // 下跌承载点
+  const markerH = Math.max(8, Math.round(markerW * 0.8)); // 高度按比例
+  const offsetDownPx = Math.round(markerH * 1.2); // 底部偏移（隐藏轴底部）
+
+  const upPoints = [];
+  const downPoints = []; // 承载点集合
   for (let i = 0; i < (reducedBars || []).length; i++) {
-    const rb = reducedBars[i]; // 当前复合柱
-    const d = Number(rb?.dir || 0); // 方向
-    if (!Number.isFinite(d) || d === 0) continue; // 跳过方向不明
-    const x = Number(rb.anchor_idx ?? rb.idx_end ?? i); // 横坐标：承载点原始索引
-    const point = [x, 0]; // y 固定为 0（隐藏轴的底部）
+    const rb = reducedBars[i];
+    const d = Number(rb?.dir || 0);
+    if (!Number.isFinite(d) || d === 0) continue;
+    const x = Number(rb.anchor_idx ?? rb.idx_end ?? i);
+    const point = [x, 0]; // 隐藏轴固定 y=0
     if (d > 0) upPoints.push(point);
-    else downPoints.push(point); // 分桶
+    else downPoints.push(point);
   }
 
-  // 简单抽稀：避免过多点渲染
   function downSample(arr, maxN) {
     const n = arr.length;
     if (n <= maxN) return arr;
@@ -52,39 +54,38 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     for (let i = 0; i < n; i += step) out.push(arr[i]);
     return out;
   }
-  const upArr = downSample(upPoints, chan.maxVisibleMarkers); // 上涨抽稀
-  const dnArr = downSample(downPoints, chan.maxVisibleMarkers); // 下跌抽稀
+  const upArr = downSample(upPoints, chan.maxVisibleMarkers);
+  const dnArr = downSample(downPoints, chan.maxVisibleMarkers);
 
-  const upShape = chan.upShape || preset.up.shape; // 上涨形状
-  const downShape = chan.downShape || preset.down.shape; // 下跌形状
-  const upFill = chan.upColor || preset.up.fill; // 上涨颜色
-  const downFill = chan.downColor || preset.down.fill; // 下跌颜色
+  const upShape = chan.upShape || preset.up.shape;
+  const downShape = chan.downShape || preset.down.shape;
+  const upFill = chan.upColor || preset.up.fill;
+  const downFill = chan.downColor || preset.down.fill;
 
   const commonScatter = {
-    type: "scatter", // 散点
-    yAxisIndex: 1, // 绑定到隐藏 yAxis（index=1，范围 0~1）
-    symbolSize: () => [markerW, markerH], // 自适应尺寸
-    symbolOffset: [0, offsetDownPx], // 底部偏移（向下）
-    clip: false, // 不裁剪
-    tooltip: { show: false }, // 不显示 tooltip
-    z: 2, // 层级
-    emphasis: { scale: false }, // 悬停不放大
+    type: "scatter",
+    yAxisIndex: 1, // 不变量：隐藏 y 轴 index=1
+    symbolSize: () => [markerW, markerH], // NEW：宽高统一受外部覆盖
+    symbolOffset: [0, offsetDownPx], // 底部偏移
+    clip: false,
+    tooltip: { show: false },
+    z: 2,
+    emphasis: { scale: false },
   };
 
   const upSeries = {
     ...commonScatter,
-    id: "CHAN_UP", // 系列 ID（供局部更新/清空）
-    name: "CHAN_UP",
+    id: "CHAN_UP",
+    name: "CHAN_UP", // 不变量：id: "CHAN_UP"
     data: upArr,
     symbol: upShape,
     symbolRotate: preset.up.rotate || 0,
     itemStyle: { color: upFill, opacity: chan.opacity },
   };
-
   const downSeries = {
     ...commonScatter,
     id: "CHAN_DOWN",
-    name: "CHAN_DOWN",
+    name: "CHAN_DOWN", // 不变量：id: "CHAN_DOWN"
     data: dnArr,
     symbol: downShape,
     symbolRotate: preset.down.rotate || 180,
@@ -93,7 +94,6 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
 
   const extra = { xAxisLabelMargin: Math.max(14, markerH + 12) }; // 预留横轴 margin
   if (!upArr.length && !dnArr.length) {
-    // 无点时清空
     return {
       series: [
         { ...upSeries, data: [] },
@@ -102,47 +102,46 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
       extra,
     };
   }
-  return { series: [upSeries, downSeries], extra }; // 返回系列
+  return { series: [upSeries, downSeries], extra };
 }
 
-/* 分型标记：横坐标用 fractal.xIndex（承载点原始索引）；顶/底三角顶点严格贴 G-2px / D+2px */
+// 分型标记：横坐标用 xIndex；绑定主轴 yAxisIndex=0；高度/间距按外部宽度与默认规则
 export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   const cfg = Object.assign({}, FRACTAL_DEFAULTS, env.fractalSettings || {}); // 合并配置
-  if (!cfg.enabled) return { series: [] }; // 未启用直接返回
+  if (!cfg.enabled) return { series: [] }; // 未启用不绘制
 
   const hostWidth = Math.max(1, Number(env.hostWidth || 0)); // 宿主宽
   const visCount = Math.max(1, Number(env.visCount || 1)); // 可见根数
-  const approxBarWidthPx =
-    hostWidth > 1 ? Math.max(1, Math.floor((hostWidth * 0.88) / visCount)) : 8; // 柱宽估算
-  const markerW = Math.max(
-    cfg.markerMinPx,
-    Math.min(cfg.markerMaxPx, approxBarWidthPx)
-  ); // 标记宽
-  const markerH = Math.max(8, Math.round(markerW * 0.8)); // 标记高
-  const apexGap = Math.abs(cfg.markerYOffsetPx || 2); // 顶点偏移
 
-  // 顶点与中心的关系：上三角顶点在 center - H/2；下三角顶点在 center + H/2
-  const yOffTop = -(markerH / 2 + apexGap); // 顶分中心向上偏移
-  const yOffBottom = +(markerH / 2 + apexGap); // 底分中心向下偏移
+  // NEW: 外部宽度覆盖（来自主窗广播）
+  const extW = Number(env.symbolWidthPx || NaN);
+  const approxW =
+    hostWidth > 1 && visCount > 0
+      ? Math.floor((hostWidth * 0.88) / visCount)
+      : 8;
+  const markerW = Number.isFinite(extW)
+    ? Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, Math.round(extW)))
+    : Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, approxW));
+  const markerH = Math.max(8, Math.round(markerW * 0.8)); // 高度与宽度比例
+  const apexGap = Math.abs(cfg.markerYOffsetPx || 2); // 顶点距 bar 间距（2px）
 
-  // 按类型与强弱分桶
+  const yOffTop = -(markerH / 2 + apexGap); // 顶分中心向上偏移（顶点与 bar 间距 2px）
+  const yOffBottom = +(markerH / 2 + apexGap); // 底分中心向下偏移（顶点与 bar 间距 2px）
+
   const bins = {
     top: { strong: [], standard: [], weak: [] },
     bottom: { strong: [], standard: [], weak: [] },
   };
 
-  // 采集散点：x 用 fractal.xIndex（承载点原始索引），y 用 G2/D2（顶点所对 y 值）
   for (const f of fractals || []) {
-    if (!cfg.showStrength?.[f.strength]) continue; // 强弱开关
+    if (!cfg.showStrength?.[f.strength]) continue;
     const x = Number(f.xIndex); // 横坐标（承载点索引）
-    if (f.type === "top")
-      bins.top[f.strength].push({ value: [x, f.G2] }); // 顶分
-    else bins.bottom[f.strength].push({ value: [x, f.D2] }); // 底分
+    if (f.type === "top") bins.top[f.strength].push({ value: [x, f.G2] });
+    else bins.bottom[f.strength].push({ value: [x, f.D2] });
   }
 
-  const series = []; // 输出系列数组
+  const series = []; // 分型系列集合
 
-  // 顶分（下三角）：逐档样式
   const topSpec = [
     { k: "strong", name: "TOP_STRONG" },
     { k: "standard", name: "TOP_STANDARD" },
@@ -151,17 +150,9 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   for (const sp of topSpec) {
     const data = bins.top[sp.k];
     if (!data.length) continue;
-
     const st = (cfg.styleByStrength && cfg.styleByStrength[sp.k]) || {};
-    const enabled =
-      (sp.k === "strong"
-        ? cfg.showStrength?.strong
-        : sp.k === "standard"
-        ? cfg.showStrength?.standard
-        : cfg.showStrength?.weak) &&
-      (st.enabled ?? true);
+    const enabled = (st.enabled ?? true) === true;
     if (!enabled) continue;
-
     const shape = st.topShape || cfg.topShape || "triangle";
     const color =
       st.topColor ||
@@ -171,15 +162,15 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     const isHollow = fillMode === "hollow";
 
     series.push({
-      id: `FR_TOP_${sp.k}`, // 系列 ID
+      id: `FR_TOP_${sp.k}`,
       name: sp.name,
       type: "scatter",
-      yAxisIndex: 0, // 使用主价格轴
+      yAxisIndex: 0, // 不变量：yAxisIndex: 0
       data,
       symbol: shape,
-      symbolRotate: shape === "triangle" ? 180 : 0, // 下三角
+      symbolRotate: shape === "triangle" ? 180 : 0,
       symbolSize: () => [markerW, markerH],
-      symbolOffset: [0, yOffTop], // 顶点贴合（G - 2px）
+      symbolOffset: [0, yOffTop], // NEW：宽度统一覆盖
       itemStyle: isHollow
         ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
         : { color },
@@ -189,7 +180,6 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     });
   }
 
-  // 底分（上三角）：逐档样式
   const botSpec = [
     { k: "strong", name: "BOT_STRONG" },
     { k: "standard", name: "BOT_STANDARD" },
@@ -198,17 +188,9 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   for (const sp of botSpec) {
     const data = bins.bottom[sp.k];
     if (!data.length) continue;
-
     const st = (cfg.styleByStrength && cfg.styleByStrength[sp.k]) || {};
-    const enabled =
-      (sp.k === "strong"
-        ? cfg.showStrength?.strong
-        : sp.k === "standard"
-        ? cfg.showStrength?.standard
-        : cfg.showStrength?.weak) &&
-      (st.enabled ?? true);
+    const enabled = (st.enabled ?? true) === true;
     if (!enabled) continue;
-
     const shape = st.bottomShape || cfg.bottomShape || "triangle";
     const color =
       st.bottomColor ||
@@ -221,12 +203,12 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       id: `FR_BOT_${sp.k}`,
       name: sp.name,
       type: "scatter",
-      yAxisIndex: 0, // 使用主价格轴
+      yAxisIndex: 0, // 不变量：yAxisIndex: 0
       data,
       symbol: shape,
-      symbolRotate: 0, // 上三角
+      symbolRotate: 0,
       symbolSize: () => [markerW, markerH],
-      symbolOffset: [0, yOffBottom], // 顶点贴合（D + 2px）
+      symbolOffset: [0, yOffBottom], // NEW：宽度统一覆盖
       itemStyle: isHollow
         ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
         : { color },
@@ -236,75 +218,57 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     });
   }
 
-  // 确认分型标记（在原有分型标记基础上再偏离 2px）
+  // 确认分型标记（比常规分型再外移 markerH + 4 px）
   (function appendConfirmMarkers() {
     const cs = cfg.confirmStyle || {};
     if (!cs.enabled) return;
-
     const topConfirmData = [];
     const botConfirmData = [];
-
     for (const f of fractals || []) {
-      if (!f?.confirm?.paired) continue; // 仅配对成功
+      if (!f?.confirm?.paired) continue;
       if (f.type === "top") topConfirmData.push({ value: [f.xIndex, f.G2] });
       else botConfirmData.push({ value: [f.xIndex, f.D2] });
     }
-
+    const extraGap = markerH + 4; // NEW：比常规再外移（与要求一致）
     if (topConfirmData.length) {
+      const shape = cs.topShape || "triangle";
+      const color = cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor;
       const isHollow = (cs.fill || "solid") === "hollow";
       series.push({
         id: "FR_TOP_CONFIRM",
         name: "TOP_CONFIRM",
         type: "scatter",
-        yAxisIndex: 0, // 使用主价格轴
+        yAxisIndex: 0,
         data: topConfirmData,
-        symbol: cs.topShape || "triangle",
-        symbolRotate: (cs.topShape || "triangle") === "triangle" ? 180 : 0, // 下三角
+        symbol: shape,
+        symbolRotate: shape === "triangle" ? 180 : 0,
         symbolSize: () => [markerW, markerH],
-        symbolOffset: [
-          0,
-          -(markerH / 2 + (Math.abs(cfg.markerYOffsetPx || 2) + markerH + 2)),
-        ], // 再远离 2px
+        symbolOffset: [0, -(markerH / 2 + (apexGap + extraGap))], // 顶部分外移
         itemStyle: isHollow
-          ? {
-              color: "transparent",
-              borderColor:
-                cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor,
-              borderWidth: 1.2,
-            }
-          : { color: cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor },
+          ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
+          : { color },
         z: 6,
         emphasis: { scale: false },
         tooltip: { show: false },
       });
     }
-
     if (botConfirmData.length) {
+      const shape = cs.bottomShape || "triangle";
+      const color = cs.bottomColor || FRACTAL_DEFAULTS.confirmStyle.bottomColor;
       const isHollow = (cs.fill || "solid") === "hollow";
       series.push({
         id: "FR_BOT_CONFIRM",
         name: "BOT_CONFIRM",
         type: "scatter",
-        yAxisIndex: 0, // 使用主价格轴
+        yAxisIndex: 0,
         data: botConfirmData,
-        symbol: cs.bottomShape || "triangle",
-        symbolRotate: 0, // 上三角
+        symbol: shape,
+        symbolRotate: 0,
         symbolSize: () => [markerW, markerH],
-        symbolOffset: [
-          0,
-          +(markerH / 2 + (Math.abs(cfg.markerYOffsetPx || 2) + markerH + 2)),
-        ], // 再远离 2px
+        symbolOffset: [0, +(markerH / 2 + (apexGap + extraGap))], // 底部分外移
         itemStyle: isHollow
-          ? {
-              color: "transparent",
-              borderColor:
-                cs.bottomColor || FRACTAL_DEFAULTS.confirmStyle.bottomColor,
-              borderWidth: 1.2,
-            }
-          : {
-              color:
-                cs.bottomColor || FRACTAL_DEFAULTS.confirmStyle.bottomColor,
-            },
+          ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
+          : { color },
         z: 6,
         emphasis: { scale: false },
         tooltip: { show: false },
@@ -312,11 +276,11 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     }
   })();
 
-  // 确认分型连线（同样使用 xIndex）
+  // 确认分型连线（按设定绘制）
   if (cfg.showConfirmLink) {
     const segs = [];
     for (const f of fractals || []) {
-      if (!f.confirm?.paired || f.confirm?.role !== "first") continue; // 只取 first
+      if (!f.confirm?.paired || f.confirm?.role !== "first") continue;
       const partner = (fractals || []).find(
         (x) =>
           x.confirm?.paired &&
@@ -337,12 +301,14 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     }
     if (segs.length) {
       const data = [];
-      for (const s of segs) data.push(s[0], s[1], null);
+      segs.forEach((s) => {
+        data.push(s[0], s[1], null);
+      });
       series.push({
         id: "FR_CONFIRM_LINKS",
         name: "FR_CONFIRM",
         type: "line",
-        yAxisIndex: 0, // 使用主价格轴
+        yAxisIndex: 0,
         data,
         connectNulls: false,
         showSymbol: false,
@@ -357,5 +323,5 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     }
   }
 
-  return { series }; // 返回系列集合
+  return { series };
 }

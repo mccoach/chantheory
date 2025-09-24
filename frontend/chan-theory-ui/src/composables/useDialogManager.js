@@ -36,13 +36,15 @@ function open(options) {
 
   // 写入激活状态（shallowRef 仅对第一层做响应式跟踪）
   activeDialog.value = {
-    title: options.title || "设置",                 // 标题（默认“设置”）
-    contentComponent: content,                     // 内容组件（已 markRaw）
-    onSave: typeof options.onSave === "function" ? options.onSave : null,       // 保存回调
-    onClose: typeof options.onClose === "function" ? options.onClose : null,    // 关闭回调
-    props: options.props || {},                    // 透传 props
-    tabs,                                          // 标签页数组（可空）
-    activeTab,                                     // 当前活动标签（可空）
+    title: options.title || "设置", // 标题（默认“设置”）
+    contentComponent: content, // 内容组件（已 markRaw）
+    onSave: typeof options.onSave === "function" ? options.onSave : null, // 保存回调
+    onClose: typeof options.onClose === "function" ? options.onClose : null, // 关闭回调
+    onResetAll:
+      typeof options.onResetAll === "function" ? options.onResetAll : null, // 全部恢复默认回调
+    props: options.props || {}, // 透传 props
+    tabs, // 标签页数组（可空）
+    activeTab, // 当前活动标签（可空）
   };
 }
 
@@ -68,8 +70,8 @@ function setActiveTab(key) {
 export function useDialogManager() {
   return {
     activeDialog: readonly(activeDialog), // 只读暴露状态（外部不可直接改）
-    open,                                 // 打开
-    close,                                // 关闭
-    setActiveTab,                         // 切换 tab
+    open, // 打开
+    close, // 关闭
+    setActiveTab, // 切换 tab
   };
 }

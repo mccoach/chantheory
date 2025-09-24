@@ -23,6 +23,7 @@
       @tab-change="(k) => dialogManager.setActiveTab(k)"
       @close="handleModalClose"
       @save="handleModalSave"
+      @reset-all="handleModalResetAll"
     >
       <template #body>
         <component
@@ -156,6 +157,24 @@ function handleModalClose() {
     }
   } else {
     dialogManager.close();
+  }
+}
+function handleModalResetAll() {
+  const dlg = dialogManager.activeDialog.value;
+  try {
+    if (dlg && typeof dlg.onResetAll === "function") {
+      dlg.onResetAll(); // 优先使用对话框自带重置回调
+      return;
+    }
+    // 次选：内容组件若暴露 resetAll()
+    const body = dialogBodyRef.value;
+    if (body && typeof body.resetAll === "function") {
+      body.resetAll();
+      return;
+    }
+    console.warn("当前设置窗未提供 onResetAll 或 resetAll，忽略重置命令。");
+  } catch (e) {
+    console.error("handleModalResetAll error:", e);
   }
 }
 

@@ -34,6 +34,7 @@
 
       <div class="foot">
         <div style="flex: 1"></div>
+        <button class="btn" @click="resetAll" type="button">全部恢复默认</button>
         <button class="btn ok" @click="save" type="button">保存并关闭</button>
         <button class="btn" @click="close" type="button">取消</button>
       </div>
@@ -54,6 +55,9 @@ function close() {
 }
 function save() {
   emit("save");
+}
+function resetAll() {
+  emit("reset-all");
 }
 </script>
 

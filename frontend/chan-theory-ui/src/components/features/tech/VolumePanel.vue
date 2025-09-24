@@ -289,11 +289,154 @@ const VolumeSettingsContent = defineComponent({
               (e) => (conf.enabled = !!e.target.checked)
             ),
             resetBtn(() => {
-              /* 恢复默认（略） */
+              const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
+              if (def) {
+                settingsDraftVol.mavolForm[k] = { ...def };
+                draftRev.value++; // 强制刷新设置面板
+              }
             }),
           ])
         );
       });
+      // —— 放/缩量标记设置（新增 UI，修复丢失）——
+      rows.push(
+        h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
+          nameCell("放量标记"),
+          itemCell(
+            "形状",
+            h(
+              "select",
+              {
+                class: "input",
+                value:
+                  settingsDraftVol.markerPump.shape ||
+                  DEFAULT_VOL_SETTINGS.markerPump.shape,
+                onChange: (e) =>
+                  (settingsDraftVol.markerPump.shape = String(e.target.value)),
+              },
+              [
+                h("option", "triangle"),
+                h("option", "diamond"),
+                h("option", "circle"),
+                h("option", "rect"),
+              ]
+            )
+          ),
+          itemCell(
+            "颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.markerPump.color ||
+                DEFAULT_VOL_SETTINGS.markerPump.color,
+              onInput: (e) =>
+                (settingsDraftVol.markerPump.color = String(e.target.value)),
+            })
+          ),
+          itemCell(
+            "阈值",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.1,
+              step: 0.1,
+              value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
+                ? +settingsDraftVol.markerPump.threshold
+                : DEFAULT_VOL_SETTINGS.markerPump.threshold,
+              onInput: (e) =>
+                (settingsDraftVol.markerPump.threshold = Math.max(
+                  0.1,
+                  Number(
+                    e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold
+                  )
+                )),
+            })
+          ),
+          h("div"),
+          h("div"),
+          checkCell(
+            !!settingsDraftVol.markerPump.enabled,
+            (e) => (settingsDraftVol.markerPump.enabled = !!e.target.checked)
+          ),
+          resetBtn(() => {
+            settingsDraftVol.markerPump = {
+              ...DEFAULT_VOL_SETTINGS.markerPump,
+            };
+            draftRev.value++;
+          }),
+        ])
+      );
+
+      rows.push(
+        h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
+          nameCell("缩量标记"),
+          itemCell(
+            "形状",
+            h(
+              "select",
+              {
+                class: "input",
+                value:
+                  settingsDraftVol.markerDump.shape ||
+                  DEFAULT_VOL_SETTINGS.markerDump.shape,
+                onChange: (e) =>
+                  (settingsDraftVol.markerDump.shape = String(e.target.value)),
+              },
+              [
+                h("option", "triangle"),
+                h("option", "diamond"),
+                h("option", "circle"),
+                h("option", "rect"),
+              ]
+            )
+          ),
+          itemCell(
+            "颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.markerDump.color ||
+                DEFAULT_VOL_SETTINGS.markerDump.color,
+              onInput: (e) =>
+                (settingsDraftVol.markerDump.color = String(e.target.value)),
+            })
+          ),
+          itemCell(
+            "阈值",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.1,
+              step: 0.1,
+              value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
+                ? +settingsDraftVol.markerDump.threshold
+                : DEFAULT_VOL_SETTINGS.markerDump.threshold,
+              onInput: (e) =>
+                (settingsDraftVol.markerDump.threshold = Math.max(
+                  0.1,
+                  Number(
+                    e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold
+                  )
+                )),
+            })
+          ),
+          h("div"),
+          h("div"),
+          checkCell(
+            !!settingsDraftVol.markerDump.enabled,
+            (e) => (settingsDraftVol.markerDump.enabled = !!e.target.checked)
+          ),
+          resetBtn(() => {
+            settingsDraftVol.markerDump = {
+              ...DEFAULT_VOL_SETTINGS.markerDump,
+            };
+            draftRev.value++;
+          }),
+        ])
+      );
+
       return h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
     };
   },
@@ -347,6 +490,21 @@ function openSettingsDialog() {
     title: "量窗设置",
     contentComponent: VolumeSettingsContent,
     props: {},
+    onResetAll: () => {
+      try {
+        // 柱体样式
+        settingsDraftVol.volBar = { ...DEFAULT_VOL_SETTINGS.volBar };
+        // MAVOL 三条
+        settingsDraftVol.mavolForm = JSON.parse(JSON.stringify(DEFAULT_VOL_SETTINGS.mavolStyles));
+        // 放/缩量标记
+        settingsDraftVol.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
+        settingsDraftVol.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
+        // 刷新设置面板
+        draftRev.value++;
+      } catch (e) {
+        console.error("resetAll (Volume) failed:", e);
+      }
+    },
     onSave: () => {
       settings.setVolSettings({
         ...vs,

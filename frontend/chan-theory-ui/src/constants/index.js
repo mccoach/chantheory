@@ -108,7 +108,7 @@ export const DEFAULT_MA_CONFIGS = {
     style: "solid",
   }, // MA20
   MA30: {
-    enabled: true,
+    enabled: false,
     period: 30,
     color: STYLE_PALETTE.lines[3].color,
     width: 1,
@@ -266,22 +266,22 @@ export const FRACTAL_DEFAULTS = {
       bottomShape: "triangle",
       bottomColor: "#FF0000",
       topShape: "triangle",
-      topColor: "#00ff00",
+      topColor: "#FF0000",
       fill: "solid",
       enabled: true,
     }, // 强
     standard: {
-      bottomShape: "diamond",
-      bottomColor: "#FF6600",
-      topShape: "diamond",
+      bottomShape: "triangle",
+      bottomColor: "#FFFF00",
+      topShape: "triangle",
       topColor: "#FFFF00",
       fill: "solid",
       enabled: true,
     }, // 标准
     weak: {
-      bottomShape: "rect",
-      bottomColor: "#FFB6C1",
-      topShape: "rect",
+      bottomShape: "diamond",
+      bottomColor: "#90EE90",
+      topShape: "diamond",
       topColor: "#90EE90",
       fill: "hollow",
       enabled: true,
@@ -289,7 +289,7 @@ export const FRACTAL_DEFAULTS = {
   }, // styleByStrength 结束
   confirmStyle: {
     bottomShape: "circle",
-    bottomColor: "#FF0000",
+    bottomColor: "#00ff00",
     topShape: "circle",
     topColor: "#00ff00",
     fill: "solid",

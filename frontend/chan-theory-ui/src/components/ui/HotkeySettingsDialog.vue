@@ -182,8 +182,27 @@ function save() {
   hotkeys.setUserOverrides(overrides);
 }
 
-// 将 save 暴露给父组件（App.vue 中可通过 ref 调用 dialogBodyRef.value.save()）
-defineExpose({ save });
+// 全部恢复默认（仅修改草稿；用户点击“保存并关闭”后生效）
+function resetAll() {
+  try {
+    const invert = (map) => {
+      const out = {};
+      Object.keys(map || {}).forEach((combo) => {
+        const cmd = map[combo];
+        out[cmd] = combo;
+      });
+      return out;
+    };
+    scopes.forEach((s) => {
+      draftBindings[s] = invert(defaultKeymap[s] || {});
+    });
+  } catch (e) {
+    console.error("hotkey resetAll failed:", e);
+  }
+}
+
+// 将 save、resetAll 暴露给父组件（App.vue 中可通过 ref 调用 dialogBodyRef.value.save()）
+defineExpose({ save, resetAll });
 
 // 挂载：初始化草稿
 onMounted(() => {

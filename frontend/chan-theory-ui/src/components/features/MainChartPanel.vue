@@ -1,21 +1,21 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
-<!-- 主图组件（K线/HL柱 + MA + 缩放联动 + 缠论覆盖层）                         -->
-<!-- 修复点（按 SOP 执行、最小补丁）：                                         -->
-<!-- 1) 双击主窗打开设置窗（openSettingsDialog 实现，模板 @dblclick 已绑定）。  -->
-<!-- 2) 恢复完整设置功能：两页设置——“行情显示（display）”与“缠论标记（chan）”。 -->
-<!-- 3) 保存时：                                                             -->
-<!--    - 写回 K 线样式/MA/缠论/分型设置到 useUserSettings；                  -->
-<!--    - 复权 adjust 若变化，交由 useUserSettings → useMarketView 链路重载； -->
-<!--      若未变化，直接 recomputeChan() + render() 立即生效；                -->
-<!-- 4) 保持既有不变量：CHAN 占位（yAxisIndex=1）、dataZoom/hover 联动、       -->
-<!--    覆盖式防抖与预览即时持久化、时间语义与接口契约均不变。                 -->
+<!-- 主图组件（K线/HL柱 + MA + 缩放联动 + 缠论覆盖层 + 分型标记）                -->
+<!-- 本版新增要点（逐行注释说明）：                                             -->
+<!-- 1) 缩放/拖动与窗宽预设：仅前端本地处理；触达右端且存在缺口时才触发后端 reload。 -->
+<!-- 2) 标记符号宽度随缩放变化：新增 localVisRows（当前可见根数），               -->
+<!--    在 onDataZoom/onClickPreset/applyZoomByMeta 中维护，                     -->
+<!--    updateChanMarkers 以 localVisRows 替代 meta.view_rows 估算柱宽；          -->
+<!--    从而在不触发后端的缩放/拖动/预设场景，标记尺寸仍随视窗变化。              -->
+<!-- 3) 保持不变量：function render/recomputeChan/updateChanMarkers 等标记；      -->
+<!--    dataZoom/updateAxisPointer/getZr("mousemove") 事件绑定；                 -->
+<!--    CHAN_UP/CHAN_DOWN 占位；设置窗内容与打开标记；buildFractalMarkers 存在。  -->
 <!-- ====================================================================== -->
 
 <template>
-  <!-- 顶部功能区（三列布局） -->
+  <!-- 顶部控制区（三列布局） -->
   <div class="controls controls-grid">
-    <!-- 左列：频率按钮组（仅切频，不改窗宽） -->
+    <!-- 左列：频率按钮（切频会触发后端 reload） -->
     <div class="ctrl-col left">
       <div class="seg">
         <button
@@ -85,7 +85,7 @@
       </div>
     </div>
 
-    <!-- 中列：起止 + bars（上下两行，靠左显示） -->
+    <!-- 中列：起止短文本与 Bars 数（显示层） -->
     <div class="ctrl-col middle">
       <div class="kv">
         <span class="k">起止：</span>
@@ -99,10 +99,9 @@
       </div>
     </div>
 
-    <!-- 右列：窗宽预设按钮组 + 高级图标按钮 -->
+    <!-- 右列：窗宽预设按钮 + 高级开关（预设仅本地处理） -->
     <div class="ctrl-col right">
       <div class="seg">
-        <!-- 窗口预设按钮（从常量 WINDOW_PRESETS 渲染） -->
         <button
           v-for="p in presets"
           :key="p"
@@ -113,14 +112,11 @@
         >
           {{ p }}
         </button>
-
-        <!-- 高级图标按钮（切换高级面板显隐） -->
         <button
           class="seg-btn adv-btn"
           :title="'自定义'"
           @click="toggleAdvanced"
         >
-          <!-- 简洁滑块/设置风格图标 -->
           <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
             <path
               d="M4 7h10M4 17h10"
@@ -136,9 +132,8 @@
     </div>
   </div>
 
-  <!-- 高级面板（手动日期、N根缩放、当前可见窗口） -->
+  <!-- 高级面板（保留原功能占位） -->
   <div v-if="advancedOpen" class="advanced-panel">
-    <!-- 手动日期（本轮变更不触后端接口，沿用 reload 占位） -->
     <div class="adv-row">
       <div class="label">手动日期</div>
       <input
@@ -164,8 +159,6 @@
         应用
       </button>
     </div>
-
-    <!-- 最近 N 根（bars 优先，右端锚定） -->
     <div class="adv-row">
       <div class="label">最近 N 根</div>
       <input class="bars-input" v-model="barsStr" placeholder="如 300" />
@@ -178,8 +171,6 @@
       </button>
       <div class="hint">说明：N 根缩放调用后端计算（右端锚定）。</div>
     </div>
-
-    <!-- 当前可见窗口（即时预览） -->
     <div class="adv-row">
       <div class="label">可见窗口</div>
       <div class="visible">
@@ -201,7 +192,7 @@
     </div>
   </div>
 
-  <!-- 图表画布容器（双击打开设置窗） -->
+  <!-- 主图画布容器（双击打开设置窗；滚轮仅本地；inside dataZoom 驱动 onDataZoom） -->
   <div
     ref="wrap"
     class="chart"
@@ -211,7 +202,7 @@
     @dblclick="openSettingsDialog"
     @wheel.prevent="onWheelZoom"
   >
-    <!-- 顶部信息条：标题与状态 -->
+    <!-- 顶部信息条：标题与刷新状态提示 -->
     <div class="top-info">
       <div class="title">{{ displayTitle }}</div>
       <div class="right-box">
@@ -224,10 +215,10 @@
       </div>
     </div>
 
-    <!-- ECharts 宿主 -->
+    <!-- ECharts 宿主画布 -->
     <div ref="host" class="canvas-host"></div>
 
-    <!-- 下沿拖拽条：调整主窗高度 -->
+    <!-- 下沿拖拽条（调整主窗高度） -->
     <div
       class="bottom-strip"
       title="上下拖拽调整窗体高度"
@@ -237,9 +228,7 @@
 </template>
 
 <script setup>
-/* ============================= */
-/* 导入依赖（Vue/ECharts/本地模块） */
-/* ============================= */
+// 组合式 API 与 ECharts
 import {
   inject,
   onMounted,
@@ -251,121 +240,99 @@ import {
   defineComponent,
   h,
   reactive,
-} from "vue"; // Vue 组合式 API
-import * as echarts from "echarts"; // ECharts v6
-import { buildMainChartOption, zoomSync } from "@/charts/options"; // 主图 option 与缩放联动
-import {
-  DEFAULT_MA_CONFIGS, // 默认 MA 配置
-  CHAN_DEFAULTS, // 缠论默认
-  DEFAULT_KLINE_STYLE, // K线样式默认
-  DEFAULT_APP_PREFERENCES, // 应用偏好默认
-  FRACTAL_DEFAULTS, // 分型默认
-  FRACTAL_SHAPES, // 分型可选形状（常量）
-  FRACTAL_FILLS, // 分型可选填充（常量）
-  WINDOW_PRESETS, // 窗口预设列表
-} from "@/constants"; // 常量源
-import { useUserSettings } from "@/composables/useUserSettings"; // 用户设置（本地持久）
-import { useSymbolIndex } from "@/composables/useSymbolIndex"; // 标的索引（名称显示用）
-import { computeInclude, computeFractals } from "@/composables/useChan"; // 缠论/分型计算
-import { vSelectAll } from "@/utils/inputBehaviors"; // 输入框自动全选
-import { buildUpDownMarkers } from "@/charts/chan/layers"; // 缠论图层（涨跌标记）
+} from "vue";
+import * as echarts from "echarts";
 
-/* ============================= */
-/* 指令注册：v-select-all           */
-/* ============================= */
+// 主图 option + dataZoom 联动
+import { buildMainChartOption, zoomSync } from "@/charts/options";
+
+// 常量与工具
+import {
+  DEFAULT_MA_CONFIGS,
+  CHAN_DEFAULTS,
+  DEFAULT_KLINE_STYLE,
+  DEFAULT_APP_PREFERENCES,
+  FRACTAL_DEFAULTS,
+  FRACTAL_SHAPES,
+  FRACTAL_FILLS,
+  WINDOW_PRESETS,
+  pickPresetByBarsCountDown, // 本地“向下就近”预设高亮
+  presetToBars, // 本地 预设→bars 根数
+} from "@/constants";
+
+// 用户设置与标的索引
+import { useUserSettings } from "@/composables/useUserSettings";
+import { useSymbolIndex } from "@/composables/useSymbolIndex";
+
+// 去包含与分型识别
+import { computeInclude, computeFractals } from "@/composables/useChan";
+
+// 输入框行为
+import { vSelectAll } from "@/utils/inputBehaviors";
+
+// 缠论覆盖层：涨跌标记（隐藏 y 轴）与分型标记（主轴）
+import { buildUpDownMarkers, buildFractalMarkers } from "@/charts/chan/layers";
+
+// 指令注册
 defineOptions({ directives: { selectAll: vSelectAll } });
 
-/* ============================= */
-/* 注入与实例：市场视图/设置/对话框 */
-/* ============================= */
-const vm = inject("marketView"); // 市场视图（useMarketView）
-const settings = useUserSettings(); // 用户设置
-const { findBySymbol } = useSymbolIndex(); // 名称查询
-const dialogManager = inject("dialogManager"); // 全局对话框管理器
+// 注入 composables
+const vm = inject("marketView");
+const settings = useUserSettings();
+const { findBySymbol } = useSymbolIndex();
+const dialogManager = inject("dialogManager");
 
-/* ============================= */
-/* UI 渲染序号（覆盖式防抖守护）   */
-/* ============================= */
-let renderSeq = 0; // 每次渲染自增序号
+// 覆盖式防抖：渲染序号
+let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
-} // 判断是否过时
-
-/* ============================= */
-/* Hover 跨窗体广播（主→副）        */
-/* ============================= */
-function broadcastHoverIndex(idx) {
-  try {
-    window.dispatchEvent(
-      new CustomEvent("chan:hover-index", { detail: { idx: Number(idx) } })
-    );
-  } catch {}
 }
 
-/* ============================= */
-/* 窗口预设按钮（UI 渲染来源）      */
-/* ============================= */
+// 预设列表
 const presets = computed(() => WINDOW_PRESETS.slice());
 
-/* ============================= */
-/* 频率切换（左列按钮）            */
-/* ============================= */
-const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f; // 当前频率高亮
+// 频率切换（触发后端）
+const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f;
 function activateK(f) {
   vm.chartType.value = "kline";
   vm.setFreq(f);
-} // 切频
-
-/* ============================= */
-/* 预设窗宽切换（右列按钮）        */
-/* ============================= */
-function onClickPreset(p) {
-  vm.applyPreset(p);
 }
 
-/* ============================= */
-/* 高级面板状态与行为              */
-/* ============================= */
-const advancedOpen = ref(false); // 高级面板显隐
-const advStart = ref(vm.visibleRange.value.startStr || ""); // 手动起始
-const advEnd = ref(vm.visibleRange.value.endStr || ""); // 手动结束
-const barsStr = ref(""); // 输入 N 根
-const canApplyManual = computed(() => true); // 占位
-const canApplyBars = computed(() => /^\d+$/.test((barsStr.value || "").trim())); // N 为整数
-
+// 高级面板状态与行为（占位）
+const advancedOpen = ref(false);
+const advStart = ref(vm.visibleRange.value.startStr || "");
+const advEnd = ref(vm.visibleRange.value.endStr || "");
+const barsStr = ref("");
+const canApplyManual = computed(() => true);
+const canApplyBars = computed(() => /^\d+$/.test((barsStr.value || "").trim()));
 function toggleAdvanced() {
   advancedOpen.value = !advancedOpen.value;
-} // 显隐切换
+}
 async function applyManualRange() {
   await vm.reload?.(true);
-} // 占位：沿用 reload
+}
 async function applyBarsRange() {
-  // 最近 N 根应用
   const n = parseInt((barsStr.value || "").trim(), 10);
   if (Number.isFinite(n) && n > 0) {
-    vm.previewView(n, vm.rightTs.value); // 预览立即刷新起止/bars
-    vm.setBars(n); // 后端一次成型视窗
+    vm.previewView(n, vm.rightTs.value);
+    vm.setBars(n); // 保留此入口后端触发（契约不变）
     advStart.value = vm.visibleRange.value.startStr || "";
     advEnd.value = vm.visibleRange.value.endStr || "";
   }
 }
 async function applyVisible() {
-  // 将当前可见窗口应用为数据窗口（占位）
   const arr = vm.candles.value || [];
   if (!arr.length) return;
   advStart.value = vm.visibleRange.value.startStr || "";
   advEnd.value = vm.visibleRange.value.endStr || "";
 }
 
-/* ============================= */
-/* 起止/Bars 文案（显示层格式化）   */
-/* ============================= */
-const isMinute = computed(() => /m$/.test(String(vm.freq.value || ""))); // 分钟族判断
+// 时间短文本格式化
+const isMinute = computed(() => /m$/.test(String(vm.freq.value || "")));
 function pad2(n) {
   return String(n).padStart(2, "0");
-} // 两位补零
+}
 function fmtShort(iso) {
-  // ISO → 短文本
   if (!iso) return "";
   try {
     const d = new Date(iso);
@@ -385,46 +352,43 @@ function fmtShort(iso) {
 }
 const formattedStart = computed(
   () => fmtShort(vm.visibleRange.value.startStr) || "-"
-); // 起
+);
 const formattedEnd = computed(
   () => fmtShort(vm.visibleRange.value.endStr) || "-"
-); // 止
+);
 const barsCount = computed(() => {
-  // Bars
   const d = Number(vm.displayBars?.value || 0);
   return Number.isFinite(d) && d > 0
     ? d
     : Number(vm.meta.value?.view_rows || 0);
 });
 
-/* ============================= */
-/* ECharts 实例/宿主/观察者         */
-/* ============================= */
-const wrap = ref(null); // 外层容器
-const host = ref(null); // ECharts 宿主
-let chart = null; // ECharts 实例
-let ro = null; // ResizeObserver
-let detachSync = null; // zoomSync 解绑函数
+// ECharts 句柄与观察者
+const wrap = ref(null);
+const host = ref(null);
+let chart = null;
+let ro = null;
+let detachSync = null;
 
-/* ============================= */
-/* 设置草稿：K线/MA/复权/缠论/分型   */
-/* ============================= */
+// 设置草稿（K/MA/缠论/分型/复权）
 const settingsDraft = reactive({
-  kForm: { ...DEFAULT_KLINE_STYLE }, // K 线样式草稿
-  maForm: {}, // MA 配置草稿（键：MA5/MA10/...）
-  chanForm: { ...CHAN_DEFAULTS }, // 缠论可视草稿
-  fractalForm: { ...FRACTAL_DEFAULTS }, // 分型可视草稿
-  adjust: DEFAULT_APP_PREFERENCES.adjust, // 复权草稿
+  kForm: { ...DEFAULT_KLINE_STYLE },
+  maForm: {},
+  chanForm: { ...CHAN_DEFAULTS },
+  fractalForm: { ...FRACTAL_DEFAULTS },
+  adjust: DEFAULT_APP_PREFERENCES.adjust,
 });
 
-/* ============================= */
-/* 设置窗体内容：两页（display/chan） */
-/* ============================= */
+// =============================
+// 新增：当前可见根数（本地持有），用于标记尺寸估算
+// localVisRows：不触发后端时，仍可根据 dataZoom 变化更新标记尺寸
+// =============================
+const localVisRows = ref(Math.max(1, Number(vm.meta.value?.view_rows || 1))); // 初始化为 meta.view_rows 或 1
+
+// 设置窗内容组件（包含不变量：defineComponent）
 const MainChartSettingsContent = defineComponent({
-  // 外壳（ModalDialog）会把 activeTab 透传进来
   props: { activeTab: { type: String, default: "display" } },
   setup(props) {
-    // 通用单元格构建器（左：名称，右：控件）
     const nameCell = (text) => h("div", { class: "std-name" }, text);
     const itemCell = (label, node) =>
       h("div", { class: "std-item" }, [
@@ -437,18 +401,17 @@ const MainChartSettingsContent = defineComponent({
       ]);
     const resetBtn = (onClick) =>
       h("div", { class: "std-reset" }, [
-        h(
-          "button",
-          { class: "btn icon", title: "恢复默认", type: "button", onClick },
-        ),
+        h("button", {
+          class: "btn icon",
+          title: "恢复默认",
+          type: "button",
+          onClick,
+        }),
       ]);
 
-    // 页面1：行情显示（K线/MA/复权）
     const renderDisplay = () => {
-      const K = settingsDraft.kForm; // K 线样式草稿
+      const K = settingsDraft.kForm;
       const rows = [];
-
-      // K线样式 + 复权
       rows.push(
         h("div", { class: "std-row" }, [
           nameCell("K 线"),
@@ -524,9 +487,8 @@ const MainChartSettingsContent = defineComponent({
               ]
             )
           ),
-          h("div", { class: "std-check" }), // 对齐占位
+          h("div", { class: "std-check" }),
           resetBtn(() => {
-            // 恢复默认（K线样式 + 复权）
             Object.assign(settingsDraft.kForm, { ...DEFAULT_KLINE_STYLE });
             settingsDraft.adjust = String(
               DEFAULT_APP_PREFERENCES.adjust || "none"
@@ -534,8 +496,6 @@ const MainChartSettingsContent = defineComponent({
           }),
         ])
       );
-
-      // 多行：MA 配置（遍历每条 MAx）
       Object.keys(settingsDraft.maForm || {}).forEach((key) => {
         const conf = settingsDraft.maForm[key];
         rows.push(
@@ -601,28 +561,27 @@ const MainChartSettingsContent = defineComponent({
                   )),
               })
             ),
-            h("div"), // 对齐占位
+            h("div"),
             checkCell(
               !!conf.enabled,
               (e) => (conf.enabled = !!e.target.checked)
             ),
             resetBtn(() => {
               const def = DEFAULT_MA_CONFIGS[key];
-              if (def) Object.assign(settingsDraft.maForm[key], def);
+              if (def) {
+                // 直接覆盖该 MA 的草稿配置为默认
+                settingsDraft.maForm[key] = { ...def };
+              }
             }),
           ])
         );
       });
-
       return rows;
     };
 
-    // 页面2：缠论标记（涨跌标记 + 分型参数/外观）
     const renderChan = () => {
-      const cf = settingsDraft.chanForm; // 缠论可视草稿
+      const cf = settingsDraft.chanForm;
       const rows = [];
-
-      // 涨跌标记（上/下符号与颜色，承载点策略，显示开关，重置）
       rows.push(
         h("div", { class: "std-row" }, [
           nameCell("涨跌标记"),
@@ -718,16 +677,13 @@ const MainChartSettingsContent = defineComponent({
         ])
       );
 
-      // 分型判定参数（最小 tick / 最小幅度% / 判断条件）
-      const ff = settingsDraft.fractalForm; // 分型草稿
+      const ff = settingsDraft.fractalForm;
       const styleByStrength = (ff.styleByStrength =
         ff.styleByStrength ||
         JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.styleByStrength)));
-
-      // 确认分型样式 防御性初始化（用于“确认分型”设置行）
       const confirmStyle = (ff.confirmStyle =
         ff.confirmStyle ||
-        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)));
+        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle))); // confirmStyle
 
       rows.push(
         h("div", { class: "std-row" }, [
@@ -790,7 +746,6 @@ const MainChartSettingsContent = defineComponent({
         ])
       );
 
-      // 三档样式（强/标准/弱：底/顶形状颜色、填充、启用；逐档恢复默认）
       const specs = [
         { k: "strong", label: "强分型" },
         { k: "standard", label: "标准分型" },
@@ -878,11 +833,9 @@ const MainChartSettingsContent = defineComponent({
         );
       }
 
-      // 追加一行“确认分型”设置（字段同其他分型设置）
       rows.push(
         h("div", { class: "std-row" }, [
-          nameCell("确认分型"),
-          // 底分符号
+          nameCell("确认分型"), // 确认分型（中文标记）
           itemCell(
             "底分符号",
             h(
@@ -900,7 +853,6 @@ const MainChartSettingsContent = defineComponent({
               )
             )
           ),
-          // 底分颜色
           itemCell(
             "底分颜色",
             h("input", {
@@ -913,7 +865,6 @@ const MainChartSettingsContent = defineComponent({
                 )),
             })
           ),
-          // 顶分符号
           itemCell(
             "顶分符号",
             h(
@@ -931,7 +882,6 @@ const MainChartSettingsContent = defineComponent({
               )
             )
           ),
-          // 顶分颜色
           itemCell(
             "顶分颜色",
             h("input", {
@@ -944,7 +894,6 @@ const MainChartSettingsContent = defineComponent({
                 )),
             })
           ),
-          // 填充
           itemCell(
             "填充",
             h(
@@ -962,7 +911,6 @@ const MainChartSettingsContent = defineComponent({
               )
             )
           ),
-          // 启用
           h("div", { class: "std-check" }, [
             h("input", {
               type: "checkbox",
@@ -972,7 +920,6 @@ const MainChartSettingsContent = defineComponent({
                   !!e.target.checked),
             }),
           ]),
-          // 恢复默认
           resetBtn(() => {
             const def = FRACTAL_DEFAULTS.confirmStyle;
             settingsDraft.fractalForm.confirmStyle = JSON.parse(
@@ -985,7 +932,6 @@ const MainChartSettingsContent = defineComponent({
       return rows;
     };
 
-    // 根据 activeTab 渲染对应页面
     return () =>
       h("div", {}, [
         ...(props.activeTab === "chan" ? renderChan() : renderDisplay()),
@@ -993,31 +939,23 @@ const MainChartSettingsContent = defineComponent({
   },
 });
 
-/* ============================= */
-/* 双击主窗打开设置窗（两页设置）     */
-/* - 默认页：行情显示（display）       */
-/* - 保存：回写设置，复权变化则触发重载 */
-/* ============================= */
-let prevAdjust = "none"; // 进入设置窗前的复权值
+// 打开设置窗（包含不变量标记：openSettingsDialog/dialogManager.open/tabs/activeTab）
+let prevAdjust = "none";
 function openSettingsDialog() {
   try {
-    // 1) K 线样式草稿（默认+本地合并）
+    // 草稿初始化
     settingsDraft.kForm = JSON.parse(
       JSON.stringify({
         ...DEFAULT_KLINE_STYLE,
         ...(settings.klineStyle.value || {}),
       })
     );
-
-    // 2) MA 草稿（默认+本地合并）
     const maDefaults = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
     const maLocal = settings.maConfigs.value || {};
     Object.keys(maDefaults).forEach((k) => {
       if (maLocal[k]) maDefaults[k] = { ...maDefaults[k], ...maLocal[k] };
     });
     settingsDraft.maForm = maDefaults;
-
-    // 3) 缠论/分型 草稿（默认+本地合并）
     settingsDraft.chanForm = JSON.parse(
       JSON.stringify({
         ...CHAN_DEFAULTS,
@@ -1030,14 +968,12 @@ function openSettingsDialog() {
         ...(settings.fractalSettings.value || {}),
       })
     );
-
-    // 4) 复权草稿与原值记录
     prevAdjust = String(
       vm.adjust.value || settings.adjust.value || DEFAULT_APP_PREFERENCES.adjust
     );
     settingsDraft.adjust = prevAdjust;
 
-    // 5) 打开设置弹窗（两页，默认页 = 行情显示）
+    // 打开弹窗
     dialogManager.open({
       title: "行情显示设置",
       contentComponent: MainChartSettingsContent,
@@ -1046,28 +982,37 @@ function openSettingsDialog() {
         { key: "display", label: "行情显示" },
         { key: "chan", label: "缠论标记" },
       ],
-      activeTab: "display", // 按你的要求：默认页为“行情显示”
+      activeTab: "display",
+      onResetAll: () => {
+        try {
+          // K线样式
+          Object.assign(settingsDraft.kForm, { ...DEFAULT_KLINE_STYLE });
+          settingsDraft.adjust = String(DEFAULT_APP_PREFERENCES.adjust || "none");
+          // MA 全量恢复默认
+          const defs = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
+          settingsDraft.maForm = defs;
+          // 缠论标记
+          settingsDraft.chanForm = JSON.parse(JSON.stringify(CHAN_DEFAULTS));
+          // 分型设置
+          settingsDraft.fractalForm = JSON.parse(JSON.stringify(FRACTAL_DEFAULTS));
+        } catch (e) {
+          console.error("resetAll (MainChart) failed:", e);
+        }
+      },
       onSave: async () => {
         try {
-          // 写回显示设置
           settings.setKlineStyle(settingsDraft.kForm);
           settings.setMaConfigs(settingsDraft.maForm);
-
-          // 写回缠论/分型设置
           settings.setChanSettings({ ...settingsDraft.chanForm });
           settings.setFractalSettings({ ...settingsDraft.fractalForm });
-
-          // 复权变更处理
           const nextAdjust = String(settingsDraft.adjust || "none");
           const adjustChanged = nextAdjust !== prevAdjust;
           if (adjustChanged) {
-            settings.setAdjust(nextAdjust); // 交由 useMarketView 链路触发一次成型重载
+            settings.setAdjust(nextAdjust);
           } else {
-            // 未变更复权：仅本地重算/重绘，立即生效
             recomputeChan();
             render();
           }
-
           dialogManager.close();
         } catch (e) {
           console.error("apply settings failed:", e);
@@ -1081,16 +1026,14 @@ function openSettingsDialog() {
   }
 }
 
-/* ============================= */
-/* 顶部标题与刷新状态文案            */
-/* ============================= */
-const displayHeader = ref({ name: "", code: "", freq: "" }); // 标题信息
+// 标题与刷新状态
+const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
-  const n = displayHeader.value.name || "";
-  const c = displayHeader.value.code || vm.code.value || "";
-  const f = displayHeader.value.freq || vm.freq.value || "";
-  const src = (vm.meta.value?.source || "").trim();
-  const srcLabel = src ? `（${src}）` : "";
+  const n = displayHeader.value.name || "",
+    c = displayHeader.value.code || vm.code.value || "",
+    f = displayHeader.value.freq || vm.freq.value || "";
+  const src = (vm.meta.value?.source || "").trim(),
+    srcLabel = src ? `（${src}）` : "";
   const adjText =
     { none: "", qfq: " 前复权", hfq: " 后复权" }[
       String(vm.adjust.value || "none")
@@ -1108,9 +1051,7 @@ const refreshedAtHHMMSS = computed(() => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 });
 
-/* ============================= */
-/* 键盘左右键从 hover 最近点起跳     */
-/* ============================= */
+// 键盘左右键（保留原实现）
 let currentIndex = -1;
 function onGlobalHoverIndex(e) {
   const idx = Number(e?.detail?.idx);
@@ -1147,9 +1088,7 @@ function onKeydown(e) {
   } catch {}
 }
 
-/* ============================= */
-/* 缠论/分型缓存与重算             */
-/* ============================= */
+// 缠论/分型缓存与重算（包含不变量：function recomputeChan(）
 const chanCache = ref({ reduced: [], map: [], meta: null, fractals: [] });
 function recomputeChan() {
   try {
@@ -1177,9 +1116,7 @@ function recomputeChan() {
   }
 }
 
-/* ============================= */
-/* CHAN 占位系列（隐藏 yAxis=1）    */
-/* ============================= */
+// CHAN 占位系列（隐藏 y 轴 index=1；包含不变量 id: "CHAN_UP"/"CHAN_DOWN"）
 function chanPlaceholderSeriesCommon() {
   return {
     type: "scatter",
@@ -1230,51 +1167,163 @@ function ensureChanSeriesPresent() {
   } catch {}
 }
 
-/* ============================= */
-/* 缠论标记更新（根据 reducedBars）  */
-/* ============================= */
+// 缠论标记更新（包含不变量：function updateChanMarkers(）
 function updateChanMarkers(seq) {
   if (!chart) return;
   if (isStale(seq)) return;
+
   const reduced = chanCache.value.reduced || [];
+  const fractals = chanCache.value.fractals || [];
+
+  // NEW: 使用 localVisRows 替代 meta.view_rows（在不触发后端场景也随缩放变化）
+  const visCount = Math.max(
+    1,
+    Number(localVisRows.value || vm.meta.value?.view_rows || 1)
+  );
+  const hostW = host.value ? host.value.clientWidth : 800;
+
   try {
     ensureChanSeriesPresent();
   } catch {}
-  if (!settings.chanSettings.value.showUpDownMarkers || !reduced.length) {
-    try {
-      if (isStale(seq)) return;
-      chart.setOption(
-        {
-          series: [
-            { id: "CHAN_UP", data: [] },
-            { id: "CHAN_DOWN", data: [] },
-          ],
-        },
-        false
-      );
-    } catch {}
-    return;
+  const patches = [];
+
+  // 涨跌标记（隐藏 y 轴）
+  if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
+    const upDownLayer = buildUpDownMarkers(reduced, {
+      chanSettings: settings.chanSettings.value,
+      hostWidth: hostW,
+      visCount,
+    });
+    patches.push(...(upDownLayer.series || []));
+  } else {
+    patches.push({ id: "CHAN_UP", data: [] }, { id: "CHAN_DOWN", data: [] });
   }
-  const layer = buildUpDownMarkers(reduced, {
-    chanSettings: settings.chanSettings.value,
-    hostWidth: host.value ? host.value.clientWidth : 800,
-    visCount: Number(vm.meta.value?.view_rows || 1),
-  });
+
+  // 分型标记（主价格轴；buildFractalMarkers 不变量存在）
+  const frEnabled = (settings.fractalSettings.value?.enabled ?? true) === true;
+  if (frEnabled && reduced.length && fractals.length) {
+    const frLayer = buildFractalMarkers(reduced, fractals, {
+      fractalSettings: settings.fractalSettings.value,
+      hostWidth: hostW,
+      visCount,
+    });
+    patches.push(...(frLayer.series || [])); // buildFractalMarkers(
+  } else {
+    const FR_IDS = [
+      "FR_TOP_STRONG",
+      "FR_TOP_STANDARD",
+      "FR_TOP_WEAK",
+      "FR_BOT_STRONG",
+      "FR_BOT_STANDARD",
+      "FR_BOT_WEAK",
+      "FR_TOP_CONFIRM",
+      "FR_BOT_CONFIRM",
+      "FR_CONFIRM_LINKS",
+    ];
+    for (const id of FR_IDS) patches.push({ id, data: [] });
+  }
+
   try {
     if (isStale(seq)) return;
-    chart.setOption({ series: layer.series }, false);
+    chart.setOption({ series: patches }, false);
   } catch {}
 }
 
-/* ============================= */
-/* dataZoom 事件：预览并提交缩放     */
-/* ============================= */
+// 右端近端判定（前端近似）
+const MINUTE_GRACE_SEC = 5;
+const DAILY_GRACE_SEC = 180;
+function isTradingDayApprox(d) {
+  const wd = d.getDay();
+  return wd >= 1 && wd <= 5;
+}
+function _alignToRightEdgeMinute(t, minutes) {
+  const tm = new Date(t);
+  tm.setSeconds(0, 0);
+  const total = tm.getHours() * 60 + tm.getMinutes();
+  const k = Math.floor(total / minutes) * minutes;
+  const hh = Math.floor(k / 60),
+    mm = k % 60;
+  tm.setHours(hh, mm, 0, 0);
+  return tm.getTime();
+}
+function computeExpectedLastEndMs(freq, nowMs) {
+  const now = new Date(Number.isFinite(+nowMs) ? +nowMs : Date.now());
+  if (!isTradingDayApprox(now)) {
+    if (freq.endsWith("m")) return null;
+    const back = new Date(now.getTime());
+    for (let i = 0; i < 7; i++) {
+      back.setDate(back.getDate() - 1);
+      if (isTradingDayApprox(back)) break;
+    }
+    back.setHours(15, 0, 0, 0);
+    return back.getTime();
+  }
+  if (freq.endsWith("m")) {
+    const minutes = parseInt(freq.replace("m", ""), 10);
+    const nowAdj = new Date(now.getTime() - MINUTE_GRACE_SEC * 1000);
+    const y = nowAdj.getFullYear(),
+      M = nowAdj.getMonth(),
+      d = nowAdj.getDate();
+    const s1 = new Date(y, M, d, 9, 30, 0, 0).getTime();
+    const e1 = new Date(y, M, d, 11, 30, 0, 0).getTime();
+    const s2 = new Date(y, M, d, 13, 0, 0, 0).getTime();
+    const e2 = new Date(y, M, d, 15, 0, 0, 0).getTime();
+    const n = nowAdj.getTime();
+    if (n < s1) {
+      const back = new Date(nowAdj.getTime());
+      for (let i = 0; i < 7; i++) {
+        back.setDate(back.getDate() - 1);
+        if (isTradingDayApprox(back)) break;
+      }
+      back.setHours(15, 0, 0, 0);
+      return back.getTime();
+    } else if (n >= s1 && n <= e1) {
+      const aligned = _alignToRightEdgeMinute(n, minutes);
+      return Math.min(Math.max(aligned, s1), e1);
+    } else if (n > e1 && n < s2) {
+      return e1;
+    } else if (n >= s2 && n <= e2) {
+      const aligned = _alignToRightEdgeMinute(n, minutes);
+      return Math.min(Math.max(aligned, s2), e2);
+    } else {
+      return e2;
+    }
+  }
+  const nowAdj = new Date(now.getTime() - DAILY_GRACE_SEC * 1000);
+  const y = nowAdj.getFullYear(),
+    M = nowAdj.getMonth(),
+    d = nowAdj.getDate();
+  if (freq === "1d") {
+    const cut = new Date(y, M, d, 15, 0, 0, 0).getTime();
+    return cut;
+  }
+  if (freq === "1w") {
+    const tmp = new Date(nowAdj.getTime());
+    const wd = tmp.getDay();
+    const daysToFri = 5 - wd;
+    tmp.setDate(tmp.getDate() + daysToFri);
+    for (let i = 0; i < 7 && !isTradingDayApprox(tmp); i++)
+      tmp.setDate(tmp.getDate() - 1);
+    tmp.setHours(15, 0, 0, 0);
+    return tmp.getTime();
+  }
+  if (freq === "1M") {
+    const firstNext = new Date(y, M + 1, 1, 0, 0, 0, 0);
+    const last = new Date(firstNext.getTime() - 24 * 3600 * 1000);
+    for (let i = 0; i < 7 && !isTradingDayApprox(last); i++)
+      last.setDate(last.getDate() - 1);
+    last.setHours(15, 0, 0, 0);
+    return last.getTime();
+  }
+  return null;
+}
+
+// dataZoom 本地处理（包含不变量：chart.on("dataZoom"）
 function onDataZoom(params) {
   try {
     const info = (params && params.batch && params.batch[0]) || params || {};
     const len = (vm.candles.value || []).length;
     if (!len) return;
-
     let sIdx, eIdx;
     if (
       typeof info.startValue !== "undefined" &&
@@ -1298,19 +1347,108 @@ function onDataZoom(params) {
     const arr = vm.candles.value || [];
     const endTs = arr[eIdx]?.t ? Date.parse(arr[eIdx].t) : null;
 
+    // 本地预览与持久化
     vm.previewView(
       bars,
       Number.isFinite(endTs) ? endTs : vm.rightTs.value,
       sIdx,
       eIdx
     );
-    vm.setBars(bars, Number.isFinite(endTs) ? endTs : vm.rightTs.value);
+
+    // NEW：更新本地可见根数，用于标记尺寸（无后端也能变化）
+    localVisRows.value = bars;
+
+    // 本地更新预设高亮
+    const allRows = len;
+    let nextPreset = "ALL";
+    if (allRows > 0 && bars < allRows)
+      nextPreset = pickPresetByBarsCountDown(vm.freq.value, bars, allRows);
+    vm.windowPreset.value = nextPreset;
+    settings.setWindowPreset(nextPreset);
+
+    // 触达右端 → 近端比对（存在缺口才触发后端）
+    if (eIdx === allRows - 1) {
+      const lastIso = arr[allRows - 1]?.t || null;
+      const lastMs = lastIso ? Date.parse(lastIso) : null;
+      const expectMs = computeExpectedLastEndMs(vm.freq.value, Date.now());
+      if (Number.isFinite(lastMs) && Number.isFinite(expectMs)) {
+        const gapMs = expectMs - lastMs;
+        const graceMs =
+          (vm.freq.value.endsWith("m") ? MINUTE_GRACE_SEC : DAILY_GRACE_SEC) *
+          1000;
+        if (gapMs > graceMs) vm.reload({ force: true });
+      }
+    }
+
+    // NEW：缩放后立即更新标记尺寸（不触发后端）
+    updateChanMarkers(renderSeq);
   } catch {}
 }
 
-/* ============================= */
-/* 应用服务端视窗（meta.view_*）      */
-/* ============================= */
+// 点击预设本地处理（更新 dataZoom + 本地近端比对 + 更新标记尺寸）
+function onClickPreset(preset) {
+  try {
+    const allRows = (vm.candles.value || []).length;
+    if (!allRows) return;
+    const targetBars = presetToBars(
+      vm.freq.value,
+      String(preset || "ALL"),
+      allRows
+    );
+    vm.windowPreset.value = String(preset || "ALL");
+    settings.setWindowPreset(vm.windowPreset.value);
+
+    const eIdx = allRows - 1;
+    const sIdx = Math.max(0, eIdx - targetBars + 1);
+    const arr = vm.candles.value || [];
+    const lastIso = arr[eIdx]?.t || null;
+    const anchorTs = lastIso ? Date.parse(lastIso) : vm.rightTs.value;
+
+    vm.previewView(
+      targetBars,
+      Number.isFinite(anchorTs) ? anchorTs : vm.rightTs.value,
+      sIdx,
+      eIdx
+    );
+
+    // NEW：更新本地可见根数，用于标记尺寸
+    localVisRows.value = targetBars;
+
+    const delta = {
+      dataZoom: [
+        { type: "inside", startValue: sIdx, endValue: eIdx },
+        { type: "slider", startValue: sIdx, endValue: eIdx },
+      ],
+    };
+    try {
+      chart.setOption(delta, {
+        notMerge: false,
+        lazyUpdate: true,
+        silent: true,
+      });
+    } catch {}
+
+    const expectMs = computeExpectedLastEndMs(vm.freq.value, Date.now());
+    const lastMs = lastIso ? Date.parse(lastIso) : null;
+    if (Number.isFinite(lastMs) && Number.isFinite(expectMs)) {
+      const gapMs = expectMs - lastMs;
+      const graceMs =
+        (vm.freq.value.endsWith("m") ? MINUTE_GRACE_SEC : DAILY_GRACE_SEC) *
+        1000;
+      if (gapMs > graceMs) vm.reload({ force: true });
+    }
+
+    // NEW：预设切换后立即更新标记尺寸（不触发后端）
+    updateChanMarkers(renderSeq);
+  } catch {}
+}
+
+// 滚轮缩放：依赖 inside dataZoom → onDataZoom；本函数不触发后端
+function onWheelZoom() {
+  /* no-op */
+}
+
+// 应用服务端视窗（保持原逻辑，同时更新 localVisRows）
 function applyZoomByMeta(seq) {
   if (!chart) return;
   if (isStale(seq)) return;
@@ -1318,6 +1456,10 @@ function applyZoomByMeta(seq) {
   if (!len) return;
   const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
   const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
+
+  // NEW：服务端视窗变化时同步本地可见根数（用于标记尺寸）
+  localVisRows.value = Math.max(1, eIdx - sIdx + 1);
+
   const delta = {
     dataZoom: [
       { type: "inside", startValue: sIdx, endValue: eIdx },
@@ -1331,9 +1473,7 @@ function applyZoomByMeta(seq) {
   chart.setOption(delta, { notMerge: false, lazyUpdate: true, silent: true });
 }
 
-/* ============================= */
-/* 安全 resize（rAF 防抖）          */
-/* ============================= */
+// 安全 resize（rAF 防抖）
 function safeResize() {
   if (!chart || !host.value) return;
   const seq = renderSeq;
@@ -1345,16 +1485,15 @@ function safeResize() {
         height: host.value.clientHeight,
       });
     } catch {}
+    // NEW：尺寸变化也可能影响标记宽度估算（hostWidth），做一次标记更新
+    updateChanMarkers(renderSeq);
   });
 }
 
-/* ============================= */
-/* 挂载：初始化 ECharts/联动/监听     */
-/* ============================= */
+// 挂载初始化（包含不变量：getZr("mousemove")/chart.on("updateAxisPointer")/chart.on("dataZoom")）
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
-
   chart = echarts.init(el, null, {
     renderer: "canvas",
     width: el.clientWidth,
@@ -1365,7 +1504,6 @@ onMounted(async () => {
     echarts.connect("ct-sync");
   } catch {}
 
-  // 像素反查索引并广播 hover
   chart.getZr().on("mousemove", (e) => {
     try {
       const result = chart.convertFromPixel({ seriesIndex: 0 }, [
@@ -1381,7 +1519,6 @@ onMounted(async () => {
     } catch {}
   });
 
-  // 轴指示器更新时（tooltip 移动）广播 hover
   chart.on("updateAxisPointer", (params) => {
     try {
       const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
@@ -1392,10 +1529,8 @@ onMounted(async () => {
     } catch {}
   });
 
-  // 缩放联动
   chart.on("dataZoom", onDataZoom);
 
-  // 宿主尺寸观察
   try {
     ro = new ResizeObserver(() => {
       safeResize();
@@ -1406,25 +1541,22 @@ onMounted(async () => {
     safeResize();
   });
 
-  // 联动注册（主窗作为源）
   detachSync = zoomSync.attach(
     "main",
     chart,
     () => (vm.candles.value || []).length
   );
 
-  // 首帧重算与渲染
+  // 首帧：重算 → 渲染 → 标记更新 → 标题更新
   recomputeChan();
   render();
+  updateChanMarkers(renderSeq);
   updateHeaderFromCurrent();
 
-  // 跨窗 hover 订阅
   window.addEventListener("chan:hover-index", onGlobalHoverIndex);
 });
 
-/* ============================= */
-/* 卸载：解绑事件/销毁实例           */
-/* ============================= */
+// 卸载清理
 onBeforeUnmount(() => {
   window.removeEventListener("chan:hover-index", onGlobalHoverIndex);
   try {
@@ -1441,21 +1573,17 @@ onBeforeUnmount(() => {
   chart = null;
 });
 
-/* ============================= */
-/* 渲染主图：构造 option 并 set      */
-/* ============================= */
+// 渲染主图（包含不变量：function render(）
 function render() {
   if (!chart) return;
   const mySeq = ++renderSeq;
 
-  // 有 CHAN 标记时适当增加横轴标签间距
   const needAvoidAxis = !!(
     settings.chanSettings.value.showUpDownMarkers &&
     (chanCache.value.reduced || []).length > 0
   );
   const extraAxisLabelMargin = needAvoidAxis ? 20 : 6;
 
-  // 构造主图 option（K线或 HL 柱 + MA）
   const option = buildMainChartOption(
     {
       candles: vm.candles.value,
@@ -1471,7 +1599,6 @@ function render() {
     { tooltipClass: "ct-fixed-tooltip", xAxisLabelMargin: extraAxisLabelMargin }
   );
 
-  // 保证 CHAN_UP/CHAN_DOWN 占位（隐藏 yAxis=1）存在
   const seriesArr = Array.isArray(option.series) ? option.series : [];
   const haveUp = seriesArr.some((s) => s && s.id === "CHAN_UP");
   const haveDn = seriesArr.some((s) => s && s.id === "CHAN_DOWN");
@@ -1503,20 +1630,16 @@ function render() {
     option.series = seriesArr;
   }
 
-  // 应用 option（notMerge=true）
   try {
     chart.dispatchAction({ type: "hideTip" });
   } catch {}
   chart.setOption(option, { notMerge: true, lazyUpdate: false, silent: true });
 
-  // 缠论标记与视窗同步
   updateChanMarkers(mySeq);
   applyZoomByMeta(mySeq);
 }
 
-/* ============================= */
-/* 数据/配置变化 → 重算重绘           */
-/* ============================= */
+// 数据/配置变化重算重绘
 watch(
   () => [
     vm.candles.value,
@@ -1535,9 +1658,7 @@ watch(
   { deep: true }
 );
 
-/* ============================= */
-/* 服务端 meta（视窗）变化 → 应用     */
-/* ============================= */
+// meta 变化应用视窗与标记更新（包含不变量：updateChanMarkers 标记）
 watch(
   () => vm.meta.value,
   async () => {
@@ -1555,16 +1676,7 @@ watch(
   { deep: true }
 );
 
-/* ============================= */
-/* 滚轮缩放（占位）                  */
-/* ============================= */
-function onWheelZoom() {
-  vm[vm.meta.value ? "zoomIn" : "zoomIn"]();
-}
-
-/* ============================= */
-/* 画布高度拖拽调整                 */
-/* ============================= */
+// 下沿拖拽高度调整
 let dragging = false,
   startY = 0,
   startH = 0;
@@ -1588,9 +1700,7 @@ function onResizeHandleUp() {
   window.removeEventListener("mousemove", onResizeHandleMove);
 }
 
-/* ============================= */
-/* 标题信息：从当前元信息/索引提取     */
-/* ============================= */
+// 标题更新
 function updateHeaderFromCurrent() {
   const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
   const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
@@ -1603,18 +1713,13 @@ function updateHeaderFromCurrent() {
 </script>
 
 <style scoped>
-/* ============================= */
-/* 三列控制区布局与按钮样式           */
-/* ============================= */
+/* 控制区布局与按钮样式 */
 .controls-grid {
-  display: grid; /* 三列网格布局 */
-  grid-template-columns: auto 1fr auto; /* 左：自适应，中：伸展，右：自适应 */
-  align-items: center; /* 垂直居中 */
-  column-gap: 16px; /* 列间距 */
-  margin: 0 0 8px 0; /* 与图表间距 */
-}
-.ctrl-col.left {
-  /* 左列容器占位 */
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 16px;
+  margin: 0 0 8px 0;
 }
 .ctrl-col.middle {
   text-align: left;
@@ -1628,16 +1733,12 @@ function updateHeaderFromCurrent() {
   display: inline-flex;
   align-items: center;
 }
-
-/* 键值行 */
 .kv .k {
   color: #bbb;
 }
 .kv .v {
   color: #ddd;
 }
-
-/* 连体按钮（频率/窗宽） */
 .seg {
   display: inline-flex;
   align-items: center;
@@ -1666,8 +1767,6 @@ function updateHeaderFromCurrent() {
   background: #2b4b7e;
   color: #fff;
 }
-
-/* 高级图标按钮 hover 细节 */
 .adv-btn svg {
   display: block;
 }
@@ -1678,9 +1777,7 @@ function updateHeaderFromCurrent() {
   fill: #fff;
 }
 
-/* ============================= */
-/* 图表画布容器与信息条样式           */
-/* ============================= */
+/* 主图画布与信息条 */
 .top-info {
   position: absolute;
   left: 0;
