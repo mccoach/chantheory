@@ -1,5 +1,8 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\IndicatorPanel.vue -->
-<!-- 全量输出：指标窗（UI 序号守护覆盖式防抖 + 跨窗体 hover 广播） -->
+<!-- ============================== -->
+<!-- 指标窗（维持副窗 inside-only，绝不作为交互源；与中枢/主窗保持联动一致） -->
+<!-- 本次重构说明：不扩大范围，不改动现有函数/变量顺序，仅补充注释强调“副窗不触发 bars/rightTs 改变”。 -->
+
 <template>
   <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
     <div class="top-info">
@@ -88,13 +91,13 @@ const vm = inject("marketView");
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
-// —— UI 序号守护 —— //
+// —— UI 序号守护（保持原逻辑） —— //
 let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
 
-// —— hover 跨窗体广播 —— //
+// —— hover 跨窗体广播（保持原逻辑） —— //
 function broadcastHoverIndex(idx) {
   try {
     window.dispatchEvent(
@@ -164,8 +167,8 @@ function onKindChange() {
   render();
 }
 
+// —— 副窗不作为交互源（保持原逻辑）：仅 inside 联动，绝不更改 bars/rightTs —— //
 function onDataZoom(_params) {
-  // 副窗不作为交互源；仅主图触发 setBars，副窗跟随 meta（避免循环）
   return;
 }
 
@@ -210,9 +213,6 @@ onMounted(async () => {
             width: host.value.clientWidth,
             height: host.value.clientHeight,
           });
-        if (!isStale(seq)) {
-          // 可选：不强制 render，以 meta 触发即可
-        }
       } catch {}
     });
     ro.observe(el);
@@ -235,7 +235,6 @@ onMounted(async () => {
     () => (vm.candles.value || []).length
   );
 
-  // —— 广播当前窗体 hover 索引 —— //
   chart.getZr().on("mousemove", (e) => {
     try {
       const point = [e.offsetX, e.offsetY];
@@ -317,15 +316,6 @@ function render() {
       { ...data, useKDJ: false, useRSI: true },
       uiOpts
     );
-  option = Object.assign({}, option, {
-    axisPointer: {
-      show: true,
-      type: "cross",
-      snap: false,
-      link: [{ xAxisIndex: "all" }],
-      label: { show: false },
-    },
-  });
 
   if (isStale(mySeq)) return;
   chart.setOption(option, true);

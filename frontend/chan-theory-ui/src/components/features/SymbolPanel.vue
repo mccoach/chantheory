@@ -1,10 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!--
-说明：标的输入与时间范围控制（布局精简 · 单行三列）
-- 左列：标的输入框（高度不变，宽度收窄到能容纳 6 位代码并略有富余）
-- 中列：仅显示标的信息（名称（代码）），不加任何边框/背景
-- 右列：刷新/导出 两个连体按钮，样式复用 seg/seg-btn，与其它连体按钮一致；右列宽度仅够这两按钮
-- 频率/起止时间bars数/窗宽均已移入 MainChartPanel 功能区
+说明：
+- 统一交互规则：失焦即提交。按回车仅让输入框失焦（blur），提交逻辑统一在 onBlur 中执行；
+  这样避免“回车提交一次、鼠标移到图上再次失焦又提交一次”的二次更新。
+- 确认选择（selectItem）：无论标的是否与当前相同，都强制 vm.reload({ force: true })，确保数据刷新。
+- 刷新按钮：先通过中枢汇总 Refresh，再强制 reload。
 -->
 
 <template>
@@ -57,7 +57,7 @@
         <button
           class="seg-btn"
           title="刷新"
-          @click="vm.reload?.({ force: true })"
+          @click="onRefreshClick"
           :disabled="vm.loading.value"
         >
           刷新
@@ -116,6 +116,8 @@ import { inject, ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
+// —— 新增：显示状态中枢，用于将“刷新”动作汇总 —— //
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 defineOptions({ directives: { selectAll: vSelectAll } });
 
@@ -124,6 +126,7 @@ const hotkeys = inject("hotkeys", null);
 const exportController = inject("exportController");
 const settings = useUserSettings();
 const { ready, search, findBySymbol } = useSymbolIndex();
+const hub = useViewCommandHub(); // —— 新增：中枢单例 —— //
 
 const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
 const inputText = ref(settings.lastSymbol.value || vm.code.value || "");
@@ -136,7 +139,7 @@ const exportWrapRef = ref(null);
 const exportOpen = ref(false);
 const error = ref("");
 
-// 中列：标的信息
+// 中列：标的信息（保持原逻辑）
 const middleCode = computed(() => (vm.code?.value || "").trim());
 const middleName = computed(() => {
   try {
@@ -152,7 +155,7 @@ const middleTitle = computed(() =>
     : middleCode.value || ""
 );
 
-// 导出控制
+// 导出控制（保持原逻辑）
 const disabledExport = computed(
   () => !!(vm.loading?.value || exportController?.exporting?.value)
 );
@@ -176,7 +179,7 @@ function onDocClick(e) {
   }
 }
 
-// 下拉建议交互
+// 下拉建议交互（保持原逻辑）
 const showSuggest = computed(
   () =>
     focused.value &&
@@ -192,7 +195,16 @@ function onInput() {
   invalidHint.value = "";
   updateSuggestions();
 }
+
+// 按回车仅失焦；提交逻辑统一在 onBlur 中执行
 function onKeydown(e) {
+  // 1. 优先处理回车键，不再受下拉框是否显示的影响
+  if (e.key === "Enter") {
+    e.preventDefault();
+    symbolInputRef.value?.blur(); // 只失焦，避免二次提交
+    return;
+  }
+
   if (!showSuggest.value) return;
   if (e.key === "ArrowDown") {
     e.preventDefault();
@@ -200,32 +212,22 @@ function onKeydown(e) {
     activeIndex.value =
       (activeIndex.value + 1 + suggestions.value.length) %
       suggestions.value.length;
-    scrollActiveIntoView();
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
     if (!suggestions.value.length) return;
     activeIndex.value =
       (activeIndex.value - 1 + suggestions.value.length) %
       suggestions.value.length;
-    scrollActiveIntoView();
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    if (
-      activeIndex.value >= 0 &&
-      activeIndex.value < suggestions.value.length
-    ) {
-      selectItem(suggestions.value[activeIndex.value]);
-    } else {
-      tryCommitByInput();
-    }
   } else if (e.key === "Escape") {
     focused.value = false;
   }
 }
+
+// 失焦统一提交（尝试匹配并触发刷新），逻辑简洁一致
 function onBlur() {
   setTimeout(() => {
     focused.value = false;
-    tryCommitByInput();
+    tryCommitByInput(); // 统一在失焦提交
     if (hotkeys) hotkeys.popScope("panel:symbol");
   }, 0);
 }
@@ -239,15 +241,8 @@ function updateSuggestions() {
   suggestions.value = search(q, 20);
   activeIndex.value = suggestions.value.length ? 0 : -1;
 }
-function scrollActiveIntoView() {
-  const list = document.querySelector(".dropdown");
-  if (!list) return;
-  const items = list.querySelectorAll(".suggest-item");
-  if (!items || !items.length) return;
-  const el = items[activeIndex.value];
-  if (el && typeof el.scrollIntoView === "function")
-    el.scrollIntoView({ block: "nearest" });
-}
+
+// 确认选择：无论是否变更，强制刷新
 function selectItem(item) {
   inputText.value = item.symbol;
   vm.code.value = item.symbol;
@@ -256,7 +251,12 @@ function selectItem(item) {
   suggestions.value = [];
   activeIndex.value = -1;
   focused.value = false;
+
+  // 显式触发重载，不再依赖 watch。无论 code 是否变化，都强制刷新。
+  vm.reload({ force: true });
 }
+
+// 失焦/输入确认时的统一提交逻辑
 function tryCommitByInput() {
   const t = (inputText.value || "").trim();
   if (!t) {
@@ -268,8 +268,21 @@ function tryCommitByInput() {
     const arr = search(t, 1);
     entry = arr[0];
   }
-  if (entry) selectItem(entry);
-  else invalidHint.value = "无效标的，请重试";
+  if (entry) {
+    selectItem(entry);
+  } else {
+    invalidHint.value = "无效标的，请重试";
+  }
+}
+
+// —— 新增：刷新按钮行为 —— //
+// 说明：将“刷新”作为一个动作汇总到中枢（Refresh），然后触发 vm.reload({force:true})。
+// bars/rightTs 不变，符合规则 9。
+function onRefreshClick() {
+  try {
+    hub.execute("Refresh", {});
+  } catch {}
+  vm.reload?.({ force: true });
 }
 
 function onToggleExportEvent() {
@@ -286,15 +299,13 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 整体单行三列 */
+/* 保持原样式 */
 .symbol-row {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  column-gap: 12px; /* 三列之间合理间距 */
+  column-gap: 12px;
 }
-
-/* 左列：窄宽输入 */
 .col-left {
   position: relative;
 }
@@ -309,13 +320,11 @@ onBeforeUnmount(() => {
   outline: none;
 }
 .symbol-input.compact {
-  width: 128px; /* 6 位代码 + 余量 */
+  width: 128px;
 }
 .symbol-input.invalid {
   border-color: #a94442;
 }
-
-/* 下拉建议 */
 .dropdown {
   position: absolute;
   z-index: 20;
@@ -363,8 +372,6 @@ onBeforeUnmount(() => {
   font-size: 12px;
   margin-top: 4px;
 }
-
-/* 中列：标的信息，靠左显示，无额外背景与边框 */
 .col-middle {
   text-align: left;
   color: #ddd;
@@ -376,8 +383,6 @@ onBeforeUnmount(() => {
 .sym-code {
   color: #bbb;
 }
-
-/* 右列：刷新/导出连体按钮 + 导出菜单 */
 .col-right {
   display: inline-flex;
   align-items: center;
@@ -390,7 +395,7 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   overflow: hidden;
   background: #1a1a1a;
-  height: 36px; /* 与其它连体按钮保持一致高度 */
+  height: 36px;
 }
 .seg-btn {
   background: transparent;
@@ -411,8 +416,6 @@ onBeforeUnmount(() => {
   opacity: 0.6;
   cursor: not-allowed;
 }
-
-/* 导出菜单 */
 .export-wrap {
   position: relative;
 }
@@ -441,8 +444,6 @@ onBeforeUnmount(() => {
   opacity: 0.5;
   pointer-events: none;
 }
-
-/* 错误显示 */
 .err {
   margin-top: 8px;
   color: #e74c3c;

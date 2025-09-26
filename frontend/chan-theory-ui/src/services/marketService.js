@@ -39,17 +39,6 @@ export async function fetchCandles(params, options = {}) {
   // 仅组装后端所需：code/freq/adjust/include/ma_periods + window_preset/bars/anchor_ts
   const q = { ...params };
 
-  // 新模式：不依赖 start/end；保留兼容（不传亦可）
-  let dStart = parseToDate(q.start);
-  let dEnd = parseToDate(q.end);
-  if (!dStart) dStart = new Date(`${DEFAULT_START}T00:00:00`);
-  if (!dEnd) dEnd = new Date(`${todayStr()}T00:00:00`);
-  if (dStart.getTime() > dEnd.getTime()) {
-    const t = dStart;
-    dStart = dEnd;
-    dEnd = t;
-  }
-
   // 构造查询串（含 window_preset/bars/anchor_ts）
   const search = new URLSearchParams();
   const allowKeys = new Set([

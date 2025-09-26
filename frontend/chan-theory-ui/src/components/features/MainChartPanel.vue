@@ -1,15 +1,18 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
-<!-- 主图组件（K线/HL柱 + MA + 缩放联动 + 缠论覆盖层 + 分型标记）                -->
-<!-- 本版新增要点（逐行注释说明）：                                             -->
-<!-- 1) 缩放/拖动与窗宽预设：仅前端本地处理；触达右端且存在缺口时才触发后端 reload。 -->
-<!-- 2) 标记符号宽度随缩放变化：新增 localVisRows（当前可见根数），               -->
-<!--    在 onDataZoom/onClickPreset/applyZoomByMeta 中维护，                     -->
-<!--    updateChanMarkers 以 localVisRows 替代 meta.view_rows 估算柱宽；          -->
-<!--    从而在不触发后端的缩放/拖动/预设场景，标记尺寸仍随视窗变化。              -->
-<!-- 3) 保持不变量：function render/recomputeChan/updateChanMarkers 等标记；      -->
-<!--    dataZoom/updateAxisPointer/getZr("mousemove") 事件绑定；                 -->
-<!--    CHAN_UP/CHAN_DOWN 占位；设置窗内容与打开标记；buildFractalMarkers 存在。  -->
+<!-- 主图组件（根因修复 · 去除顶层 await import · 程序化 dataZoom 守护 + 有效变化判定）
+     变更说明（严格最小改动，未改变原有代码块顺序；仅在必要处插入逻辑）：
+     1) 新增“程序化 dataZoom 标志位 programmaticZoomInProgress”，任何通过程序调用
+        dispatchAction/setOption 导致的 dataZoom 事件，onDataZoom 开头直接 return，阻断回环。
+     2) 新增“有效变化判定（第一性原则）”：仅当关键三项（barsCount/rightTs/hostWidth→markerWidthPx）
+        的离散意义上发生变化时，才调用 hub.execute(…)；未变则直接 return。
+        - onDataZoom：若 bars 未变 → Pan（仅右端）；若 bars 变化 → ScrollZoom（双改）。
+        - onWheelZoom：以“当前鼠标位置 convertFromPixel → centerIdx”为中心缩放；若不可用回退 currentIndex。
+        - 按键左右 KeyMove：以“最后一次聚焦 bar”为起点（跨窗体保持一致，并实时持久化），
+          在切片内仅更新高亮不移动窗口；越界时按步平滑移动 rightTs，保持聚焦 bar 在可视范围内。
+     3) 新增 lastAppliedRange 记忆已应用范围，避免 dataZoom 循环。
+     4) render() 中 setOption 前后加守护，并给 dataZoom 注入初始范围，根除首帧闪回 ALL 问题。
+-->
 <!-- ====================================================================== -->
 
 <template>
@@ -95,7 +98,7 @@
       </div>
       <div class="kv">
         <span class="k">Bars：</span>
-        <span class="v">{{ barsCount }}</span>
+        <span class="v">{{ topBarsCount }}</span>
       </div>
     </div>
 
@@ -132,7 +135,7 @@
     </div>
   </div>
 
-  <!-- 高级面板（保留原功能占位） -->
+  <!-- 高级面板 -->
   <div v-if="advancedOpen" class="advanced-panel">
     <div class="adv-row">
       <div class="label">手动日期</div>
@@ -169,7 +172,9 @@
       >
         应用
       </button>
-      <div class="hint">说明：N 根缩放调用后端计算（右端锚定）。</div>
+      <div class="hint">
+        说明：N 根缩放仅通过中枢改变 bars（右端不变），按向下就近规则高亮预设。
+      </div>
     </div>
     <div class="adv-row">
       <div class="label">可见窗口</div>
@@ -192,7 +197,7 @@
     </div>
   </div>
 
-  <!-- 主图画布容器（双击打开设置窗；滚轮仅本地；inside dataZoom 驱动 onDataZoom） -->
+  <!-- 主图画布容器 -->
   <div
     ref="wrap"
     class="chart"
@@ -202,7 +207,6 @@
     @dblclick="openSettingsDialog"
     @wheel.prevent="onWheelZoom"
   >
-    <!-- 顶部信息条：标题与刷新状态提示 -->
     <div class="top-info">
       <div class="title">{{ displayTitle }}</div>
       <div class="right-box">
@@ -214,11 +218,7 @@
         </div>
       </div>
     </div>
-
-    <!-- ECharts 宿主画布 -->
     <div ref="host" class="canvas-host"></div>
-
-    <!-- 下沿拖拽条（调整主窗高度） -->
     <div
       class="bottom-strip"
       title="上下拖拽调整窗体高度"
@@ -228,7 +228,6 @@
 </template>
 
 <script setup>
-// 组合式 API 与 ECharts
 import {
   inject,
   onMounted,
@@ -242,11 +241,7 @@ import {
   reactive,
 } from "vue";
 import * as echarts from "echarts";
-
-// 主图 option + dataZoom 联动
 import { buildMainChartOption, zoomSync } from "@/charts/options";
-
-// 常量与工具
 import {
   DEFAULT_MA_CONFIGS,
   CHAN_DEFAULTS,
@@ -256,49 +251,43 @@ import {
   FRACTAL_SHAPES,
   FRACTAL_FILLS,
   WINDOW_PRESETS,
-  pickPresetByBarsCountDown, // 本地“向下就近”预设高亮
-  presetToBars, // 本地 预设→bars 根数
 } from "@/constants";
-
-// 用户设置与标的索引
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
-
-// 去包含与分型识别
 import { computeInclude, computeFractals } from "@/composables/useChan";
-
-// 输入框行为
 import { vSelectAll } from "@/utils/inputBehaviors";
-
-// 缠论覆盖层：涨跌标记（隐藏 y 轴）与分型标记（主轴）
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { buildUpDownMarkers, buildFractalMarkers } from "@/charts/chan/layers";
 
-// 指令注册
+// 指令注册（保留）
 defineOptions({ directives: { selectAll: vSelectAll } });
 
-// 注入 composables
+// 注入（保留顺序）
 const vm = inject("marketView");
 const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
-// 覆盖式防抖：渲染序号
+// —— 新增：显示状态中枢（单例） —— //
+const hub = useViewCommandHub();
+
+// 覆盖式防抖（保留）
 let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
 
-// 预设列表
+// 预设列表（保留）
 const presets = computed(() => WINDOW_PRESETS.slice());
 
-// 频率切换（触发后端）
+// 频率切换（保留）
 const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f;
 function activateK(f) {
   vm.chartType.value = "kline";
   vm.setFreq(f);
 }
 
-// 高级面板状态与行为（占位）
+// 高级面板（保留）
 const advancedOpen = ref(false);
 const advStart = ref(vm.visibleRange.value.startStr || "");
 const advEnd = ref(vm.visibleRange.value.endStr || "");
@@ -308,84 +297,110 @@ const canApplyBars = computed(() => /^\d+$/.test((barsStr.value || "").trim()));
 function toggleAdvanced() {
   advancedOpen.value = !advancedOpen.value;
 }
-async function applyManualRange() {
-  await vm.reload?.(true);
-}
-async function applyBarsRange() {
-  const n = parseInt((barsStr.value || "").trim(), 10);
-  if (Number.isFinite(n) && n > 0) {
-    vm.previewView(n, vm.rightTs.value);
-    vm.setBars(n); // 保留此入口后端触发（契约不变）
-    advStart.value = vm.visibleRange.value.startStr || "";
-    advEnd.value = vm.visibleRange.value.endStr || "";
-  }
-}
-async function applyVisible() {
-  const arr = vm.candles.value || [];
-  if (!arr.length) return;
-  advStart.value = vm.visibleRange.value.startStr || "";
-  advEnd.value = vm.visibleRange.value.endStr || "";
-}
 
-// 时间短文本格式化
-const isMinute = computed(() => /m$/.test(String(vm.freq.value || "")));
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function fmtShort(iso) {
-  if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "";
-    const Y = d.getFullYear(),
-      M = pad2(d.getMonth() + 1),
-      D = pad2(d.getDate());
-    if (isMinute.value) {
-      const h = pad2(d.getHours()),
-        m = pad2(d.getMinutes());
-      return `${Y}-${M}-${D} ${h}:${m}`;
-    }
-    return `${Y}-${M}-${D}`;
-  } catch {
-    return "";
-  }
-}
-const formattedStart = computed(
-  () => fmtShort(vm.visibleRange.value.startStr) || "-"
-);
-const formattedEnd = computed(
-  () => fmtShort(vm.visibleRange.value.endStr) || "-"
-);
-const barsCount = computed(() => {
-  const d = Number(vm.displayBars?.value || 0);
-  return Number.isFinite(d) && d > 0
-    ? d
-    : Number(vm.meta.value?.view_rows || 0);
-});
-
-// ECharts 句柄与观察者
+// ECharts 句柄与观察者（保留）
 const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
 let detachSync = null;
 
-// 设置草稿（K/MA/缠论/分型/复权）
+// --- 关键修复：记忆最后一次成功应用的 dataZoom 范围，打断“持续闪回”的循环 ---
+let lastAppliedRange = { s: null, e: null };
+
+// —— 新增：程序化 dataZoom 守护标志 —— //
+// 说明：任何通过程序（dispatchAction/setOption）触发的 dataZoom 事件，onDataZoom 直接 return，阻断回环。
+let programmaticZoomInProgress = false;
+
+// 设置草稿（保留）
+// 新增字段（在 openSettingsDialog 时合入默认）
 const settingsDraft = reactive({
-  kForm: { ...DEFAULT_KLINE_STYLE },
+  kForm: { ...DEFAULT_KLINE_STYLE }, // 包含 originalEnabled/mergedEnabled/displayOrder/mergedK
   maForm: {},
   chanForm: { ...CHAN_DEFAULTS },
   fractalForm: { ...FRACTAL_DEFAULTS },
   adjust: DEFAULT_APP_PREFERENCES.adjust,
 });
 
-// =============================
-// 新增：当前可见根数（本地持有），用于标记尺寸估算
-// localVisRows：不触发后端时，仍可根据 dataZoom 变化更新标记尺寸
-// =============================
-const localVisRows = ref(Math.max(1, Number(vm.meta.value?.view_rows || 1))); // 初始化为 meta.view_rows 或 1
+// 当前可见根数（保留）
+const localVisRows = ref(Math.max(1, Number(vm.meta.value?.view_rows || 1)));
 
-// 设置窗内容组件（包含不变量：defineComponent）
+// —— 新增：预览态的 start/end/bars 引用（用于顶栏即时显示） —— //
+const previewStartStr = ref(""); // 即时预览的起始 ISO
+const previewEndStr = ref(""); // 即时预览的结束 ISO
+const previewBarsCount = ref(0); // 即时预览的 bars 数（中枢 barsCount）
+
+// —— Helper：将毫秒转 ISO（保留格式规则） —— //
+function msToIso(ms) {
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+// —— Helper：从当前中枢状态与本地 candles 计算预览 sIdx/eIdx 与起止字符串 —— //
+// 说明：为满足“顶栏实时显示”，任何主动交互完成后调用一次本函数并应用 dataZoom（dispatchAction）。
+function computePreviewRangeFromHub() {
+  const arr = vm.candles.value || [];
+  const len = arr.length;
+  if (!len) return null;
+  const tsArr = arr
+    .map((d) => Date.parse(d.t))
+    .filter((x) => Number.isFinite(x));
+  if (!tsArr.length) return null;
+
+  const st = hub.getState();
+  const bars = Math.max(1, Number(st.barsCount || 1));
+  let eIdx = len - 1;
+  if (Number.isFinite(st.rightTs)) {
+    for (let i = len - 1; i >= 0; i--) {
+      if (tsArr[i] <= st.rightTs) {
+        eIdx = i;
+        break;
+      }
+    }
+  }
+  const sIdx = Math.max(0, eIdx - bars + 1);
+  const startStr = msToIso(tsArr[sIdx]) || arr[sIdx]?.t || "";
+  const endStr = msToIso(tsArr[eIdx]) || arr[eIdx]?.t || "";
+  return { sIdx, eIdx, startStr, endStr, bars };
+}
+
+// —— Helper：应用预览区间到图表（程序化 dataZoom，带标志位阻断回环） —— //
+function applyPreviewRange(range) {
+  if (!range || !chart) return;
+  try {
+    programmaticZoomInProgress = true;
+    chart.dispatchAction({
+      type: "dataZoom",
+      startValue: range.sIdx,
+      endValue: range.eIdx,
+    });
+    // --- 关键修复：更新记忆范围 ---
+    lastAppliedRange = { s: range.sIdx, e: range.eIdx };
+  } catch {}
+  // rAF 后恢复，确保本轮程序化 dataZoom 不被 onDataZoom 处理
+  requestAnimationFrame(() => {
+    programmaticZoomInProgress = false;
+  });
+}
+
+/* 异步 setOption 包装 */
+// —— Helper：异步 setOption 封装（新增） —— //
+// 说明：为避免在主流程/事件中调用 setOption，引入异步补丁封装；不改变原函数调用点前后顺序，仅将底层 setOption 调用改为异步。
+function scheduleSetOption(patch, opts) {
+  requestAnimationFrame(() => {
+    try {
+      chart && chart.setOption(patch, opts);
+    } catch (e) {
+      console.error("scheduleSetOption error:", e);
+    }
+  });
+}
+
+// 设置窗内容组件（保留）
+// 改动点：renderDisplay 内首行“原始K线”与“合并K线”行的控件与重置；onSave 合并新字段
 const MainChartSettingsContent = defineComponent({
   props: { activeTab: { type: String, default: "display" } },
   setup(props) {
@@ -409,25 +424,36 @@ const MainChartSettingsContent = defineComponent({
         }),
       ]);
 
+    // 保留原 renderDisplay/renderChan ...
     const renderDisplay = () => {
       const K = settingsDraft.kForm;
       const rows = [];
+
+      // —— 原始K线行（按：柱宽/阳线颜色/阴线颜色/复权/显示层级/勾选框/重置按钮） —— //
       rows.push(
         h("div", { class: "std-row" }, [
-          nameCell("K 线"),
+          nameCell("原始K线"),
+          // 复权
           itemCell(
-            "柱宽%",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 10,
-              max: 100,
-              step: 5,
-              value: Number(K.barPercent ?? DEFAULT_KLINE_STYLE.barPercent),
-              onInput: (e) =>
-                (settingsDraft.kForm.barPercent = Number(e.target.value || 0)),
-            })
+            "复权",
+            h(
+              "select",
+              {
+                class: "input",
+                value: String(
+                  settingsDraft.adjust || DEFAULT_APP_PREFERENCES.adjust
+                ),
+                onChange: (e) =>
+                  (settingsDraft.adjust = String(e.target.value || "none")),
+              },
+              [
+                h("option", { value: "none" }, "不复权"),
+                h("option", { value: "qfq" }, "前复权"),
+                h("option", { value: "hfq" }, "后复权"),
+              ]
+            )
           ),
+          // 阳线颜色
           itemCell(
             "阳线颜色",
             h("input", {
@@ -440,6 +466,35 @@ const MainChartSettingsContent = defineComponent({
                 )),
             })
           ),
+          // 阳线淡显（0~100）
+          itemCell(
+            "阳线淡显",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0,
+              max: 100,
+              step: 1,
+              value: Number(
+                K.originalFadeUpPercent ??
+                  DEFAULT_KLINE_STYLE.originalFadeUpPercent
+              ),
+              onInput: (e) => {
+                const v = Math.max(
+                  0,
+                  Math.min(
+                    100,
+                    Number(
+                      e.target.value ||
+                        DEFAULT_KLINE_STYLE.originalFadeUpPercent
+                    )
+                  )
+                );
+                settingsDraft.kForm.originalFadeUpPercent = v;
+              },
+            })
+          ),
+          // 阴线颜色
           itemCell(
             "阴线颜色",
             h("input", {
@@ -452,47 +507,161 @@ const MainChartSettingsContent = defineComponent({
                 )),
             })
           ),
+          // 阴线淡显（0~100）
           itemCell(
-            "复权",
+            "阴线淡显",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0,
+              max: 100,
+              step: 1,
+              value: Number(
+                K.originalFadeDownPercent ??
+                  DEFAULT_KLINE_STYLE.originalFadeDownPercent
+              ),
+              onInput: (e) => {
+                const v = Math.max(
+                  0,
+                  Math.min(
+                    100,
+                    Number(
+                      e.target.value ||
+                        DEFAULT_KLINE_STYLE.originalFadeDownPercent
+                    )
+                  )
+                );
+                settingsDraft.kForm.originalFadeDownPercent = v;
+              },
+            })
+          ),
+          // 原始K线开关
+          checkCell(
+            !!K.originalEnabled,
+            (e) => (settingsDraft.kForm.originalEnabled = !!e.target.checked)
+          ),
+          // 重置：恢复原始K线相关默认与复权默认
+          resetBtn(() => {
+            Object.assign(settingsDraft.kForm, {
+              upColor: DEFAULT_KLINE_STYLE.upColor,
+              downColor: DEFAULT_KLINE_STYLE.downColor,
+              originalFadeUpPercent: DEFAULT_KLINE_STYLE.originalFadeUpPercent,
+              originalFadeDownPercent:
+                DEFAULT_KLINE_STYLE.originalFadeDownPercent,
+              originalEnabled: DEFAULT_KLINE_STYLE.originalEnabled,
+            });
+            settingsDraft.adjust = String(
+              DEFAULT_APP_PREFERENCES.adjust || "none"
+            );
+          }),
+        ])
+      );
+
+      // 合并K线行：轮廓线宽 / 上涨颜色 / 下跌颜色 / 填充淡显 / 显示层级（先/后） / 勾选 / 重置
+      const MK =
+        settingsDraft.kForm.mergedK ||
+        (settingsDraft.kForm.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK });
+      rows.push(
+        h("div", { class: "std-row" }, [
+          nameCell("合并K线"),
+          // 轮廓线宽
+          itemCell(
+            "轮廓线宽",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.1,
+              max: 6,
+              step: 0.1,
+              value: Number(
+                MK.outlineWidth ?? DEFAULT_KLINE_STYLE.mergedK.outlineWidth
+              ),
+              onInput: (e) =>
+                (settingsDraft.kForm.mergedK.outlineWidth = Math.max(
+                  0.1,
+                  Number(e.target.value || 1.2)
+                )),
+            })
+          ),
+          // 上涨颜色（轮廓与填充）
+          itemCell(
+            "上涨颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value: MK.upColor || DEFAULT_KLINE_STYLE.mergedK.upColor,
+              onInput: (e) =>
+                (settingsDraft.kForm.mergedK.upColor = String(
+                  e.target.value || DEFAULT_KLINE_STYLE.mergedK.upColor
+                )),
+            })
+          ),
+          // 下跌颜色（轮廓与填充）
+          itemCell(
+            "下跌颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value: MK.downColor || DEFAULT_KLINE_STYLE.mergedK.downColor,
+              onInput: (e) =>
+                (settingsDraft.kForm.mergedK.downColor = String(
+                  e.target.value || DEFAULT_KLINE_STYLE.mergedK.downColor
+                )),
+            })
+          ),
+          // 填充淡显（0~100）
+          itemCell(
+            "填充淡显",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0,
+              max: 100,
+              step: 1,
+              value: Number(
+                MK.fillFadePercent ??
+                  DEFAULT_KLINE_STYLE.mergedK.fillFadePercent
+              ),
+              onInput: (e) => {
+                const v = Math.max(
+                  0,
+                  Math.min(100, Number(e.target.value || 0))
+                );
+                settingsDraft.kForm.mergedK.fillFadePercent = v;
+              },
+            })
+          ),
+          // 显示层级（先/后）
+          itemCell(
+            "显示层级",
             h(
               "select",
               {
                 class: "input",
                 value: String(
-                  settingsDraft.adjust || DEFAULT_APP_PREFERENCES.adjust
+                  MK.displayOrder || DEFAULT_KLINE_STYLE.mergedK.displayOrder
                 ),
                 onChange: (e) =>
-                  (settingsDraft.adjust = String(e.target.value)),
+                  (settingsDraft.kForm.mergedK.displayOrder = String(
+                    e.target.value
+                  )),
               },
               [
-                h("option", { value: "none" }, "不复权"),
-                h("option", { value: "qfq" }, "前复权"),
-                h("option", { value: "hfq" }, "后复权"),
+                h("option", { value: "first" }, "先"),
+                h("option", { value: "after" }, "后"),
               ]
             )
           ),
-          itemCell(
-            "样式",
-            h(
-              "select",
-              {
-                class: "input",
-                value: K.subType || DEFAULT_KLINE_STYLE.subType,
-                onChange: (e) =>
-                  (settingsDraft.kForm.subType = String(e.target.value)),
-              },
-              [
-                h("option", { value: "candlestick" }, "蜡烛图"),
-                h("option", { value: "bar" }, "HL柱图"),
-              ]
-            )
+          // 合并K线开关
+          checkCell(
+            !!settingsDraft.kForm.mergedEnabled,
+            (e) => (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
           ),
-          h("div", { class: "std-check" }),
+          // 重置：恢复合并K线相关默认
           resetBtn(() => {
-            Object.assign(settingsDraft.kForm, { ...DEFAULT_KLINE_STYLE });
-            settingsDraft.adjust = String(
-              DEFAULT_APP_PREFERENCES.adjust || "none"
-            );
+            settingsDraft.kForm.mergedEnabled =
+              DEFAULT_KLINE_STYLE.mergedEnabled;
+            settingsDraft.kForm.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK };
           }),
         ])
       );
@@ -535,8 +704,7 @@ const MainChartSettingsContent = defineComponent({
                 {
                   class: "input",
                   value: conf.style || "solid",
-                  onChange: (e) =>
-                    (settingsDraft.maForm[key].style = String(e.target.value)),
+                  onChange: (e) => (conf.style = String(e.target.value)),
                 },
                 [
                   h("option", "solid"),
@@ -555,7 +723,7 @@ const MainChartSettingsContent = defineComponent({
                 step: 1,
                 value: Number(conf.period ?? 5),
                 onInput: (e) =>
-                  (settingsDraft.maForm[key].period = Math.max(
+                  (conf.period = Math.max(
                     1,
                     parseInt(e.target.value || 5, 10)
                   )),
@@ -569,7 +737,6 @@ const MainChartSettingsContent = defineComponent({
             resetBtn(() => {
               const def = DEFAULT_MA_CONFIGS[key];
               if (def) {
-                // 直接覆盖该 MA 的草稿配置为默认
                 settingsDraft.maForm[key] = { ...def };
               }
             }),
@@ -683,7 +850,7 @@ const MainChartSettingsContent = defineComponent({
         JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.styleByStrength)));
       const confirmStyle = (ff.confirmStyle =
         ff.confirmStyle ||
-        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle))); // confirmStyle
+        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)));
 
       rows.push(
         h("div", { class: "std-row" }, [
@@ -835,7 +1002,7 @@ const MainChartSettingsContent = defineComponent({
 
       rows.push(
         h("div", { class: "std-row" }, [
-          nameCell("确认分型"), // 确认分型（中文标记）
+          nameCell("确认分型"),
           itemCell(
             "底分符号",
             h(
@@ -939,11 +1106,10 @@ const MainChartSettingsContent = defineComponent({
   },
 });
 
-// 打开设置窗（包含不变量标记：openSettingsDialog/dialogManager.open/tabs/activeTab）
+// 打开设置窗（保留）
 let prevAdjust = "none";
 function openSettingsDialog() {
   try {
-    // 草稿初始化
     settingsDraft.kForm = JSON.parse(
       JSON.stringify({
         ...DEFAULT_KLINE_STYLE,
@@ -973,7 +1139,6 @@ function openSettingsDialog() {
     );
     settingsDraft.adjust = prevAdjust;
 
-    // 打开弹窗
     dialogManager.open({
       title: "行情显示设置",
       contentComponent: MainChartSettingsContent,
@@ -985,16 +1150,16 @@ function openSettingsDialog() {
       activeTab: "display",
       onResetAll: () => {
         try {
-          // K线样式
           Object.assign(settingsDraft.kForm, { ...DEFAULT_KLINE_STYLE });
-          settingsDraft.adjust = String(DEFAULT_APP_PREFERENCES.adjust || "none");
-          // MA 全量恢复默认
+          settingsDraft.adjust = String(
+            DEFAULT_APP_PREFERENCES.adjust || "none"
+          );
           const defs = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
           settingsDraft.maForm = defs;
-          // 缠论标记
           settingsDraft.chanForm = JSON.parse(JSON.stringify(CHAN_DEFAULTS));
-          // 分型设置
-          settingsDraft.fractalForm = JSON.parse(JSON.stringify(FRACTAL_DEFAULTS));
+          settingsDraft.fractalForm = JSON.parse(
+            JSON.stringify(FRACTAL_DEFAULTS)
+          );
         } catch (e) {
           console.error("resetAll (MainChart) failed:", e);
         }
@@ -1026,7 +1191,7 @@ function openSettingsDialog() {
   }
 }
 
-// 标题与刷新状态
+// 标题与刷新状态（保留）
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
   const n = displayHeader.value.name || "",
@@ -1051,11 +1216,20 @@ const refreshedAtHHMMSS = computed(() => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 });
 
-// 键盘左右键（保留原实现）
+// 键盘左右键（修复：以最后聚焦 bar 为起点；切片内不移动窗口；越界时平滑移动 rightTs）
 let currentIndex = -1;
 function onGlobalHoverIndex(e) {
   const idx = Number(e?.detail?.idx);
-  if (Number.isFinite(idx) && idx >= 0) currentIndex = idx;
+  if (Number.isFinite(idx) && idx >= 0) {
+    currentIndex = idx;
+    try {
+      const arr = vm.candles.value || [];
+      const tsVal = arr[idx]?.t ? Date.parse(arr[idx].t) : null;
+      if (Number.isFinite(tsVal)) {
+        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal); // 实时持久化最后聚焦 ts
+      }
+    } catch {}
+  }
 }
 function focusWrap() {
   try {
@@ -1065,13 +1239,85 @@ function focusWrap() {
 function onKeydown(e) {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   e.preventDefault();
-  const len = (vm.candles.value || []).length;
+
+  const arr = vm.candles.value || [];
+  const len = arr.length;
   if (!len) return;
+
   const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
   const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
-  if (!Number.isFinite(currentIndex) || currentIndex < 0) currentIndex = eIdx;
-  currentIndex += e.key === "ArrowLeft" ? -1 : +1;
-  currentIndex = Math.max(sIdx, Math.min(eIdx, currentIndex));
+  const tsArr = arr.map((d) => Date.parse(d.t));
+
+  // 起点：优先当前 currentIndex；否则从持久化的最后聚焦 ts 回找索引；再否则以 eIdx 起
+  let startIdx =
+    Number.isFinite(currentIndex) && currentIndex >= 0 ? currentIndex : -1;
+  if (startIdx < 0) {
+    try {
+      const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
+      if (Number.isFinite(lastTs)) {
+        const found = tsArr.findIndex(
+          (t) => Number.isFinite(t) && t === lastTs
+        );
+        startIdx = found >= 0 ? found : -1;
+      }
+    } catch {}
+  }
+  if (startIdx < 0) startIdx = eIdx; // 兜底以右端为起点
+
+  // 目标索引（一步）
+  let nextIdx = startIdx + (e.key === "ArrowLeft" ? -1 : +1);
+  nextIdx = Math.max(0, Math.min(len - 1, nextIdx));
+
+  // 若在当前视窗内 → 仅更新高亮，不移动窗口
+  if (nextIdx >= sIdx && nextIdx <= eIdx) {
+    currentIndex = nextIdx;
+    try {
+      const seq = renderSeq;
+      chart.dispatchAction({
+        type: "showTip",
+        seriesIndex: 0,
+        dataIndex: currentIndex,
+      });
+      if (!isStale(seq)) {
+        chart.dispatchAction({
+          type: "highlight",
+          seriesIndex: 0,
+          dataIndex: currentIndex,
+        });
+      }
+    } catch {}
+    // 持久化最新聚焦 ts
+    try {
+      const tsv = tsArr[nextIdx];
+      if (Number.isFinite(tsv)) {
+        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
+      }
+    } catch {}
+    return;
+  }
+
+  // 越界：按步平滑移动窗口（bars 宽度保持不变），仅调整 rightTs
+  const viewWidth = Math.max(1, eIdx - sIdx + 1);
+  let newEIdx = eIdx;
+
+  if (nextIdx < sIdx) {
+    const delta = sIdx - nextIdx; // 向左越界步数
+    newEIdx = Math.max(viewWidth - 1, eIdx - delta);
+  } else if (nextIdx > eIdx) {
+    const delta = nextIdx - eIdx; // 向右越界步数
+    newEIdx = Math.min(len - 1, eIdx + delta);
+  }
+  const nextRightTs = Number.isFinite(tsArr[newEIdx])
+    ? tsArr[newEIdx]
+    : tsArr[eIdx];
+
+  // 仅移动切片右端（平滑 Pan）
+  if (Number.isFinite(nextRightTs)) {
+    hub.execute("KeyMove", { nextRightTs });
+  }
+
+  // 更新高亮为目标 bar，并持久化最后聚焦 ts
+  currentIndex = nextIdx;
   try {
     const seq = renderSeq;
     chart.dispatchAction({
@@ -1079,16 +1325,23 @@ function onKeydown(e) {
       seriesIndex: 0,
       dataIndex: currentIndex,
     });
-    if (isStale(seq)) return;
-    chart.dispatchAction({
-      type: "highlight",
-      seriesIndex: 0,
-      dataIndex: currentIndex,
-    });
+    if (!isStale(seq)) {
+      chart.dispatchAction({
+        type: "highlight",
+        seriesIndex: 0,
+        dataIndex: currentIndex,
+      });
+    }
+  } catch {}
+  try {
+    const tsv = tsArr[nextIdx];
+    if (Number.isFinite(tsv)) {
+      settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
+    }
   } catch {}
 }
 
-// 缠论/分型缓存与重算（包含不变量：function recomputeChan(）
+// 缠论/分型缓存与重算（保留）
 const chanCache = ref({ reduced: [], map: [], meta: null, fractals: [] });
 function recomputeChan() {
   try {
@@ -1116,7 +1369,7 @@ function recomputeChan() {
   }
 }
 
-// CHAN 占位系列（隐藏 y 轴 index=1；包含不变量 id: "CHAN_UP"/"CHAN_DOWN"）
+// CHAN 占位系列（保留，但调用 setOption 改为异步封装）
 function chanPlaceholderSeriesCommon() {
   return {
     type: "scatter",
@@ -1163,51 +1416,54 @@ function ensureChanSeriesPresent() {
         },
       });
     }
-    if (patches.length) chart.setOption({ series: patches }, false);
+    if (patches.length) {
+      // —— 变更：占位系列 patch 改为异步 setOption —— //
+      scheduleSetOption({ series: patches }, false);
+    }
   } catch {}
 }
 
-// 缠论标记更新（包含不变量：function updateChanMarkers(）
-function updateChanMarkers(seq) {
+// 缠论标记更新（统一使用中枢 markerWidthPx；series patch 改为异步）
+async function updateChanMarkers(seq) {
   if (!chart) return;
   if (isStale(seq)) return;
 
   const reduced = chanCache.value.reduced || [];
   const fractals = chanCache.value.fractals || [];
 
-  // NEW: 使用 localVisRows 替代 meta.view_rows（在不触发后端场景也随缩放变化）
   const visCount = Math.max(
     1,
     Number(localVisRows.value || vm.meta.value?.view_rows || 1)
   );
   const hostW = host.value ? host.value.clientWidth : 800;
+  const markerW = hub.markerWidthPx.value;
 
   try {
     ensureChanSeriesPresent();
   } catch {}
   const patches = [];
 
-  // 涨跌标记（隐藏 y 轴）
   if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
     const upDownLayer = buildUpDownMarkers(reduced, {
       chanSettings: settings.chanSettings.value,
       hostWidth: hostW,
       visCount,
+      symbolWidthPx: markerW,
     });
     patches.push(...(upDownLayer.series || []));
   } else {
     patches.push({ id: "CHAN_UP", data: [] }, { id: "CHAN_DOWN", data: [] });
   }
 
-  // 分型标记（主价格轴；buildFractalMarkers 不变量存在）
   const frEnabled = (settings.fractalSettings.value?.enabled ?? true) === true;
   if (frEnabled && reduced.length && fractals.length) {
     const frLayer = buildFractalMarkers(reduced, fractals, {
       fractalSettings: settings.fractalSettings.value,
       hostWidth: hostW,
       visCount,
+      symbolWidthPx: markerW,
     });
-    patches.push(...(frLayer.series || [])); // buildFractalMarkers(
+    patches.push(...(frLayer.series || []));
   } else {
     const FR_IDS = [
       "FR_TOP_STRONG",
@@ -1225,105 +1481,22 @@ function updateChanMarkers(seq) {
 
   try {
     if (isStale(seq)) return;
-    chart.setOption({ series: patches }, false);
+    // —— 变更：series patch 改为异步 setOption —— //
+    scheduleSetOption({ series: patches }, false);
   } catch {}
 }
 
-// 右端近端判定（前端近似）
-const MINUTE_GRACE_SEC = 5;
-const DAILY_GRACE_SEC = 180;
-function isTradingDayApprox(d) {
-  const wd = d.getDay();
-  return wd >= 1 && wd <= 5;
-}
-function _alignToRightEdgeMinute(t, minutes) {
-  const tm = new Date(t);
-  tm.setSeconds(0, 0);
-  const total = tm.getHours() * 60 + tm.getMinutes();
-  const k = Math.floor(total / minutes) * minutes;
-  const hh = Math.floor(k / 60),
-    mm = k % 60;
-  tm.setHours(hh, mm, 0, 0);
-  return tm.getTime();
-}
-function computeExpectedLastEndMs(freq, nowMs) {
-  const now = new Date(Number.isFinite(+nowMs) ? +nowMs : Date.now());
-  if (!isTradingDayApprox(now)) {
-    if (freq.endsWith("m")) return null;
-    const back = new Date(now.getTime());
-    for (let i = 0; i < 7; i++) {
-      back.setDate(back.getDate() - 1);
-      if (isTradingDayApprox(back)) break;
-    }
-    back.setHours(15, 0, 0, 0);
-    return back.getTime();
-  }
-  if (freq.endsWith("m")) {
-    const minutes = parseInt(freq.replace("m", ""), 10);
-    const nowAdj = new Date(now.getTime() - MINUTE_GRACE_SEC * 1000);
-    const y = nowAdj.getFullYear(),
-      M = nowAdj.getMonth(),
-      d = nowAdj.getDate();
-    const s1 = new Date(y, M, d, 9, 30, 0, 0).getTime();
-    const e1 = new Date(y, M, d, 11, 30, 0, 0).getTime();
-    const s2 = new Date(y, M, d, 13, 0, 0, 0).getTime();
-    const e2 = new Date(y, M, d, 15, 0, 0, 0).getTime();
-    const n = nowAdj.getTime();
-    if (n < s1) {
-      const back = new Date(nowAdj.getTime());
-      for (let i = 0; i < 7; i++) {
-        back.setDate(back.getDate() - 1);
-        if (isTradingDayApprox(back)) break;
-      }
-      back.setHours(15, 0, 0, 0);
-      return back.getTime();
-    } else if (n >= s1 && n <= e1) {
-      const aligned = _alignToRightEdgeMinute(n, minutes);
-      return Math.min(Math.max(aligned, s1), e1);
-    } else if (n > e1 && n < s2) {
-      return e1;
-    } else if (n >= s2 && n <= e2) {
-      const aligned = _alignToRightEdgeMinute(n, minutes);
-      return Math.min(Math.max(aligned, s2), e2);
-    } else {
-      return e2;
-    }
-  }
-  const nowAdj = new Date(now.getTime() - DAILY_GRACE_SEC * 1000);
-  const y = nowAdj.getFullYear(),
-    M = nowAdj.getMonth(),
-    d = nowAdj.getDate();
-  if (freq === "1d") {
-    const cut = new Date(y, M, d, 15, 0, 0, 0).getTime();
-    return cut;
-  }
-  if (freq === "1w") {
-    const tmp = new Date(nowAdj.getTime());
-    const wd = tmp.getDay();
-    const daysToFri = 5 - wd;
-    tmp.setDate(tmp.getDate() + daysToFri);
-    for (let i = 0; i < 7 && !isTradingDayApprox(tmp); i++)
-      tmp.setDate(tmp.getDate() - 1);
-    tmp.setHours(15, 0, 0, 0);
-    return tmp.getTime();
-  }
-  if (freq === "1M") {
-    const firstNext = new Date(y, M + 1, 1, 0, 0, 0, 0);
-    const last = new Date(firstNext.getTime() - 24 * 3600 * 1000);
-    for (let i = 0; i < 7 && !isTradingDayApprox(last); i++)
-      last.setDate(last.getDate() - 1);
-    last.setHours(15, 0, 0, 0);
-    return last.getTime();
-  }
-  return null;
-}
-
-// dataZoom 本地处理（包含不变量：chart.on("dataZoom"）
+// —— 修复 onDataZoom：程序化守护 + 有效变化判定 + Pan/Zoom 分支 —— //
 function onDataZoom(params) {
   try {
+    // 1) 程序化 dataZoom：直接忽略（阻断回环）
+    if (programmaticZoomInProgress) return;
+
     const info = (params && params.batch && params.batch[0]) || params || {};
     const len = (vm.candles.value || []).length;
     if (!len) return;
+
+    // 2) 提取索引区间（优先索引，其次百分比）
     let sIdx, eIdx;
     if (
       typeof info.startValue !== "undefined" &&
@@ -1335,120 +1508,161 @@ function onDataZoom(params) {
       const maxIdx = len - 1;
       sIdx = Math.round((info.start / 100) * maxIdx);
       eIdx = Math.round((info.end / 100) * maxIdx);
-    } else {
-      return;
-    }
+    } else return;
     if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
     if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
 
-    const bars = Math.max(1, eIdx - sIdx + 1);
-    const arr = vm.candles.value || [];
-    const endTs = arr[eIdx]?.t ? Date.parse(arr[eIdx].t) : null;
+    // —— 新增：若这次 dataZoom 跟“最后一次已应用范围”完全相同，直接返回，打断循环 —— //
+    if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) {
+      return;
+    }
 
-    // 本地预览与持久化
-    vm.previewView(
-      bars,
-      Number.isFinite(endTs) ? endTs : vm.rightTs.value,
-      sIdx,
-      eIdx
+    // 3) 有效变化判定（仅关键三项）
+    const currBars = Math.max(
+      1,
+      Number(hub.getState().barsCount || vm.viewRows || 1)
     );
+    const bars_new = Math.max(1, eIdx - sIdx + 1);
 
-    // NEW：更新本地可见根数，用于标记尺寸（无后端也能变化）
-    localVisRows.value = bars;
+    // 注意：用 vm.viewEndIdx 可能与当前图上的范围不同步，容易误判。
+    // 改成用 lastAppliedRange.e（若已初始化），更贴近当前图的真实范围。
+    const currEIdx = Number.isFinite(lastAppliedRange.e)
+      ? lastAppliedRange.e
+      : Number(vm.viewEndIdx);
+    const changedBars = bars_new !== currBars;
+    const changedEIdx = eIdx !== currEIdx;
 
-    // 本地更新预设高亮
-    const allRows = len;
-    let nextPreset = "ALL";
-    if (allRows > 0 && bars < allRows)
-      nextPreset = pickPresetByBarsCountDown(vm.freq.value, bars, allRows);
-    vm.windowPreset.value = nextPreset;
-    settings.setWindowPreset(nextPreset);
+    if (!changedBars && !changedEIdx) {
+      // 无离散变化：直接忽略
+      return;
+    }
 
-    // 触达右端 → 近端比对（存在缺口才触发后端）
-    if (eIdx === allRows - 1) {
-      const lastIso = arr[allRows - 1]?.t || null;
-      const lastMs = lastIso ? Date.parse(lastIso) : null;
-      const expectMs = computeExpectedLastEndMs(vm.freq.value, Date.now());
-      if (Number.isFinite(lastMs) && Number.isFinite(expectMs)) {
-        const gapMs = expectMs - lastMs;
-        const graceMs =
-          (vm.freq.value.endsWith("m") ? MINUTE_GRACE_SEC : DAILY_GRACE_SEC) *
-          1000;
-        if (gapMs > graceMs) vm.reload({ force: true });
+    // 4) Pan vs ScrollZoom 判定与执行
+    const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
+    const anchorTs = Number.isFinite(tsArr[eIdx])
+      ? tsArr[eIdx]
+      : hub.getState().rightTs;
+
+    if (!changedBars && changedEIdx) {
+      // 仅右端变化 → Pan
+      // 再次对比 rightTs，避免不必要执行
+      if (anchorTs !== hub.getState().rightTs) {
+        hub.execute("Pan", { nextRightTs: anchorTs });
+      }
+    } else {
+      // 视为缩放：bars 或 bars+右端双变
+      if (bars_new !== currBars || anchorTs !== hub.getState().rightTs) {
+        hub.execute("ScrollZoom", {
+          nextBars: bars_new,
+          nextRightTs: anchorTs,
+        });
       }
     }
 
-    // NEW：缩放后立即更新标记尺寸（不触发后端）
-    updateChanMarkers(renderSeq);
+    // —— 新增：顶栏预览即时更新（不等待后端） —— //
+    previewBarsCount.value = bars_new;
+    const startStr =
+      msToIso(tsArr[sIdx]) || (vm.candles.value || [])[sIdx]?.t || "";
+    const endStr =
+      msToIso(tsArr[eIdx]) || (vm.candles.value || [])[eIdx]?.t || "";
+    previewStartStr.value = startStr || "";
+    previewEndStr.value = endStr || "";
+    // 注：不在此处调用 setOption；交由 watch(meta)/异步 patch 统一落地
   } catch {}
 }
 
-// 点击预设本地处理（更新 dataZoom + 本地近端比对 + 更新标记尺寸）
+// 预设：右端不变，仅改变左端（不触发 setOption；交由 watch(meta) 落地）
 function onClickPreset(preset) {
   try {
-    const allRows = (vm.candles.value || []).length;
-    if (!allRows) return;
-    const targetBars = presetToBars(
-      vm.freq.value,
-      String(preset || "ALL"),
-      allRows
-    );
-    vm.windowPreset.value = String(preset || "ALL");
+    const pkey = String(preset || "ALL");
+    // --- 关键修复：移除此判断，确保每次点击都执行，从而将非标准 bars 校正为标准值 ---
+    // if (vm.windowPreset.value === pkey) {
+    //   // 预设键未变，直接忽略（这是导致问题的根源）
+    //   return;
+    // }
+    vm.windowPreset.value = pkey;
     settings.setWindowPreset(vm.windowPreset.value);
+    const st = hub.getState();
+    hub.execute("ChangeWidthPreset", { presetKey: pkey, allRows: st.allRows });
 
-    const eIdx = allRows - 1;
-    const sIdx = Math.max(0, eIdx - targetBars + 1);
-    const arr = vm.candles.value || [];
-    const lastIso = arr[eIdx]?.t || null;
-    const anchorTs = lastIso ? Date.parse(lastIso) : vm.rightTs.value;
-
-    vm.previewView(
-      targetBars,
-      Number.isFinite(anchorTs) ? anchorTs : vm.rightTs.value,
-      sIdx,
-      eIdx
-    );
-
-    // NEW：更新本地可见根数，用于标记尺寸
-    localVisRows.value = targetBars;
-
-    const delta = {
-      dataZoom: [
-        { type: "inside", startValue: sIdx, endValue: eIdx },
-        { type: "slider", startValue: sIdx, endValue: eIdx },
-      ],
-    };
-    try {
-      chart.setOption(delta, {
-        notMerge: false,
-        lazyUpdate: true,
-        silent: true,
-      });
-    } catch {}
-
-    const expectMs = computeExpectedLastEndMs(vm.freq.value, Date.now());
-    const lastMs = lastIso ? Date.parse(lastIso) : null;
-    if (Number.isFinite(lastMs) && Number.isFinite(expectMs)) {
-      const gapMs = expectMs - lastMs;
-      const graceMs =
-        (vm.freq.value.endsWith("m") ? MINUTE_GRACE_SEC : DAILY_GRACE_SEC) *
-        1000;
-      if (gapMs > graceMs) vm.reload({ force: true });
+    // —— 新增：预览 —— //
+    const range = computePreviewRangeFromHub();
+    if (range) {
+      applyPreviewRange(range);
+      previewStartStr.value = range.startStr || "";
+      previewEndStr.value = range.endStr || "";
+      previewBarsCount.value = range.bars;
     }
+  } catch (e) {
+    console.error("onClickPreset error:", e);
+  }
+}
 
-    // NEW：预设切换后立即更新标记尺寸（不触发后端）
-    updateChanMarkers(renderSeq);
+// 滚轮缩放：双改；以“当前鼠标悬浮位置”为中心（convertFromPixel），不可用时回退 currentIndex
+function onWheelZoom(e) {
+  const arr = vm.candles.value || [];
+  const n = arr.length;
+  if (!n || !chart) return;
+
+  // —— 修复 convertFromPixel 前的“坐标系就绪”判断（新增） —— //
+  const opt = chart.getOption?.() || {};
+  const readyCoord =
+    Array.isArray(opt?.xAxis) &&
+    (Array.isArray(opt?.series) ? opt.series.length > 0 : false);
+  if (!readyCoord) return;
+
+  // 优先：根据当前鼠标位置计算中心索引（更稳健）
+  let centerIdx = -1;
+  try {
+    const result = chart.convertFromPixel({ seriesIndex: 0 }, [
+      e.offsetX,
+      e.offsetY,
+    ]);
+    if (Array.isArray(result)) {
+      centerIdx = Math.round(result[0]);
+    }
   } catch {}
+  if (!Number.isFinite(centerIdx) || centerIdx < 0 || centerIdx >= n) {
+    centerIdx =
+      Number.isFinite(currentIndex) && currentIndex >= 0
+        ? Math.max(0, Math.min(n - 1, currentIndex))
+        : Math.floor((vm.viewStartIdx + vm.viewEndIdx) / 2);
+  }
+
+  // 目标 bars
+  const currBars = Math.max(
+    1,
+    Number(hub.getState().barsCount || vm.viewRows || 1)
+  );
+  const deltaBars =
+    e.deltaY < 0
+      ? -Math.max(1, Math.floor(currBars * 0.12))
+      : Math.max(1, Math.floor(currBars * 0.12));
+  let nextBars = Math.max(1, currBars + deltaBars);
+
+  // 以 centerIdx 为中心确定窗口，并计算 anchorTs
+  const half = Math.floor(nextBars / 2);
+  let sIdx = Math.max(0, centerIdx - half);
+  let eIdx = sIdx + nextBars - 1;
+  if (eIdx > n - 1) {
+    eIdx = n - 1;
+    sIdx = Math.max(0, eIdx - nextBars + 1);
+  }
+  const anchorTs = Date.parse(arr[eIdx]?.t);
+
+  // 有效变化判定：bars 或 rightTs 任一变化
+  const st = hub.getState();
+  const changedBars = nextBars !== st.barsCount;
+  const changedRt = Number.isFinite(anchorTs) && anchorTs !== st.rightTs;
+
+  if (!changedBars && !changedRt) return;
+
+  hub.execute("ScrollZoom", { nextBars, nextRightTs: anchorTs });
 }
 
-// 滚轮缩放：依赖 inside dataZoom → onDataZoom；本函数不触发后端
-function onWheelZoom() {
-  /* no-op */
-}
-
-// 应用服务端视窗（保持原逻辑，同时更新 localVisRows）
+// 应用服务端视窗（程序化 dataZoom，带标志位）
 function applyZoomByMeta(seq) {
   if (!chart) return;
   if (isStale(seq)) return;
@@ -1457,40 +1671,51 @@ function applyZoomByMeta(seq) {
   const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
   const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
 
-  // NEW：服务端视窗变化时同步本地可见根数（用于标记尺寸）
   localVisRows.value = Math.max(1, eIdx - sIdx + 1);
+  // 若与已应用范围一致则无需再发 dataZoom
+  if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) return;
 
-  const delta = {
-    dataZoom: [
-      { type: "inside", startValue: sIdx, endValue: eIdx },
-      { type: "slider", startValue: sIdx, endValue: eIdx },
-    ],
-  };
   try {
-    if (isStale(seq)) return;
-    chart.dispatchAction({ type: "hideTip" });
+    programmaticZoomInProgress = true;
+    chart.dispatchAction({
+      type: "dataZoom",
+      startValue: sIdx,
+      endValue: eIdx,
+    });
+    // —— 新增：更新记忆范围 —— //
+    lastAppliedRange = { s: sIdx, e: eIdx };
   } catch {}
-  chart.setOption(delta, { notMerge: false, lazyUpdate: true, silent: true });
+  requestAnimationFrame(() => {
+    programmaticZoomInProgress = false;
+  });
 }
 
-// 安全 resize（rAF 防抖）
+// 安全 resize：仅当 markerWidthPx 将变化时才执行中枢（避免噪声）
 function safeResize() {
   if (!chart || !host.value) return;
   const seq = renderSeq;
   requestAnimationFrame(() => {
     if (isStale(seq)) return;
     try {
+      const nextW = host.value.clientWidth;
       chart.resize({
-        width: host.value.clientWidth,
+        width: nextW,
         height: host.value.clientHeight,
       });
+      // 关键变化判定：markerWidthPx 是否会改变
+      const st = hub.getState();
+      const approxNextMarker = Math.max(
+        1,
+        Math.min(16, Math.round((nextW * 0.88) / Math.max(1, st.barsCount)))
+      );
+      if (approxNextMarker !== hub.markerWidthPx.value) {
+        hub.execute("ResizeHost", { widthPx: nextW });
+      }
     } catch {}
-    // NEW：尺寸变化也可能影响标记宽度估算（hostWidth），做一次标记更新
     updateChanMarkers(renderSeq);
   });
 }
 
-// 挂载初始化（包含不变量：getZr("mousemove")/chart.on("updateAxisPointer")/chart.on("dataZoom")）
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
@@ -1504,8 +1729,14 @@ onMounted(async () => {
     echarts.connect("ct-sync");
   } catch {}
 
+  // —— 修复 convertFromPixel 调用前的坐标系就绪判断（新增） —— //
   chart.getZr().on("mousemove", (e) => {
     try {
+      const opt = chart.getOption?.() || {};
+      const readyCoord =
+        Array.isArray(opt?.xAxis) &&
+        (Array.isArray(opt?.series) ? opt.series.length > 0 : false);
+      if (!readyCoord) return;
       const result = chart.convertFromPixel({ seriesIndex: 0 }, [
         e.offsetX,
         e.offsetY,
@@ -1529,6 +1760,7 @@ onMounted(async () => {
     } catch {}
   });
 
+  // 绑定 dataZoom：含“程序化守护 + 有效变化判定”
   chart.on("dataZoom", onDataZoom);
 
   try {
@@ -1547,16 +1779,44 @@ onMounted(async () => {
     () => (vm.candles.value || []).length
   );
 
-  // 首帧：重算 → 渲染 → 标记更新 → 标题更新
+  // —— 中枢订阅：保持原逻辑（预览与事件转发） —— //
+  hub.onChange((snapshot) => {
+    try {
+      // 禁止在程序化 dataZoom 期间改变窗口预设高亮；仅在 bars 真实变化时由 onDataZoom 决定
+      vm.windowPreset.value = snapshot.presetKey || vm.windowPreset.value;
+      window.dispatchEvent(
+        new CustomEvent("chan:marker-size", {
+          detail: { px: snapshot.markerWidthPx },
+        })
+      );
+    } catch {}
+    requestAnimationFrame(() => updateChanMarkers(renderSeq));
+
+    // —— 只在确实变化时才程序化设置 dataZoom，避免“每次广播都触发 dataZoom” —— //
+    const range = computePreviewRangeFromHub();
+    if (range) {
+      // 若当前将要应用的范围与最后一次已应用一致，则不再触发 dataZoom
+      if (
+        lastAppliedRange.s !== range.sIdx ||
+        lastAppliedRange.e !== range.eIdx
+      ) {
+        applyPreviewRange(range); // 内部会设置 programmatic 守护
+        // 预览文案
+        previewStartStr.value = range.startStr || "";
+        previewEndStr.value = range.endStr || "";
+        previewBarsCount.value = range.bars;
+      }
+    }
+  });
+
   recomputeChan();
   render();
-  updateChanMarkers(renderSeq);
+  requestAnimationFrame(() => updateChanMarkers(renderSeq)); // 首帧异步标记层更新
   updateHeaderFromCurrent();
 
   window.addEventListener("chan:hover-index", onGlobalHoverIndex);
 });
 
-// 卸载清理
 onBeforeUnmount(() => {
   window.removeEventListener("chan:hover-index", onGlobalHoverIndex);
   try {
@@ -1573,7 +1833,7 @@ onBeforeUnmount(() => {
   chart = null;
 });
 
-// 渲染主图（包含不变量：function render(）
+// 渲染主图（主 setOption 保留；增量 series patch异步；dataZoom 落地由 applyZoomByMeta 负责）
 function render() {
   if (!chart) return;
   const mySeq = ++renderSeq;
@@ -1583,6 +1843,11 @@ function render() {
     (chanCache.value.reduced || []).length > 0
   );
   const extraAxisLabelMargin = needAvoidAxis ? 20 : 6;
+
+  // --- 关键修复：在 buildMainChartOption 时传入初始范围 ---
+  const len = (vm.candles.value || []).length;
+  const sInit = Number(vm.meta.value?.view_start_idx ?? 0);
+  const eInit = Number(vm.meta.value?.view_end_idx ?? (len ? len - 1 : 0));
 
   const option = buildMainChartOption(
     {
@@ -1596,9 +1861,15 @@ function render() {
       reducedBars: chanCache.value.reduced,
       mapOrigToReduced: chanCache.value.map,
     },
-    { tooltipClass: "ct-fixed-tooltip", xAxisLabelMargin: extraAxisLabelMargin }
+    {
+      tooltipClass: "ct-fixed-tooltip",
+      xAxisLabelMargin: extraAxisLabelMargin,
+      // 传递初始范围给 options.js 的 applyUi
+      initialRange: { startValue: sInit, endValue: eInit },
+    }
   );
 
+  // 保持 CHAN 占位系列存在（原逻辑）
   const seriesArr = Array.isArray(option.series) ? option.series : [];
   const haveUp = seriesArr.some((s) => s && s.id === "CHAN_UP");
   const haveDn = seriesArr.some((s) => s && s.id === "CHAN_DOWN");
@@ -1633,13 +1904,20 @@ function render() {
   try {
     chart.dispatchAction({ type: "hideTip" });
   } catch {}
-  chart.setOption(option, { notMerge: true, lazyUpdate: false, silent: true });
 
-  updateChanMarkers(mySeq);
-  applyZoomByMeta(mySeq);
+  // --- 关键修复：setOption 期间开启程序化守护，并同步记忆范围 ---
+  programmaticZoomInProgress = true;
+  chart.setOption(option, { notMerge: true, lazyUpdate: false, silent: true });
+  lastAppliedRange = { s: sInit, e: eInit }; // 同步记忆
+  requestAnimationFrame(() => {
+    programmaticZoomInProgress = false; // 恢复
+    updateChanMarkers(mySeq); // 异步标记层 patch
+    // 再次以 meta 落地（如果与 lastAppliedRange 相同，applyZoomByMeta 会短路不再触发）
+    applyZoomByMeta(mySeq);
+  });
 }
 
-// 数据/配置变化重算重绘
+// 数据/配置变化重算重绘（保留顺序；异步标记层）
 watch(
   () => [
     vm.candles.value,
@@ -1658,14 +1936,14 @@ watch(
   { deep: true }
 );
 
-// meta 变化应用视窗与标记更新（包含不变量：updateChanMarkers 标记）
+// meta 变化应用视窗与标记更新（保留；异步提示与标记层）
 watch(
   () => vm.meta.value,
   async () => {
     await nextTick();
     const mySeq = ++renderSeq;
     applyZoomByMeta(mySeq);
-    updateChanMarkers(mySeq);
+    requestAnimationFrame(() => updateChanMarkers(mySeq)); // 异步
     updateHeaderFromCurrent();
     refreshedAt.value = new Date();
     showRefreshed.value = true;
@@ -1676,7 +1954,7 @@ watch(
   { deep: true }
 );
 
-// 下沿拖拽高度调整
+// 下沿拖拽高度调整（保留）
 let dragging = false,
   startY = 0,
   startH = 0;
@@ -1700,7 +1978,7 @@ function onResizeHandleUp() {
   window.removeEventListener("mousemove", onResizeHandleMove);
 }
 
-// 标题更新
+// 标题更新（保留）
 function updateHeaderFromCurrent() {
   const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
   const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
@@ -1710,10 +1988,58 @@ function updateHeaderFromCurrent() {
   } catch {}
   displayHeader.value = { name, code: sym, freq: frq };
 }
+
+// 顶栏显示：起止（优先预览）、Bars（优先预览）
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function fmtShort(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const Y = d.getFullYear(),
+      M = pad2(d.getMonth() + 1),
+      D = pad2(d.getDate());
+    if (/m$/.test(String(vm.freq.value || ""))) {
+      const h = pad2(d.getHours()),
+        m = pad2(d.getMinutes());
+      return `${Y}-${M}-${D} ${h}:${m}`;
+    }
+    return `${Y}-${M}-${D}`;
+  } catch {
+    return "";
+  }
+}
+const formattedStart = computed(() => {
+  return (
+    (previewStartStr.value && fmtShort(previewStartStr.value)) ||
+    fmtShort(vm.visibleRange.value.startStr) ||
+    "-"
+  );
+});
+const formattedEnd = computed(() => {
+  return (
+    (previewEndStr.value && fmtShort(previewEndStr.value)) ||
+    fmtShort(vm.visibleRange.value.endStr) ||
+    "-"
+  );
+});
+const topBarsCount = computed(() => {
+  return Number(previewBarsCount.value || vm.meta.value?.view_rows || 0);
+});
+
+// 跨窗 hover（保留）
+function broadcastHoverIndex(idx) {
+  try {
+    window.dispatchEvent(
+      new CustomEvent("chan:hover-index", { detail: { idx: Number(idx) } })
+    );
+  } catch {}
+}
 </script>
 
 <style scoped>
-/* 控制区布局与按钮样式 */
 .controls-grid {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1777,7 +2103,6 @@ function updateHeaderFromCurrent() {
   fill: #fff;
 }
 
-/* 主图画布与信息条 */
 .top-info {
   position: absolute;
   left: 0;

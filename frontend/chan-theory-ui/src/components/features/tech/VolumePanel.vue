@@ -1,5 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\VolumePanel.vue -->
-<!-- 全量输出：量窗（UI 序号守护覆盖式防抖 + 跨窗体 hover 广播） -->
+<!-- ============================== -->
+<!-- 量窗（统一使用“唯一权威符号宽度广播” chan:marker-size；不自估宽度） -->
+<!-- 本次重构： -->
+<!-- - 保持本窗不作为交互源（inside-only），不更改 bars/rightTs；仅订阅事件以应用统一宽度。 -->
+<!-- - 不扩范围：保留现有逻辑与顺序，新增注释说明中枢化策略；构造 option 时传入 overrideMarkWidth。 -->
+
 <template>
   <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
     <div class="top-info">
@@ -66,13 +71,40 @@ const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
-// —— UI 序号守护 —— //
+// —— 统一标记宽度来源：仅订阅全局事件 chan:marker-size（保持项目不变量） —— //
+const overrideMarkWidth = ref(null);
+function onMarkerSize(ev) {
+  try {
+    const px = Number(ev?.detail?.px);
+    if (Number.isFinite(px) && px > 0) overrideMarkWidth.value = px;
+  } catch {}
+}
+onMounted(() => {
+  window.addEventListener("chan:marker-size", onMarkerSize);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("chan:marker-size", onMarkerSize);
+});
+
+// —— NEW: 宽度一旦变化，立即重绘 —— //
+// 原因：buildVolumeOption 中的 symbolSize 闭包捕获了当前宽度值；若不重建 option，ECharts 不会重新取新的宽度。
+watch(
+  () => overrideMarkWidth.value,
+  () => {
+    try {
+      render();
+    } catch (e) {
+      console.error("VolumePanel: re-render on marker size change failed:", e);
+    }
+  }
+);
+
 let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
 
-// —— hover 跨窗体广播 —— //
+// hover 跨窗体广播（保持原逻辑）
 function broadcastHoverIndex(idx) {
   try {
     window.dispatchEvent(
@@ -86,7 +118,6 @@ const host = ref(null);
 let chart = null;
 let ro = null;
 let detachSync = null;
-let isProgrammaticZoom = false;
 
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
@@ -292,13 +323,12 @@ const VolumeSettingsContent = defineComponent({
               const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
               if (def) {
                 settingsDraftVol.mavolForm[k] = { ...def };
-                draftRev.value++; // 强制刷新设置面板
+                draftRev.value++;
               }
             }),
           ])
         );
       });
-      // —— 放/缩量标记设置（新增 UI，修复丢失）——
       rows.push(
         h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
           nameCell("放量标记"),
@@ -367,7 +397,6 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
-
       rows.push(
         h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
           nameCell("缩量标记"),
@@ -436,7 +465,6 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
-
       return h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
     };
   },
@@ -492,14 +520,12 @@ function openSettingsDialog() {
     props: {},
     onResetAll: () => {
       try {
-        // 柱体样式
         settingsDraftVol.volBar = { ...DEFAULT_VOL_SETTINGS.volBar };
-        // MAVOL 三条
-        settingsDraftVol.mavolForm = JSON.parse(JSON.stringify(DEFAULT_VOL_SETTINGS.mavolStyles));
-        // 放/缩量标记
+        settingsDraftVol.mavolForm = JSON.parse(
+          JSON.stringify(DEFAULT_VOL_SETTINGS.mavolStyles)
+        );
         settingsDraftVol.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
         settingsDraftVol.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
-        // 刷新设置面板
         draftRev.value++;
       } catch (e) {
         console.error("resetAll (Volume) failed:", e);
@@ -569,8 +595,6 @@ onMounted(async () => {
   try {
     echarts.connect("ct-sync");
   } catch {}
-
-  // —— 广播当前窗体 hover 索引 —— //
   chart.getZr().on("mousemove", (e) => {
     try {
       const point = [e.offsetX, e.offsetY];
@@ -595,7 +619,6 @@ onMounted(async () => {
       }
     } catch {}
   });
-
   chart.on("dataZoom", onDataZoom);
   try {
     ro = new ResizeObserver(() => {
@@ -643,6 +666,7 @@ function render() {
       volEnv: {
         hostWidth: host.value ? host.value.clientWidth : 0,
         visCount: Number(vm.meta.value?.view_rows || 1),
+        overrideMarkWidth: overrideMarkWidth.value, // —— 统一宽度来源（事件） —— //
       },
     },
     {}

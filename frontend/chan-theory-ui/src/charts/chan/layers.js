@@ -31,8 +31,8 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     ? Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, Math.round(extW))) // 使用外部宽度
     : Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, approxW)); // 使用估算宽度
 
-  const markerH = Math.max(8, Math.round(markerW * 0.8)); // 高度按比例
-  const offsetDownPx = Math.round(markerH * 1.2); // 底部偏移（隐藏轴底部）
+  const markerH = 10; // —— 修复：高度恒定 10px —— //
+  const offsetDownPx = Math.round(markerH * 1.2);
 
   const upPoints = [];
   const downPoints = []; // 承载点集合
@@ -124,7 +124,6 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     : Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, approxW));
   const markerH = Math.max(8, Math.round(markerW * 0.8)); // 高度与宽度比例
   const apexGap = Math.abs(cfg.markerYOffsetPx || 2); // 顶点距 bar 间距（2px）
-
   const yOffTop = -(markerH / 2 + apexGap); // 顶分中心向上偏移（顶点与 bar 间距 2px）
   const yOffBottom = +(markerH / 2 + apexGap); // 底分中心向下偏移（顶点与 bar 间距 2px）
 
@@ -242,8 +241,8 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         data: topConfirmData,
         symbol: shape,
         symbolRotate: shape === "triangle" ? 180 : 0,
-        symbolSize: () => [markerW, markerH],
-        symbolOffset: [0, -(markerH / 2 + (apexGap + extraGap))], // 顶部分外移
+        symbolSize: () => [markerW, markerH], // 高度恒定 10px
+        symbolOffset: [0, -(markerH / 2 + (cfg.markerYOffsetPx + extraGap))],
         itemStyle: isHollow
           ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
           : { color },
@@ -264,8 +263,8 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         data: botConfirmData,
         symbol: shape,
         symbolRotate: 0,
-        symbolSize: () => [markerW, markerH],
-        symbolOffset: [0, +(markerH / 2 + (apexGap + extraGap))], // 底部分外移
+        symbolSize: () => [markerW, markerH], // 高度恒定 10px
+        symbolOffset: [0, +(markerH / 2 + (cfg.markerYOffsetPx + extraGap))],
         itemStyle: isHollow
           ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
           : { color },

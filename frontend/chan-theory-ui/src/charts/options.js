@@ -1,24 +1,11 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options.js
 // ==============================
 // 说明：ECharts 选项生成（主/量/指标 · 逐行注释 · 全量文件）
-// 本文件提供三类图表（主图/量窗/技术指标窗）的 option 生成器，以及若干通用工具：
-// - createFixedTooltipPositioner：将 tooltip 固定在画布内的某一侧（避免遮挡）
-// - zoomSync：多窗体横轴缩放同步（主窗广播、从窗接收）
-// - applyUi：统一网格、坐标轴、dataZoom（含 slider 两端 label 的格式化）、主题颜色
-// - buildMainChartOption / buildVolumeOption / buildMacdOption / buildKdjOrRsiOption：各类窗口的 option 生成
-//
-// 核心改动点（与需求对齐）：
-// 1) 移除时间字符串中的时区后缀，统一用“短文本格式”展示：
-//    - 分钟族（m 结尾）显示到“YYYY-MM-DD HH:MM”；
-//    - 日/周/月显示到“YYYY-MM-DD”；
-//    用于：横轴标签（axisLabel）、tooltip 行首时间段、dataZoom.slider 的两端 labelFormatter。
-// 2) 统一恢复“聚焦竖线 + 信息浮窗”：在每个���口的 tooltip 中添加 trigger='axis' 与 axisPointer（type: 'cross'），
-//    并保持 appendToBody=false、confine=true，确保竖线与浮窗稳定存在。
-// 3) 统一坐标轴与网格颜色：显式设置 xAxis/yAxis 的 axisLine/splitLine 颜色为 theme 的 axisLineColor/gridLineColor，
-//    防止合并 setOption 时被“更亮”的默认值覆盖。
-// 4) 主图横轴标签默认避让：axisLabel.margin 交由上层（MainChartPanel）根据实际标记尺寸加大，
-//    本文件保留合理的基础 margin，并支持 UI 覆盖（ui.mainAxisLabelSpacePx 等）。
-// 5) 新增：主图增加第二条隐藏 Y 轴（index=1，min=0,max=1, show=false），用于承载涨跌标记，避免影响主 Y 轴自适应。
+// 本次与合并K线边框颜色相关的根因修复：
+// - 合并K线默认颜色的回退改为使用 DEFAULT_KLINE_STYLE.mergedK.upColor/downColor，
+//   不再回退到主题涨跌色，避免与设置项不一致。
+// - 合并K线边框与填充均源自 MK.upColor/MK.downColor；填充再按淡显处理，边框始终100%。
+// - 关键修复：applyUi 增加 initialRange 参数，让 setOption 时直接应用正确窗口，避免闪回 ALL。
 // ==============================
 
 /* =============================
@@ -29,6 +16,7 @@ import {
   STYLE_PALETTE, // 颜色调色板（线条、柱子）
   DEFAULT_VOL_SETTINGS, // 量窗默认设置（用于阈值/颜色等兜底）
   DEFAULT_VOL_MARKER_SIZE, // 量窗标记（放/缩量）尺寸与偏移默认值
+  DEFAULT_KLINE_STYLE, // 主图K线默认（新增：原始/合并K线控制）
 } from "@/constants"; // 集中默认（不含本文件内的 UI 常量）
 
 /* =============================
@@ -317,6 +305,22 @@ function fmtUnit(val, unit) {
 }
 
 /* =============================
+ * 新增小工具：hex 转 rgba（用于合并K线淡显/空心/轮廓）
+ * ============================= */
+function hexToRgba(hex, alpha = 1.0) {
+  try {
+    const h = String(hex || "").replace("#", "");
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    const a = Math.max(0, Math.min(1, Number(alpha || 1)));
+    return `rgba(${r},${g},${b},${a})`;
+  } catch {
+    return hex || "#999";
+  }
+}
+
+/* =============================
  * 应用 UI：网格/坐标轴/dataZoom（含 slider labelFormatter）
  * ============================= */
 
@@ -324,7 +328,7 @@ function fmtUnit(val, unit) {
  * 将通用 UI 布局应用到 option（不覆盖上层业务特有字段）
  * - 参数：
  *   option：已构造好的基础 option
- *   ui：可选覆盖项，如 { isMain, sliderHeightPx, mainAxisLabelSpacePx, tooltipPositioner }
+ *   ui：可选覆盖项，如 { isMain, sliderHeightPx, mainAxisLabelSpacePx, tooltipPositioner, initialRange }
  *   ctx：{ dates, freq } 用于时间格式化和缩放范围确定
  */
 function applyUi(option, ui, { dates, freq }) {
@@ -382,6 +386,12 @@ function applyUi(option, ui, { dates, freq }) {
         option.xAxis?.splitLine?.lineStyle || {}
       ),
     }),
+    // ——仅隐藏 X 轴的轴指示器标签（底部时间），保留 Y 轴数值标签——
+    axisPointer: Object.assign({}, option.xAxis?.axisPointer || {}, {
+      label: Object.assign({}, option.xAxis?.axisPointer?.label || {}, {
+        show: false,
+      }),
+    }),
   });
 
   // 合并 yAxis（保留业务字段，如量窗的 min:0）
@@ -416,17 +426,32 @@ function applyUi(option, ui, { dates, freq }) {
     return fmtTimeByFreq(freq, val);
   };
 
+  // --- 关键修复：从 ui 参数读取初始视窗范围，避免默认全量 ---
+  const hasInitialRange =
+    ui?.initialRange &&
+    Number.isFinite(ui.initialRange.startValue) &&
+    Number.isFinite(ui.initialRange.endValue);
+
+  const initialRange = hasInitialRange
+    ? {
+        startValue: ui.initialRange.startValue,
+        endValue: ui.initialRange.endValue,
+      }
+    : len
+    ? { startValue: 0, endValue: len - 1 }
+    : {};
+
   // 合并 dataZoom：主窗含 slider，其它窗只 inside
   const lenRange = len ? { startValue: 0, endValue: len - 1 } : {};
   option.dataZoom = isMain
     ? [
-        // 内置滚轮/拖动联动
+        // 内置滚轮/拖动联动（注入初始范围）
         Object.assign(
           { type: "inside" },
-          lenRange,
+          initialRange,
           option.dataZoom && option.dataZoom[0] ? option.dataZoom[0] : {}
         ),
-        // slider：显示两端时间（短文本）
+        // slider：显示两端时间（注入初始范围）
         Object.assign(
           {
             type: "slider",
@@ -435,14 +460,15 @@ function applyUi(option, ui, { dates, freq }) {
             showDetail: true,
             labelFormatter: labelFmt,
           },
-          lenRange,
+          initialRange,
           option.dataZoom && option.dataZoom[1] ? option.dataZoom[1] : {}
         ),
       ]
     : [
-        // 子窗只需要 inside 联动
+        // 子窗只需要 inside 联动（注入初始范围）
         Object.assign(
           { type: "inside" },
+          initialRange,
           option.dataZoom && option.dataZoom[0] ? option.dataZoom[0] : {}
         ),
       ];
@@ -489,70 +515,33 @@ function makeMainTooltipFormatter({
     // 当前 K 数据
     const k = list[idx] || {};
 
-    // K 线/HL 柱模式
+    // —— 统一：所有 bar 显示 G/D（优先取对应合并K线 hi/lo；失败兜底当前 bar H/L） —— //
+    let G = k.h,
+      D = k.l;
+    try {
+      const entry = mapOrigToReduced && mapOrigToReduced[idx];
+      const rb =
+        entry && typeof entry.reducedIndex === "number"
+          ? reducedBars[entry.reducedIndex]
+          : null;
+      if (rb && Number.isFinite(rb.hi) && Number.isFinite(rb.lo)) {
+        G = rb.hi;
+        D = rb.lo;
+      }
+    } catch {}
+    rows.push(
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>G: ${fmt3(
+        G
+      )}</div>`
+    );
+    rows.push(
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>D: ${fmt3(
+        D
+      )}</div>`
+    );
+
+    // 原始 K 的 O/H/L/C 或折线 Close
     if (chartType === "kline") {
-      const ks = klineStyle || {};
-      const upColor = ks.upColor || theme.candle.rise;
-      const downColor = ks.downColor || theme.candle.fall;
-      // 判断当前系列类型（用于标题）
-      const kSeries = params.find(
-        (p) => p.seriesType === "candlestick" || p.seriesName === "H-L Bar"
-      );
-      const kLabel =
-        kSeries && kSeries.seriesName === "H-L Bar" ? "H-L柱" : "K线";
-
-      // 小圆点颜色（HL 柱承载点识别，否则按 K 涨跌）
-      let dotColor = "transparent";
-      if (
-        ks.subType === "bar" &&
-        Array.isArray(reducedBars) &&
-        reducedBars.length
-      ) {
-        const mapEntry = mapOrigToReduced && mapOrigToReduced[idx];
-        if (mapEntry) {
-          const reducedBar = reducedBars[mapEntry.reducedIndex];
-          if (reducedBar && idx === reducedBar.anchor_idx) {
-            dotColor = reducedBar.dir > 0 ? upColor : downColor;
-          }
-        }
-      } else {
-        const isUp = Number(k.c) >= Number(k.o);
-        dotColor = isUp ? upColor : downColor;
-      }
-
-      // 第一行：K/H-L 标题 + 彩点
-      rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>${kLabel}</div>`
-      );
-
-      // 若为 HL 柱模式且当前位置为承载点，加 G/D 行（在 O 之前）
-      if (
-        ks.subType === "bar" &&
-        Array.isArray(reducedBars) &&
-        reducedBars.length &&
-        mapOrigToReduced &&
-        mapOrigToReduced[idx]
-      ) {
-        const entry = mapOrigToReduced[idx];
-        const rb =
-          entry && typeof entry.reducedIndex === "number"
-            ? reducedBars[entry.reducedIndex]
-            : null;
-        if (rb && idx === rb.anchor_idx) {
-          rows.push(
-            `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>G: ${fmt3(
-              rb.hi
-            )}</div>`
-          );
-          rows.push(
-            `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>D: ${fmt3(
-              rb.lo
-            )}</div>`
-          );
-        }
-      }
-
-      // 输出 O/H/L/C
       rows.push(
         `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>O: ${fmt3(
           k.o
@@ -708,14 +697,14 @@ function makeVolumeTooltipFormatter({
 
 /**
  * 生成主图 option
- * - candles：原始 K（数组）
- * - indicators：计算出的指标（对象）
+ * - candles：原始 K
+ * - indicators：计算出的指标
  * - chartType：kline | line
  * - maConfigs：MA 配置映射
  * - freq：频率（决定时间短文本）
- * - klineStyle：K 线样式（含 subType = 'candlestick' | 'bar'）
+ * - klineStyle：主图样式（新增：originalEnabled/mergedEnabled/displayOrder/mergedK）
  * - adjust：复权类型
- * - reducedBars/mapOrigToReduced：去包含后的 HL 柱与映射
+ * - reducedBars/mapOrigToReduced：去包含后的合并K线与映射
  * - ui：界面参数（含 tooltipPositioner 供固定浮窗位置）
  */
 export function buildMainChartOption(
@@ -742,102 +731,135 @@ export function buildMainChartOption(
   // 系列集合
   const series = [];
 
+  // —— 新增：显示控制（原始/合并）以及层级（z） —— //
+  const ks = klineStyle || DEFAULT_KLINE_STYLE || {};
+  const MK = ks.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
+  const showOriginal = (ks.originalEnabled ?? true) === true;
+  const showMerged = (ks.mergedEnabled ?? true) === true;
+  const mergedFirst = String(MK.displayOrder || "first") === "first";
+  const originalZ = showOriginal && showMerged ? (mergedFirst ? 2 : 3) : 3;
+  const mergedZ = showOriginal && showMerged ? (mergedFirst ? 3 : 2) : 3;
+
   // K 线模式
   if (chartType === "kline") {
-    const ks = klineStyle || {};
-    const barPercent = Number.isFinite(+ks.barPercent) ? +ks.barPercent : 100;
-    const upColor = ks.upColor || theme.candle.rise;
-    const downColor = ks.downColor || theme.candle.fall;
+    // 原始K线（蜡烛）：淡显仅作用填充体；上下影线与轮廓线保持100%
+    if (showOriginal) {
+      const upColor = ks.upColor || DEFAULT_KLINE_STYLE.upColor;
+      const downColor = ks.downColor || DEFAULT_KLINE_STYLE.downColor;
+      const upPct =
+        Math.max(0, Math.min(100, Number(ks.originalFadeUpPercent ?? 100))) /
+        100;
+      const downPct =
+        Math.max(0, Math.min(100, Number(ks.originalFadeDownPercent ?? 0))) /
+        100;
 
-    // HL 柱子（去包含）或原生 candlestick
-    if (ks.subType === "bar") {
-      if (Array.isArray(reducedBars) && reducedBars.length) {
-        // 基于承载点绘制 H-L 柱（两段堆叠：L-Base + H-L Span）
-        const n = dates.length;
-        const baseLow = new Array(n).fill(null);
-        const hlSpan = new Array(n).fill(null);
-        const upIndexSet = new Set();
-        for (const rb of reducedBars) {
-          const idx = Math.max(
-            0,
-            Math.min(n - 1, Number(rb?.anchor_idx ?? rb?.idx_end ?? 0))
-          );
-          const hi = Number(rb?.hi);
-          const lo = Number(rb?.lo);
-          if (!Number.isFinite(hi) || !Number.isFinite(lo) || hi < lo) continue;
-          baseLow[idx] = lo;
-          hlSpan[idx] = hi - lo;
-          if (Number(rb?.dir || 0) > 0) upIndexSet.add(idx);
-        }
-        series.push({
-          name: "L-Base",
-          type: "bar",
-          stack: "hl_stack",
-          itemStyle: { color: "transparent" },
-          emphasis: { itemStyle: { color: "transparent" } },
-          data: baseLow,
-          ...(barPercent && barPercent !== 100
-            ? { barWidth: `${barPercent}%` }
-            : {}),
-        });
-        series.push({
-          name: "H-L Bar",
-          type: "bar",
-          stack: "hl_stack",
-          itemStyle: {
-            color: (p) => (upIndexSet.has(p.dataIndex) ? upColor : downColor),
-          },
-          data: hlSpan,
-          ...(barPercent && barPercent !== 100
-            ? { barWidth: `${barPercent}%` }
-            : {}),
-        });
-      } else {
-        // 没有去包含结果则回退按原始高低绘制 HL 柱
-        series.push({
-          name: "L-Base",
-          type: "bar",
-          stack: "hl_stack",
-          itemStyle: { color: "transparent" },
-          emphasis: { itemStyle: { color: "transparent" } },
-          data: list.map((d) => d.l),
-          ...(barPercent && barPercent !== 100
-            ? { barWidth: `${barPercent}%` }
-            : {}),
-        });
-        series.push({
-          name: "H-L Bar",
-          type: "bar",
-          stack: "hl_stack",
-          itemStyle: {
-            color: (p) => {
-              const k = list[p.dataIndex];
-              return Number(k.c) >= Number(k.o) ? upColor : downColor;
-            },
-          },
-          data: list.map((d) => d.h - d.l),
-          ...(barPercent && barPercent !== 100
-            ? { barWidth: `${barPercent}%` }
-            : {}),
-        });
-      }
-    } else {
-      // 原生蜡烛
+      // 淡显为0时用 "transparent" 确保空心
+      const upFill = upPct === 0 ? "transparent" : hexToRgba(upColor, upPct);
+      const downFill =
+        downPct === 0 ? "transparent" : hexToRgba(downColor, downPct);
+
       const ohlc = list.map((d) => [d.o, d.c, d.l, d.h]);
       const klineSeries = {
         type: "candlestick",
-        name: "K",
+        name: "原始K线",
         data: ohlc,
         itemStyle: {
-          color: upColor,
-          color0: "transparent",
-          borderColor: upColor,
-          borderColor0: downColor,
+          color: upFill, // 阳线主体填充（按淡显；0→透明）
+          color0: downFill, // 阴线主体填充（按淡显；0→透明）
+          borderColor: upColor, // 阳线轮廓/影线（100%）
+          borderColor0: downColor, // 阴线轮廓/影线（100%）
           borderWidth: 1.2,
         },
+        z: originalZ,
       };
-      if (barPercent < 100) klineSeries.barWidth = `${barPercent}%`;
+      if (ks.barPercent && ks.barPercent < 100)
+        klineSeries.barWidth = `${ks.barPercent}%`;
       series.push(klineSeries);
+    }
+
+    // 合并K线（HL 柱）
+    if (showMerged && Array.isArray(reducedBars) && reducedBars.length) {
+      const outlineW = Math.max(0.1, Number(MK.outlineWidth || 1.2));
+      // 根因修复：默认颜色回退到 DEFAULT_KLINE_STYLE.mergedK.*，不再回退主题色
+      const fallbackUp = DEFAULT_KLINE_STYLE.mergedK?.upColor || "#FF0000";
+      const fallbackDn = DEFAULT_KLINE_STYLE.mergedK?.downColor || "#00ff00";
+      const upC = MK.upColor || fallbackUp;
+      const dnC = MK.downColor || fallbackDn;
+
+      const fillAlpha = Math.max(
+        0,
+        Math.min(1, Number((MK.fillFadePercent ?? 0) / 100))
+      );
+
+      // 淡显为0时填充透明，实现空心；轮廓线始终100%
+      const upFill =
+        fillAlpha === 0 ? "transparent" : hexToRgba(upC, fillAlpha);
+      const dnFill =
+        fillAlpha === 0 ? "transparent" : hexToRgba(dnC, fillAlpha);
+
+      const n = dates.length;
+      const baseLow = new Array(n).fill(null);
+      const hlSpan = new Array(n).fill(null);
+      const upIndexSet = new Set();
+      for (const rb of reducedBars) {
+        const idx = Math.max(
+          0,
+          Math.min(n - 1, Number(rb?.anchor_idx ?? rb?.idx_end ?? 0))
+        );
+        const hi = Number(rb?.hi),
+          lo = Number(rb?.lo);
+        if (!Number.isFinite(hi) || !Number.isFinite(lo) || hi < lo) continue;
+        baseLow[idx] = lo;
+        hlSpan[idx] = hi - lo;
+        if (Number(rb?.dir || 0) > 0) upIndexSet.add(idx);
+      }
+      // 透明底
+      series.push({
+        id: "MERGED_K_BASE",
+        name: "合并K线",
+        type: "bar",
+        stack: "merged_k",
+        data: baseLow,
+        itemStyle: { color: "transparent" },
+        ...(ks.barPercent && ks.barPercent < 100
+          ? { barWidth: `${ks.barPercent}%` }
+          : {}),
+        barGap: "-100%",
+        silent: true,
+        z: mergedZ,
+      });
+
+      // 区间带（填充 + 轮廓）
+      series.push({
+        id: "MERGED_K_SPAN",
+        name: "合并K线",
+        type: "bar",
+        stack: "merged_k",
+        // 将每个数据项改写为对象，在 data 级别设置 itemStyle.borderColor（ECharts v6 不支持在系列级用函数设置 borderColor）
+        data: hlSpan.map((v, i) =>
+          v == null
+            ? null
+            : {
+                value: v,
+                itemStyle: {
+                  borderColor: upIndexSet.has(i) ? MK.upColor : MK.downColor,
+                },
+              }
+        ),
+        ...(ks.barPercent && ks.barPercent < 100
+          ? { barWidth: `${ks.barPercent}%` }
+          : {}),
+        barGap: "-100%",
+        itemStyle: {
+          // 填充色仍可用函数按涨跌设置
+          color: (p) => (upIndexSet.has(p.dataIndex) ? upFill : dnFill),
+          borderColor: (p) =>
+            upIndexSet.has(p.dataIndex) ? MK.upColor : MK.downColor,
+          borderWidth: outlineW,
+          opacity: 1,
+        },
+        z: mergedZ,
+      });
     }
 
     // MA 系列（若启用）
@@ -900,7 +922,7 @@ export function buildMainChartOption(
         candles: list,
         maConfigs,
         adjust,
-        klineStyle,
+        klineStyle: ks,
         reducedBars,
         mapOrigToReduced, // 用于判断当前是否承载点
       }),
@@ -916,6 +938,10 @@ export function buildMainChartOption(
     // 系列
     series,
   };
+
+  option.xAxis = { type: "category", data: dates };
+  option.yAxis = { scale: true };
+  option.series = series;
 
   // 先应用通用 UI
   option = applyUi(
@@ -1068,6 +1094,8 @@ export function buildVolumeOption(
   // 放/缩量标记尺寸估算（按可视柱宽）
   const hostW = Math.max(1, Number(volEnv?.hostWidth || 0));
   const visCount = Math.max(1, Number(volEnv?.visCount || baseScaled.length));
+  // 新增：全局覆写优先（统一宽度源）
+  const overrideW = Number(volEnv?.overrideMarkWidth);
   const approxBarWidthPx =
     hostW > 1 && visCount > 0
       ? Math.max(
@@ -1077,10 +1105,12 @@ export function buildVolumeOption(
       : 8;
   const MARKER_W_MIN = DEFAULT_VOL_MARKER_SIZE.minPx;
   const MARKER_W_MAX = DEFAULT_VOL_MARKER_SIZE.maxPx;
-  const markerW = Math.max(
-    MARKER_W_MIN,
-    Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
-  );
+  const markerW = Number.isFinite(overrideW)
+    ? Math.max(MARKER_W_MIN, Math.min(MARKER_W_MAX, Math.round(overrideW))) // 覆写优先
+    : Math.max(
+        MARKER_W_MIN,
+        Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
+      );
   const markerH = DEFAULT_VOL_MARKER_SIZE.baseHeightPx;
   const symbolOffsetBelow = [
     0,
@@ -1162,6 +1192,7 @@ export function buildVolumeOption(
       appendToBody: false,
       confine: true,
       position: ui?.tooltipPositioner || null,
+      // —— 恢复为调用独立格式化器（保持原结构职责清晰） —— //
       formatter: makeVolumeTooltipFormatter({
         candles: list,
         freq,

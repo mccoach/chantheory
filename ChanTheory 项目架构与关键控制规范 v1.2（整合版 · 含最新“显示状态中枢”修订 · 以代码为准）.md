@@ -1,0 +1,547 @@
+# ChanTheory 项目架构与关键控制规范 v1.2（整合版 · 含最新“显示状态中枢”修订 · 以代码为准）
+
+说明
+
+- 本版在 v1.1 基础上，围绕“各窗显示状态与符号宽度统一来源”的痛点，新增并落地“显示状态中枢（useViewCommandHub）”方案，确立 barsCount/rightTs/markerWidthPx 三核心状态的唯一权威来源与广播机制，并对所有交互路径进行统一收口与帧级合并，保证各窗体状态与宽度在缩放/平移/改频/改宽等场景下稳定一致。
+- 严格遵循“以代码为准”的原则：文档描述与当前实现（前端 Vue3 + Vite + ECharts v6 / 后端 FastAPI + SQLite WAL）一致；如后续实现演进，优先更新守护脚本与本文同步。
+- 关键修订与澄清（相对 v1.1）：
+  - 显示状态中枢（useViewCommandHub）确立 barsCount（可见根数）、rightTs（切片右端锚点毫秒）、markerWidthPx（统一符号宽度，派生自宿主宽度与 barsCount）三核心状态。任何主动交互只允许改变 barsCount 与/或 rightTs，均立即持久化并广播；被动改变视为意外，在边界落地与触底规则中做纠偏。
+  - Pan 与 Zoom 分支收口：平移仅改 rightTs；缩放双改 barsCount+rightTs。主窗 onDataZoom 依据窗口前后 bars 变化准确区分并调用中枢指令。
+  - 宿主宽度统一上报：窗口 resize 时仅变更宿主宽度，重算 markerWidthPx 并广播；不改变 barsCount/rightTs。
+  - 预设高亮规则统一：任何 barsCount 改变（标准/非标）都按向下就近高亮；高亮变化不回写 barsCount 为标准值。
+  - 手输起止日期：在前端基于当前 ALL candles 查找 s_idx/e_idx，计算 nextBars 与 nextRightTs，走双改 SetDatesManual；不触发后端；落地后以边界/触底规则纠偏。
+  - 事件兼容：中枢为唯一宽度来源，但保留并统一由主窗转发 chan:marker-size（detail:{px}）事件，以兼容既有订阅者；来源始终是中枢 markerWidthPx。
+  - 后端 API 不变：/api/candles 服务端一次成型视窗索引；强制锚定 anchor*ts；meta.view*\* 不变量保持。
+  - 不变量保持：主图存在隐藏第二 y 轴 overlayMarkerYAxis（index=1）；CHAN_UP/CHAN_DOWN 占位系列稳定存在，仅更新 data。
+
+---
+
+## 0. 范围与目标
+
+- 目标
+
+  - 以代码为准的规范：文档描述必须与实现一致；当实现演进，守护脚本与文档同步更新。
+  - 显示状态彻底统一：前端显示层仅由 barsCount 与 rightTs 决定切片范围与位置；markerWidthPx 为派生统一宽度，不依赖后端是否处理；任何主动交互都走中枢汇总，帧级合并，覆盖防抖。
+  - 数据以本地 SQLite 为权威单一真相源；最小存储（仅存不复权 + 因子），最大可复现（其他即时计算）。
+
+- 总原则
+  - 效率优先（交付与长期维护的总成本最小）
+  - 最简逻辑（根因重构，避免补丁摞补丁）
+  - 模块化为效率服务（职责清晰，可替换可测试）
+  - Local-first 与合规（默认本地运行与验证；云端 CI 可选）
+  - 可复现性（产出与 API 元信息完整、可对拍）
+
+---
+
+## 1. 架构总览
+
+- 后端（FastAPI + SQLite）
+
+  - 路由薄/服务厚：routers 只做校验与调度，services 承载核心流程（读取 → 复权 → 重采样 → 可视窗口计算）。
+  - SQLite（WAL）为单一真相源：candles（adjust='none'）、adj_factors（qfq/hfq 因子）、candles_cache、cache_meta；支持在线迁移 DB（config.json 变更 → 校验 → 切换）。
+  - 重采样与复权即时计算：分钟派生多分钟；日派生周/月；qfq/hfq 按因子即时套用；兜底策略明确。
+  - 结构化日志（NDJSON）：统一 log_event（service/level/event/message/trace_id）；summary 模式可裁剪字段；模块级别与 trace ID 定向 DEBUG 可配置。
+  - 配置管理：config.json 原子写入 + 镜像 config.applied.json + 文件监听，变更（如 db_path）触发在线迁移。
+
+- 前端（Vue3 + Vite + ECharts v6）
+
+  - 主题与样式：global.css（CSS 变量），charts/theme.js 映射 ECharts 主题。
+  - 请求与并发：统一 axios + 拦截器（trace_id 注入；取消类错误静默）；覆盖式防抖（AbortController + reqId + UI renderSeq）。
+  - useViewCommandHub（显示状态中枢）：统一管理 barsCount/rightTs/markerWidthPx/atRightEdge/hostWidthPx/allRows/presetKey/freq/symbol，集中指令入口与广播合并，持久化 rightTs/viewBars/atRightEdge。
+  - useMarketView：autoStart=false 支持首帧探活后再首刷；右端锚定；预览即时；本地持久化 viewBars/rightTs；anchor_ts=hub.rightTs。
+  - MainChartPanel 顶部三列：频率 / 起止+bars / 窗宽预设+高级按钮；主图渲染（K 线/HL 柱 + MA）；隐藏第二 y 轴（overlayMarkerYAxis，index=1）承载 CHAN 标记；跨窗 hover 广播；dataZoom 联动；快捷键支持。
+  - CHAN 覆盖层稳定：主图初始化存在 overlayMarkerYAxis（index=1），CHAN_UP/CHAN_DOWN 占位系列；仅更新 data，避免 Unknown series 报错。
+  - 多窗联动：zoomSync 横轴缩放同步（主窗广播，从窗接收）；跨窗 hover 同步（chan:hover-index）。
+  - 符号宽度统一：markerWidthPx 派生自宿主宽度与 barsCount，统一广播与订阅；量窗标记、分型标记等仅订阅该源应用，不各自估算。
+
+- 时间与显示
+  - 分钟族 time 显示到“YYYY-MM-DD HH:MM”；日/周/月显示到“YYYY-MM-DD”（不附带时区后缀）。
+  - 分钟族 ts = 结束时刻；日/周/月 ts = 15:00（Asia/Shanghai）。
+
+---
+
+## 2. 数据模型与持久化
+
+- 存储介质
+
+  - SQLite（WAL）：跨平台、零运维、事务与并发足够。
+  - 如规模显著增长再评估 DuckDB/Parquet 归档（对外契约保持稳定）。
+
+- 表结构（概要）
+
+  - candles（仅存 adjust='none'）
+    - 主键：symbol, freq('1m'|'1d'), adjust('none'), ts(ms)
+    - 列：open, high, low, close, volume, amount?, turnover_rate?, source, fetched_at(ISO), revision?
+  - adj_factors
+    - 主键：symbol, date(YYYYMMDD)
+    - 列：qfq_factor, hfq_factor, updated_at
+  - candles_cache / cache_meta（非 1d）
+    - cache_meta：symbol/freq/adjust → rows, first_ts, last_ts, last_access
+
+- 存储策略
+  - 仅存不复权序列 + 因子表；复权即时计算；指标即时计算。
+  - 不存冗余派生（change/change_pct/amplitude 等前端可稳算的列一律即时计算）。
+
+---
+
+## 3. 数据拉取与入库策略（共识与实现一致）
+
+- 日线（1d）
+  - 整窗直拉 + 覆盖更新（UPSERT）；A 股额外获取 qfq/hfq 因子并 UPSERT。
+- 分钟族（1m/5m/15m/30m/60m）
+  - 近端唯一判定：期望最后一根结束时刻 vs 本地 cache_meta.last_ts；若未达标则整窗直拉（接受上游左端限制）。
+- 兜底重采样
+  - 分钟：1m→ 多分钟会话切片重采样；日 → 周/月（W-FRI、自然月末），组末 15:00。
+- 读取路径
+  - 所有业务读取仅用本地数据库（采集与业务彻底解耦）。
+
+---
+
+## 4. 复权与重采样
+
+- 复权
+  - 价格 × 因子、成交量 ÷ 因子；因子查不到回退 none，元信息保留（meta.hint 可按需扩展）。
+- 重采样
+  - 分钟族：会话切片（AM 9:30-11:30，PM 13:00-15:00），右端对齐；开=首、收=尾、高=最大、低=最小、量/额=求和。
+  - 日 → 周/月：W-FRI 与自然月末对齐；ts=该组最后一日 15:00。
+
+---
+
+## 5. 衍生列存储策略
+
+- 可稳定本地计算的不拉取不存储（如 change/change_pct）。
+- 依赖外部口径的（turnover_rate/amount 等）如源有则存。
+- 技术指标不入库，使用时本地计算（MA/MACD/KDJ/RSI/BOLL）。
+
+---
+
+## 6. API 契约与元信息
+
+- /api/candles（Router：backend/routers/candles.py；Service：backend/services/market.py）
+
+  - 入参
+    - code, freq(1m|5m|15m|30m|60m|1d|1w|1M), adjust(none|qfq|hfq)
+    - include（如 "ma,macd,kdj,rsi,boll,vol"）、ma_periods（JSON）
+    - window_preset（5D/10D/1M/3M/6M/1Y/3Y/5Y/ALL），bars（优先）
+    - anchor_ts（右端锚点，毫秒；前端调用必须携带）
+    - iface_key（方法键，选填），trace_id（选填）
+  - 行为
+    - 服务端一次成型计算可视窗口（右端锚定，bars 优先；ALL=当前序列总根数）；返回 ALL candles + meta.view\_\*；前端仅按 meta 应用 dataZoom。
+  - 出参
+    - candles：[ {t,o,h,l,c,v,a?,tr?} ]
+    - indicators：按 include 即时计算（MA/MACD/KDJ/RSI/BOLL）
+    - meta（关键键，不变量）
+      - timezone="Asia/Shanghai"
+      - source（em|sina|ak|tx|resample）、source_key（如 A_1m_a 或 resample_1m_to_5m）
+      - downsample_from（"1m"|"1d"|null）
+      - is_cached=True
+      - algo_version、generated_at、trace_id
+      - all_rows、view_rows、view_start_idx、view_end_idx、window_preset_effective
+
+- 错误模型
+  - DEBUG=True：detail 含回溯；DEBUG=False：标准 {code,message,trace_id}
+  - 前端 axios 拦截器对取消类错误静默（debug 输出），不污染 error 面板。
+
+---
+
+## 7. 后端模块化（文件职责）
+
+- app.py：入口与 CORS；启动钩子（DB 初始化、配置监听、后台任务启动）；/api/ping 与 /api/health。
+- routers：candles/symbols/storage/watchlist/user_config/debug —— 仅组装参数/校验/调用服务并返回。
+- services：
+  - market：核心链路（读取 → 复权 → 重采样 → 可视窗口计算 → 组装响应）
+  - storage：SQLite 读写、UPSERT、缓存元信息维护、LRU/TTL 清理
+  - symbol_index：索引构建/快照归档（与 symbols 路由联动）
+  - tasks：后台任务（自选近端保障、缓存清理守护）
+- datasource：fetchers（归一化/方法注册/稳定 source_key），akshare 适配层。
+- db/sqlite.py：连接/DDL/迁移/健康/统计；candles/candles_cache/adj_factors/symbol_index 等表读写。
+- utils：time（时区/日期换算）、window_preset（预设 →bars 映射）、logger（NDJSON）、errors、fileio（原子写）。
+
+---
+
+## 8. 前端结构与交互（修订 · 三列功能区 · 显示状态中枢落地）
+
+- 主题与样式
+
+  - global.css（CSS 变量）；charts/theme.js 读取变量映射 ECharts 主题（背景/轴线/网格/涨跌色）。
+
+- 请求与并发（覆盖式防抖）
+
+  - axios 拦截器统一注入 trace_id；取消类错误（Abort/Canceled）仅 debug 输出。
+  - useMarketView：AbortController 取消旧请求；请求序号 reqId 守护；展示层 renderSeq 守护；anchor_ts 始终取自显示状态中枢 hub.rightTs。
+
+- 显示状态中枢（useViewCommandHub）
+
+  - 权威状态：barsCount、rightTs、markerWidthPx（派生，范围 [1,16]）、atRightEdge、hostWidthPx、allRows、presetKey、freq、symbol。
+  - 指令入口（execute）：ChangeFreq、ChangeWidthPreset、ScrollZoom、Pan、KeyMove、SetBarsManual、SetDatesManual、Refresh、ChangeSymbol、ResizeHost。
+  - 广播机制：两帧合并（最多 2 帧），仅广播最终值；任何主动 ��� 互立即持久化（viewBars/rightTs/atRightEdge）并调度广播。
+  - 边界与触底：setDatasetBounds(minTs,maxTs,totalRows) 落地后，若 atRightEdge=true 自动锚到最新；rightTs 越界按就近夹取；随后更新 atRightEdge = (rightTs==maxTs)。
+
+- 组件与职责
+
+  - MainChartPanel：三列功能区（频率|起止+bars|窗宽+高级）；主图渲染（K 线/HL 柱 + MA）；隐藏第二 y 轴（overlayMarkerYAxis，index=1）承载 CHAN 标记；跨窗 hover 广播；dataZoom 联动；快捷键。
+    - onDataZoom 分支判定：若 bars 未变 → Pan（仅右端）；若 bars 变化 → ScrollZoom（双改）。
+    - 订阅中枢快照：本地文案与高亮随 snapshot 更新；将 snapshot.markerWidthPx 以 chan:marker-size 事件统一转发。
+    - 高级面板手输起止：前端基于 ALL candles 查找 s_idx/e_idx，计算 nextBars 与 nextRightTs，执行 SetDatesManual 双改，不触发后端。
+  - VolumePanel：订阅中枢快照，使用 overrideMarkWidth=snapshot.markerWidthPx；不再各自估算宽度；其余不变。
+  - IndicatorPanel：与主窗 dataZoom 联动；hover 广播一致；无需宽度订阅。
+  - SymbolPanel：标的输入与导出；刷新按钮；显示层按中枢快照同步 barsCount/rightTs 文案。
+
+- 交互与键盘行为
+
+  - 跨窗 hover 一致：任意窗广播 chan:hover-index；主图左右键从最后 hover 起跳（showTip/highlight）。
+  - dataZoom：主窗作为源，副窗 attach 到 zoomSync 自动跟随；Pan/Zoom 分支统一走中枢。
+
+- 起止与 bars 即时预览与持久化
+
+  - 预览即时：缩放/输入 N 根时即时刷新起止与 bars，并持久化 viewBars/rightTs；回包落地后以 meta 为准。
+  - 时间显示规则（显示层）：分钟族“YYYY-MM-DD HH:MM”；日/周/月“YYYY-MM-DD”；不带时区后缀。
+
+- 窗宽高亮自动匹配
+
+  - pickPresetByBarsCountDown 向下就近高亮；barsCount≥allRows → 高亮 ALL；高亮变化不回写 barsCount 为标准值。
+
+- 缠论覆盖层
+
+  - 初始化存在 overlayMarkerYAxis（index=1，隐藏）；CHAN_UP/CHAN_DOWN 占位系列；仅更新 data，避免 Unknown series。
+
+- 探活与首帧策略
+
+  - utils/backendReady：优先绝对地址（默认 <http://localhost:8000）；App> 探活成功后 vm.reload() 首刷，避免后端未活导致超时。
+
+- 窗口切片右端持久化与后台处理触发规则（项目专用，唯一）
+
+  - 核心状态
+    - 切片右端时间 rightTs（code|freq 维度持久化；中枢唯一来源）。
+    - 可视根数 barsCount（code|freq 维度持久化；中枢唯一来源）。
+    - 触底 atRightEdge：切片右端是否位于全量数据的最右端（最新一根）。
+  - 必然触发后台数据处理的三类场景（近端比对 + 必要拉新）
+    1. 改变标的（Symbol change）
+    2. 改变频率（Freq change）
+    3. 点击刷新按钮（Refresh）
+    - 两条近端线并行评估：
+      - 线 A：当前选择 freq 与本地库做近端比对；若有缺口才远程整窗拉新 → 落库；否则直接本地取全量。
+      - 线 B：当前标的的 1d 数据做近端比对；若当前 freq=1d，则 A 与 B 合并为仅 1d 的近端比对。
+    - 后台处理结束后右端保持规则：
+      - 若触发前 atRightEdge=true → 处理后仍锚到最新一条（右端触底保持）。
+      - 若触发前 atRightEdge=false → 处理后仍锚到原 rightTs（就近夹取到 ≤ 原值的最大 ts）。
+  - 绝不触发后台数据处理的交互（仅本地渲染与持久化；中枢统一承担）
+    - 改变 bars（统一判定“bars 数变化”）
+      - 鼠标滚轮缩放：以当前聚焦 bar 为中心同时改变左右端（双改：bars+右端）。
+      - 预设窗宽按钮/手动输入根数：保持右端不变，仅改变 bars（仅 bars）；若左端触底无法再扩展，按“左端触底反推右端移动”规则改变右端。
+      - 持久化：中枢立即持久化 viewBars/rightTs。
+      - 窗宽高亮：缩放后向下就近 pickPresetByBarsCountDown；barsCount≥allRows → 高亮 ALL。
+    - 鼠标拖动平移或键盘左右键导致窗口移动
+      - 仅移动切片（Pan/KeyMove），不触发后台处理；如确实改变了切片右端时间，则中枢更新 rightTs 并判定/持久化 atRightEdge。
+  - 强制锚定
+    - 前端任何 /api/candles 请求都必须携带 anchor_ts=hub.rightTs；服务端以此一次成型视窗并锚定，避免“未指定锚点时默认跳最右端”。
+
+- 越界与就近区间原则
+
+  - 切片左端 < 数据区间左端：以数据区间左端为切片左端，按原窗宽反推切片右端；若窗宽 > 有效数据范围，则以 ALL（全量）显示。
+  - 切片右端 > 数据区间右端：以数据区间右端为切片右端，按原窗宽反推切片左端；若窗宽 > 有效数据范围，则以 ALL 显示。
+  - 左端触底反推右端移动（bars 扩展但左端已卡死）：当需扩大 bars 且左端已到数据区间最左端无法再扩展时，保持左端不动，向右移动右端以满足目标 bars；其余场景保持右端不变。
+  - 原 rightTs 不在新数据集合时（如清理/迁移或源修订）：就近向左夹取到 ≤ 原值的最大 ts；不可达时锚到最右端并置 atRightEdge=true。
+
+- 交互解耦
+  - 复权切换（none/qfq/hfq）、技术指标开关与参数、主图样式（K/HL 柱）、缠论/分型可视参数变化、主题切换、窗口 resize、导出：均不触发后台数据处理；右端不变；仅渲染层重绘与宽度应用。
+
+---
+
+## 9. 用户配置与存储路径（文件）
+
+- 持久层
+
+  - 单文件 config.json（原子写 + 镜像 .applied.json + 滚动备份）
+  - 后端提供 GET/PUT /api/user/config；watcher 发现变更自动迁移 DB（校验通过后切换）。
+
+- 默认路径与可配置
+
+  - 默认 var/；db_path 可迁移（integrity_check 通过即切换）。
+
+- 配置变更监听
+
+  - 监听 config.json 与镜像；检测变更走安全迁移流程，失败回滚。
+
+- 视图持久化（项目专用）
+  - 每个 code|freq 维度持久化 viewBars（barsCount）、rightTs 与 atRightEdge（LocalStorage）；由 useUserSettings/setViewBars/setRightTs/setAtRightEdge 实现；显示状态中枢统一读写。
+
+---
+
+## 10. 后台任务与调度
+
+- 启动后后台近端保障（可选）
+
+  - 自选池：并发（受限）对每个标执行“1d 全量覆盖/校正”。
+
+- 缓存清理（守护线程）
+
+  - 周期执行 LRU/TTL 清理（可中断等待），保留基本快照统计。
+
+- 在线备份/健康检查
+  - PRAGMA integrity_check、VACUUM 等接口暴露（/api/storage/\*）。
+
+---
+
+## 11. 性能与并发控制（修订）
+
+- 覆盖式防抖：Abort+reqId+renderSeq；仅最后一次请求/动作落地。
+- 中枢两帧合并：滚轮/拖动等高频指令仅广播最终值；避免抖动。
+- 显示层即时预览：任意主动交互都即时更新 barsCount/rightTs 与 symbol 文案，高亮与 markerWidthPx 同步，并持久化。
+- 日志与可观测：NDJSON + 基本度量；trace_id 贯穿链路。
+- 资源预算与建议：可根据项目设定记录 near_end.ensure/db_read/indicators/assemble 分段时延。
+
+---
+
+## 12. 安全与合规
+
+- Local-first：CORS 白名单仅本地开发地址。
+- 数据最小化：导出默认不内嵌原始数据（可开关）。
+- 隐私最小化：默认不收集使用数据；如需采集须显式开关与保留策略。
+- 交互解耦：非后台处理类交互不触发数据抓取或落库；仅本地渲染。
+
+---
+
+## 13. 风险与对策
+
+- 上游限流或瞬断：并发限流、指数退避、失败重试；错峰与任务队列。
+- 特殊交易日分钟数异常：交易日历与特例容差处理。
+- 因子缺失/修订：fallback none + 对账回补（预留）；meta.hint 标注。
+- 本地守护遗漏：每次验收新增“可机检要点”入 invariants.json（病毒库式增强）。
+- 视窗越界：按“就近区间原则”落地；必要时全量显示（ALL）。
+
+---
+
+## 14. 默认参数（建议范围）
+
+- fetch.concurrency = 2–4（当前配置 3 为常见选择）
+- retry.max_attempts = 2（~3）
+- retry.base_delay_ms = 500
+- 日线近端截止小时 daily_fresh_cutoff_hour（当前 settings 中默认 18）
+- DEBUG = 开发 True / 生产 False
+
+---
+
+## 15. 路线与交付（修订 · 本地守护强制）
+
+- 一步到位新骨架（与现实现保持一致）
+
+  - 后端：SQLite DDL/PRAGMA、datasource、storage、market、routers、meta 扩展
+  - 前端：global.css + charts/theme.js、统一 axios、覆盖式防抖（Abort+reqId+renderSeq）、主/量/指标窗体、LocalStorage 持久化、显示状态中枢、起止与 bars 即时预览、CHAN 占位稳定
+
+- 验收补充（不变量清单）
+
+  - 覆盖式防抖落地：旧回包/旧帧不落地
+  - 中枢两帧合并：高频触发仅广播最终值
+  - 预览即时：滚轮/输入 N 根后，起止与 bars 立即刷新与持久化，回包一致
+  - Pan/Zoom 分支判定正确（平移仅右端；缩放双改）
+  - 窗宽高亮向下就近；barsCount≥all_rows → ALL
+  - 跨窗体 hover 一致
+  - 缠论覆盖层稳定（隐藏 yAxis=1 + CHAN_UP/CHAN_DOWN 占位）
+  - 探活首刷策略生效（后端未活不首刷）
+  - 错误模型：取消类错误静默（不污染 error）
+
+- 变更流程（本地守护为强制）
+  - 守护脚本通过（Patch Fence + Invariants）；pre-commit 自动执行；手动可随时运行；
+  - 云端 CI 可选：如启用，在 PR 上运行同一套脚本作为门禁。
+
+---
+
+## 16. 术语对照
+
+- 切片右端锚点（rightTs）：当前窗口右端 bar 的收盘时间毫秒。
+- 可见根数（barsCount）：当前窗口可见的 K 根数（ALL=总根数）。
+- markerWidthPx：统一符号宽度（派生自 hostWidth 与 barsCount，上限 16 下限 1）。
+- 近端：当前会话/粒度下应当已生成的最后一根 K 的结束时刻（右端）。
+- 整窗直拉：历史起点 → 当前的全历史拉取。
+- 兜底重采样：主抓取失败或不足时，从 1m 或 1d 重采样生成目标粒度。
+- 覆盖式防抖：AbortController + reqId + UI renderSeq，只保留最新请求/动作。
+- 预览态：显示状态中枢在交互时即时更新起止与 bars，并持久化与广播；落地后以 meta 为准。
+
+---
+
+## 17. 技术执行规范整理（随开发迭代同步）
+
+### 17.1 标的索引拉取与本地数据库存储
+
+- 范围：A / ETF / LOF 三类；UPSERT 不删除；快照统计 symbol_index_summary。
+- 并发抓取、主备接口、聚合优先级（A>ETF>LOF）、重试指数退避；结构化日志。
+- API：
+  - GET /api/symbols/index（可选 refresh）
+  - POST /api/symbols/refresh
+  - GET /api/symbols/summary
+
+### 17.2 行情数据拉取操作规范
+
+- 适用标的：A/ETF/LOF
+- 频率：1m/5m/15m/30m/60m、1d/1w/1M
+- 时区：Asia/Shanghai；右端对齐（label=right）
+- 近端判定：以“应当已生成的 K 的结束时刻 end_ts_expected”与本地 last_ts 比较
+- 整窗直拉：触发条件为近端未达标或首次请求（接受上游左端限制）
+- 存储：
+  - A 股 1d → candles（none）+ adj_factors
+  - 非 A 日线（含分钟/周/月）→ candles_cache + cache_meta
+- 重采样：
+  - 1m→ 多分钟；1d→ 周/月；严格右端对齐、会话切片
+- meta.source/source_key 标记真实来源与方法键
+
+### 17.3 前端信息显示层技术规范（修订）
+
+- 不使用固定时长防抖；覆盖式防抖 + 序号守护；交互即时预览。
+- MainChartPanel 顶部三列；SymbolPanel 精简（仅标的输入与导出）。
+- 显示状态中枢：barsCount/rightTs/markerWidthPx/atRightEdge/hostWidthPx/allRows/presetKey/freq/symbol；两帧合并广播；任何主动交互立即持久化。
+- 时间显示：分钟族 →YYYY-MM-DD HH:MM；日/周/月 →YYYY-MM-DD。
+- 窗宽高亮：向下就近（pickPresetByBarsCountDown）；barsCount≥all_rows→ALL。
+- 缠论覆盖层：overlayMarkerYAxis（index=1）+ CHAN_UP/CHAN_DOWN 占位系列；仅更新 data。
+- 渲染与重绘：变化即重绘；主窗越界重置 dataZoom；展示层动作以 renderSeq 校验。
+
+### 17.4 切频/切窗解耦与右端锚定缩放规则（修订 · 显示状态中枢版 · 项目专用唯一规则）
+
+- 预设 → bars（向上取整，ALL=total_rows）
+- 切频仅改变 barsCount；切窗仅改变 barsCount；均不改 rightTs；由服务端返回视图窗口索引。
+- 强制锚定：前端任何 /api/candles 请求必须携带 anchor_ts=hub.rightTs，以右端锚点定位 e_idx，向左推 s_idx。
+- 自动高亮：缩放后向下就近；barsCount≥all_rows → ALL。
+
+- bars 改变的两类缩放与右端持久化：
+
+  - 鼠标滚轮缩放：以当前聚焦 bar 为中心，同时改变左右端（双改 ScrollZoom）。
+  - 预设窗宽/手动输入根数：保持右端不变，仅改变 bars（SetBarsManual）；若左端触底无法再扩展，反推右端移动以满足目标 bars；不触发后台处理。
+
+- Pan/KeyMove 与越界：
+
+  - 鼠标拖动平移/键盘左右键：仅移动切片右端（Pan/KeyMove），不触发后台处理；越界按夹取规则纠偏。
+
+- 手输起止日期：
+  - 查询本地当前 ALL candles；计算 s_idx/e_idx → nextBars 与 nextRightTs；执行 SetDatesManual 双改；不触发后台处理。
+
+---
+
+## 18. 守护脚本与本地工作流（强制）
+
+- 目录：scripts/guards/
+  - run_guards.py：统一入口；自动推导 git 暂存变更；支持宽松（--lenient / GUARDS_MODE=dev）与严格模式。
+  - check_patch_fence.py：改动范围护栏；支持 fence.json + fence.local.json；支持目录白名单。
+  - check_invariants.py：关键不变量检查；静态包含；不使用正则。
+  - invariants.json：不变量清单（文件路径 + mustContain）。
+  - fence.json：主白名单（allowAdd/Modify/Delete + allow\*Dirs）；fence.local.json：本地覆盖（.gitignore 忽略）。
+- 本地使用：
+  - pip install pre-commit；pre-commit install（提交时自动运行）。
+  - 手动运行：python scripts/guards/run_guards.py（严格）或加 --lenient（宽松）。
+- 云端 CI（可选）：如需启用，可在 PR 上运行同一脚本作为门禁。
+- 本版新增可机检要点建议：
+  - useViewCommandHub.js 必含 execute(…) 的各 action 令牌与 setDatasetBounds/markerWidthPx/\_recalcMarkerWidth。
+  - MainChartPanel.vue 必含 onDataZoom 分支调用 Pan/ScrollZoom 与 chan:marker-size 转发、SetDatesManual。
+  - VolumePanel.vue 必含订阅中枢快照应用 overrideMarkWidth 与传入 buildVolumeOption。
+  - useMarketView.js 必含 hub.onChange 中 presetKey/barsCount/rightTs 文案更新、reload anchor_ts=hub.rightTs。
+
+---
+
+## 19. 版本与元信息
+
+- 语义化版本：MAJOR.MINOR.PATCH；破坏性变更需标注与迁移说明。
+- 产出元信息：algo_version、参数、数据窗、生成时间、timezone。
+- Changelog：用户可读 + 研发可复现；必要时附对拍差异。
+
+---
+
+## 20. 测试与回归
+
+- 单测：utils 与算法；charts option 快照；关键交互最小集成；onDataZoom 分支判定；中枢 action 落地。
+- 集成慢测：/api/candles 贯通对拍（scripts/cases.yaml）。
+- 守护脚本：Patch Fence 与 Invariants 必过；与测试互补。
+
+---
+
+## 21. 常见问题与建议
+
+- 高频开发：Fence 用宽松模式 + fence.local.json 目录白名单；Invariants 始终严格。
+- 交付冻结：Strict 模式全绿；必要时扩主白名单与不变量清单。
+- 新增可机检要点：验收后立即合入 invariants.json（“病毒库式”增强）。
+
+---
+
+## 22. 图形标记与符号宽度（项目专用 · 统一来源修订）
+
+- 唯一权威符号宽度源（统一广播）
+
+  - 宽度计算：markerWidthPx = round(hostWidthPx × 0.88 / barsCount)，限制 [1,16]。
+  - 广播机制：主窗订阅中枢后将 snapshot.markerWidthPx 以事件 chan:marker-size 转发；宽度唯一来源为中枢派生值。
+  - 订阅与应用：主图缠论标记、量窗标记、分型标记等模块仅订阅该事件或直接订阅中枢快照并立即应用；不做各自估算、也不触发任何数据处理。
+
+- 覆盖层不变量
+  - 主图存在 overlayMarkerYAxis（index=1，隐藏）；CHAN_UP/CHAN_DOWN 占位系列稳定存在（仅更新 data）。
+  - 分型标记绑定主价格轴 yAxisIndex=0；确认分型连线按设置绘制；仅受统一宽度源影响其符号宽高与偏移。
+
+---
+
+## 23. 显示状态中枢（useViewCommandHub）操作与规则（新增 · 穷举交互）
+
+- 主动交互唯一入口（execute）
+
+  - ChangeFreq：仅改变 barsCount；rightTs 不变；越界夹取；自动高亮；立即持久化与广播。
+  - ChangeWidthPreset：仅改变 barsCount；rightTs 不变；越界夹取；自动高亮；立即持久化与广播。
+  - ScrollZoom：双改 barsCount+rightTs；自动高亮；立即持久化与广播。
+  - Pan：仅改变 rightTs；barsCount 不变；越界夹取；立即持久化与广播。
+  - KeyMove：仅改变 rightTs；barsCount 不变；越界夹取；立即持久化与广播。
+  - SetBarsManual：仅改变 barsCount；rightTs 不变；自动高亮；立即持久化与广播。
+  - SetDatesManual：双改 barsCount+rightTs（手输起止）；越界夹取；自动高亮；立即持久化与广播。
+  - Refresh：barsCount/rightTs 不变；必要后台处理后由 setDatasetBounds 应用触底/越界规则；广播快照。
+  - ChangeSymbol：仅更新 symbol；barsCount/rightTs 不变；立即持久化（保持现值）与广播。
+  - ResizeHost：仅更新宿主宽度；重算 markerWidthPx；barsCount/rightTs 不变；广播。
+
+- 边界与触底
+
+  - setDatasetBounds：落地后，若 atRightEdge=true → 自动锚到最新；rightTs 越界按就近夹取；随后更新 atRightEdge = (rightTs==maxTs)。
+
+- 初始恢复
+
+  - initFromPersist(code,freq)：读取持久化 barsCount/rightTs/atRightEdge；不做查表重置；广播快照；后续仅在落地与主动交互中变更。
+
+- 自动高亮与非标 bars
+
+  - 任何 barsCount 改变均向下就近高亮；barsCount≥allRows 高亮 ALL；高亮变化不回写 barsCount 为标准值。
+
+- 事件兼容
+  - 主窗订阅中枢后将 markerWidthPx 转发 chan:marker-size 事件；订阅者以中枢值作为唯一宽度来源。
+
+---
+
+## 24. 变更控制与交付保障（SOP · 显示状态中枢落地版）
+
+- 目的与范围
+
+  - 任何代码修改（功能、修复、优化、重构）必须通过本地守护脚本（Patch Fence + Invariants）。云端 CI 可选启用。
+
+- 基本原则
+
+  - 二阶段握手：计划先行、获批再改；白名单/预算受控。
+  - 最小补丁优先：不做无关重构与整理。
+  - 可验证交付：变更核对单 + 回归核对单 + 手测步骤（必要时附守护结果）。
+  - 守护令牌变更只增不删不改；每次守护脚本修订必须有完整修订说明。
+
+- 影响分析与禁止改动项（示例）
+
+  - 不得破坏：公共 API 契约（/api/candles meta 键与语义）、时间语义（分钟右端、日/周/月 15:00）、日志结构、覆盖式防抖/序号守护、显示状态中枢不变量（execute 指令集、setDatasetBounds、markerWidthPx 派生与广播）、性能与并发模型。
+
+- 交付护栏（交付包必须包含）
+  - 变更核对单、回归核对单、手测步骤、守护脚本结果（本地）。
+  - Guards-ChangeLog（守护脚本修订说明）。
+  - 新增令牌有效性校验结果。
+
+---
+
+## 25. 验收清单（显示状态中枢版）
+
+- 主窗 onDataZoom 能准确区分 Pan 与 ScrollZoom；对应中枢指令触发与持久化正确。
+- 任何 barsCount 改变，窗宽高亮向下就近即时更新；非标 bars 不被拉齐。
+- 任何主动交互改变 barsCount 或 rightTs，均立即持久化到 LocalStorage（code|freq 维度）。
+- markerWidthPx 始终由中枢计算并统一广播；量窗/分型/缠论标记等均无自估逻辑；随缩放即时变化。
+- 刷新/改频/改标三类后台处理结束后触底保持与越界夹取规则正确；rightTs 无被动漂移。
+- anchor*ts=hub.rightTs 强制锚定；服务端返回 ALL + meta.view*\* 正确；前端仅依 meta 设置 dataZoom。
+- 覆盖式防抖与两帧合并有效：高频滚轮/拖动仅落地最后一次请求与最终广播。
+- 缠论覆盖层不变量：overlayMarkerYAxis（index=1）存在，CHAN_UP/CHAN_DOWN 占位存在。
+- 跨窗 hover 同步与 dataZoom 联动保持一致。
+
+---
+
+## 结束

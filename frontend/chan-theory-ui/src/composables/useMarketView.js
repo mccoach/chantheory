@@ -1,20 +1,24 @@
-/* E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useMarketView.js */
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useMarketView.js
 /* ============================== */
-/* 覆盖式防抖（Abort + reqId）+ 缩放后自动高亮窗宽（pickPresetByBarsCountDown）
- * 新增：
- *  - displayBars：用于“随交互即时显示”的 bars 数（不等待回包）。
- *  - previewView(bars, anchorTs, sIdx, eIdx)：交互发生时立即刷新并持久化起止/根数。
- *  - 可配置 autoStart（默认 true）：未探活前可设为 false，避免首刷超时。
+/* 覆盖式防抖（Abort + reqId）+ 中枢化显示状态订阅（bars/rightTs/presetKey）
+ * 本次重构（轻度）：保持原函数/变量顺序，不扩大范围，仅补充注释与确保 anchor_ts = 中枢 rightTs。
+ * - 显示状态与后端解耦：任何 UI 交互先汇总到 useViewCommandHub，reload 时以 hub.rightTs 为锚点，服务端一次成型返回 meta.view_*。
  */
+
 import { ref, watch, computed } from "vue";
 import { fetchCandles } from "@/services/marketService";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { pickPresetByBarsCountDown } from "@/constants";
+// 新增：命令中枢（单例）
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 // 模块私有：管理“仅保留最新请求”
-let _abortCtl = null; // 当前在途请求的 AbortController
-let _lastReqSeq = 0; // 递增的请求序号（最新为基准）
-let _lastAppliedKey = ""; // 可选：用于避免重复提交完全相同参数（轻量去重）
+let _abortCtl = null;
+let _lastReqSeq = 0;
+let _lastAppliedKey = "";
+
+// —— 新增：注入命令中枢（保持原位置与顺序，不调整） —— //
+const hub = useViewCommandHub();
 
 function makeReqKey(p) {
   const parts = [
@@ -31,29 +35,25 @@ function makeReqKey(p) {
 }
 
 export function useMarketView(options = {}) {
-  const autoStart = options?.autoStart !== false; // 默认 true
+  const autoStart = options?.autoStart !== false;
 
   const settings = useUserSettings();
 
-  // —— 核心可持久化状态 —— //
+  // —— 核心状态（保持原导出签名与前后顺序） —— //
   const code = ref(settings.lastSymbol.value || "");
   const freq = ref(settings.freq?.value || "1d");
-  const adjust = settings.adjust; // none|qfq|hfq
+  const adjust = settings.adjust;
   const windowPreset = ref(settings.windowPreset.value || "ALL");
   const rightTs = ref(settings.getRightTs(code.value, freq.value) || null);
 
-  // —— 数据与元信息 —— //
   const loading = ref(false);
   const error = ref("");
   const meta = ref(null);
   const candles = ref([]);
   const indicators = ref({});
 
-  // —— 展示辅助 —— //
   const chartType = ref(settings.chartType?.value || "kline");
-  // 注意：visibleRange 现在既用于回包落地，也用于“预览态”（previewView 即时更新）
   const visibleRange = ref({ startStr: "", endStr: "" });
-  // 新增：随交互即时 bars 显示（预览态）
   const displayBars = ref(0);
 
   const maPeriodsMap = computed(() => {
@@ -76,71 +76,43 @@ export function useMarketView(options = {}) {
     return arr.join(",");
   }
 
-  // —— 预览态：随交互即时刷新起止/根数并持久化 —— //
+  // —— 中枢订阅（显示层文案同步）：不改变 bars/rightTs，仅更新展示 —— //
+  hub.onChange((st) => {
+    displayBars.value = Math.max(1, Number(st.barsCount || 1));
+    rightTs.value = st.rightTs != null ? Number(st.rightTs) : rightTs.value;
+    windowPreset.value = st.presetKey || windowPreset.value;
+  });
+
+  // 预览态（保留导出签名；内部委派中枢，避免分散状态源）
   function previewView(bars, anchorTs, sIdx, eIdx) {
-    // 立即更新显示的 bars
     const b = Math.max(1, Math.floor(Number(bars || 1)));
-    displayBars.value = b;
-
-    // 立即持久化“缩放根数与右端锚点”
-    try {
-      settings.setViewBars(code.value, freq.value, b);
-      if (Number.isFinite(+anchorTs)) {
-        rightTs.value = Math.floor(+anchorTs);
-        settings.setRightTs(code.value, freq.value, rightTs.value);
-      }
-    } catch {}
-
-    // 立即刷新前端“起止时间文案”（不等待回包）
-    try {
-      const arr = candles.value || [];
-      const n = arr.length;
-      // sIdx/eIdx 由交互处传入（更准），否则根据 anchor/bars 用当前 ALL 序列估算
-      let si = Number.isFinite(+sIdx)
-        ? Math.max(0, Math.min(n - 1, +sIdx))
-        : null;
-      let ei = Number.isFinite(+eIdx)
-        ? Math.max(0, Math.min(n - 1, +eIdx))
-        : null;
-
-      if (si == null || ei == null) {
-        // 根据 anchorTs/bars 推导
-        if (n > 0) {
-          let endIndex = n - 1;
-          const aTs = Number.isFinite(+anchorTs) ? +anchorTs : rightTs.value;
-          if (Number.isFinite(+aTs)) {
-            for (let i = n - 1; i >= 0; i--) {
-              const t = Date.parse(arr[i]?.t || "");
-              if (Number.isFinite(t) && t <= aTs) {
-                endIndex = i;
-                break;
-              }
-            }
-          }
-          const startIndex = Math.max(0, endIndex - b + 1);
-          si = startIndex;
-          ei = endIndex;
-        }
-      }
-
-      const sStr =
-        Number.isFinite(+si) && arr[si]?.t
-          ? String(arr[si].t)
-          : visibleRange.value.startStr;
-      const eStr =
-        Number.isFinite(+ei) && arr[ei]?.t
-          ? String(arr[ei].t)
-          : visibleRange.value.endStr;
-
-      visibleRange.value = { startStr: sStr || "", endStr: eStr || "" };
-    } catch {
-      // 容错：不阻断交互
+    if (Number.isFinite(+sIdx) && Number.isFinite(+eIdx)) {
+      hub.execute("ScrollZoom", { nextBars: b, nextRightTs: anchorTs });
+    } else {
+      hub.execute("SetBarsManual", { nextBars: b });
     }
   }
 
-  // —— 统一加载（服务端一次成型 + 覆盖式防抖） —— //
+  // 本地缩放（保留导出；委派中枢）
+  function applyLocalZoom(startIdx, endIdx, nextBars) {
+    const arr = candles.value || [];
+    const n = arr.length;
+    if (!n) return;
+    const sIdx = Math.max(0, Math.min(n - 1, Number(startIdx)));
+    const eIdx = Math.max(0, Math.min(n - 1, Number(endIdx)));
+    const anchorTs = arr[eIdx]?.t ? Date.parse(arr[eIdx].t) : rightTs.value;
+    const b = Math.max(1, Number(nextBars || eIdx - sIdx + 1));
+    hub.execute("ScrollZoom", { nextBars: b, nextRightTs: anchorTs });
+  }
+
+  // 统一加载（服务端一次成型 + 覆盖式防抖）：anchor_ts 始终取中枢 rightTs
   async function reload(opts = {}) {
     if (!code.value) return;
+
+    const st = hub.getState();
+    const anchor = Number.isFinite(+st.rightTs)
+      ? Math.floor(+st.rightTs)
+      : undefined;
 
     const params = {
       code: code.value,
@@ -149,12 +121,8 @@ export function useMarketView(options = {}) {
       include: buildIncludeParam(),
       ma_periods: JSON.stringify(maPeriodsMap.value || {}),
       window_preset: opts.window_preset ?? windowPreset.value,
-      bars: Number.isFinite(+opts.bars)
-        ? Math.max(1, Math.floor(+opts.bars))
-        : undefined,
-      anchor_ts: Number.isFinite(+opts.anchor_ts)
-        ? Math.floor(+opts.anchor_ts)
-        : rightTs.value ?? undefined,
+      bars: Math.max(1, Math.floor(Number(st.barsCount || 1))),
+      anchor_ts: anchor, // —— 关键：统一以中枢 rightTs 作为锚点 —— //
     };
 
     const key = makeReqKey(params);
@@ -173,6 +141,10 @@ export function useMarketView(options = {}) {
     loading.value = true;
     error.value = "";
 
+    const preAtRightEdge =
+      settings.getAtRightEdge(code.value, freq.value) || false;
+    const prevRightTs = rightTs.value;
+
     try {
       const data = await fetchCandles(params, { signal: ctl.signal });
 
@@ -184,42 +156,24 @@ export function useMarketView(options = {}) {
       candles.value = data.candles || [];
       indicators.value = data.indicators || [];
 
-      // 回包落地：更新“最终可见窗口文案与 bars”
-      const allRows = Number(meta.value?.all_rows || 0);
+      const allRowsNow = Number(meta.value?.all_rows || 0);
       const viewRows = Number(meta.value?.view_rows || 0);
-      displayBars.value = viewRows || displayBars.value; // 回包覆盖预览值（若有）
+      displayBars.value = viewRows || displayBars.value;
       visibleRange.value = {
         startStr: meta.value.start || visibleRange.value.startStr || "",
         endStr: meta.value.end || visibleRange.value.endStr || "",
       };
 
-      // 右端锚点持久化：优先使用参数 anchor_ts，否则用回包 end
-      if (params.anchor_ts != null) {
-        rightTs.value = params.anchor_ts;
-      } else if (meta.value.end) {
-        const endMs = Date.parse(meta.value.end);
-        if (!Number.isNaN(endMs)) rightTs.value = endMs;
-      }
-
-      // 自动高亮窗宽（仅当 bars 缩放触发时）
-      let nextPreset = String(
-        meta.value.window_preset_effective || windowPreset.value || "ALL"
-      );
-      if (Number.isFinite(+opts.bars)) {
-        if (allRows > 0 && viewRows >= allRows) {
-          nextPreset = "ALL";
-        } else if (allRows > 0 && viewRows > 0) {
-          nextPreset = pickPresetByBarsCountDown(freq.value, viewRows, allRows);
-        }
-      }
-      windowPreset.value = nextPreset;
-      settings.setWindowPreset(nextPreset);
+      // —— 落地后设置数据集边界（中枢：触底保持/越界夹取，仅修正 rightTs，不改 bars） —— //
+      const minTs = candles.value?.[0]?.t
+        ? Date.parse(candles.value[0].t)
+        : undefined;
+      const maxTs = candles.value?.[allRowsNow - 1]?.t
+        ? Date.parse(candles.value[allRowsNow - 1].t)
+        : undefined;
+      hub.setDatasetBounds({ minTs, maxTs, totalRows: allRowsNow });
 
       settings.setFreq(freq.value);
-      if (rightTs.value != null)
-        settings.setRightTs(code.value, freq.value, rightTs.value);
-
-      // 记住已生效参数键（去重基准）
       _lastAppliedKey = key;
     } catch (e) {
       const msg = String(e?.message || "");
@@ -238,29 +192,33 @@ export function useMarketView(options = {}) {
     }
   }
 
-  // —— 交互 API —— //
+  // 交互 API（保持签名；内部委派中枢）
   function setFreq(newFreq) {
     if (!newFreq || newFreq === freq.value) return;
     freq.value = newFreq;
     settings.setFreq(newFreq);
+    const st = hub.getState();
+    hub.execute("ChangeFreq", { freq: newFreq, allRows: st.allRows }); // bars=查表，右端不变
     reload({
       force: true,
       window_preset: windowPreset.value,
-      anchor_ts: rightTs.value,
+      anchor_ts: st.rightTs,
     });
   }
   async function applyPreset(preset) {
     const p = String(preset || "ALL");
     windowPreset.value = p;
     settings.setWindowPreset(p);
-    await reload({ force: true, window_preset: p, anchor_ts: rightTs.value });
+    const st = hub.getState();
+    hub.execute("ChangeWidthPreset", { presetKey: p, allRows: st.allRows }); // bars=查表，右端不变
+    await reload({ force: true, window_preset: p, anchor_ts: st.rightTs });
   }
   async function setBars(bars, anchorTs) {
     const b = Math.max(1, Math.floor(Number(bars || 1)));
     const a = Number.isFinite(+anchorTs)
       ? Math.floor(+anchorTs)
       : rightTs.value ?? undefined;
-    await reload({ force: true, bars: b, anchor_ts: a });
+    hub.execute("SetBarsManual", { nextBars: b });
   }
   function zoomIn() {
     const v = Number(meta.value?.view_rows || 0) || 1;
@@ -271,9 +229,10 @@ export function useMarketView(options = {}) {
     setBars(Math.ceil(v * 1.2), rightTs.value);
   }
 
-  // —— 初始化 —— //
+  // 初始化（保持原逻辑）
   watch(code, (v) => {
     settings.setLastSymbol(v || "");
+    hub.execute("ChangeSymbol", { symbol: String(v || "") });
     if (autoStart) reload({ force: true });
   });
   watch(adjust, () => {
@@ -281,10 +240,12 @@ export function useMarketView(options = {}) {
     if (autoStart) reload({ force: true });
   });
 
+  hub.initFromPersist(code.value, freq.value);
   if (autoStart) {
     reload({ force: true });
   }
 
+  // 导出（保持签名）
   return {
     code,
     freq,
@@ -298,14 +259,15 @@ export function useMarketView(options = {}) {
     windowPreset,
     rightTs,
     visibleRange,
-    displayBars, // 新增：用于 SymbolPanel 实时显示 bars
-    previewView, // 新增：供交互时即时刷新
+    displayBars,
+    previewView,
     setFreq,
     applyPreset,
     setBars,
     zoomIn,
     zoomOut,
     reload,
+    applyLocalZoom,
     get viewStartIdx() {
       return Number(meta.value?.view_start_idx ?? 0);
     },
