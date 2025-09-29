@@ -196,18 +196,6 @@ def _last_trading_day_1500(now: datetime) -> datetime:
         if _lazy_is_trading_day(d):
             return d.replace(hour=15, minute=0, second=0, microsecond=0)
 
-def _prev_week_last_trading_1500(now: datetime) -> int:
-    """上周最后交易日 15:00（毫秒）。"""
-    d = now - timedelta(days=7)
-    weekday = d.weekday()
-    days_to_fri = 4 - weekday
-    fri = d + timedelta(days=days_to_fri)
-    x = fri
-    for _ in range(7):
-        if _lazy_is_trading_day(x): break
-        x = x - timedelta(days=1)
-    return _ms_from_dt(x.replace(hour=15, minute=0, second=0, microsecond=0))
-
 def _last_week_last_trading_1500(now: datetime) -> datetime:
     """上周最后一个交易日的 15:00（返回 datetime）。"""
     d = now - timedelta(days=7)

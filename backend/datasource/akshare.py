@@ -17,7 +17,7 @@ from backend.datasource.fetchers import _norm_daily_df, _norm_minute_df  # 归�
 
 # 时间工具：用于日期与字符串互转
 from backend.utils.time import (
-    today_yyyymmdd,        # 今天的 YYYYMMDD（整型）
+    normalize_yyyymmdd_range,  # 统一区间规范化（工具层唯一）
     yyyymmdd_from_str,     # 字符串 → YYYYMMDD（整型）
 )
 
@@ -30,17 +30,6 @@ def _lazy_import_ak():
     import importlib
     return importlib.import_module("akshare")
 
-def _normalize_yyyymmdd_range(
-    start_yyyymmdd: Optional[int],
-    end_yyyymmdd: Optional[int],
-    default_start: int = 19900101,
-) -> tuple[int, int]:
-    """规范化 YYYYMMDD 区间（起点缺省用 default_start，终点缺省用今天；若 start>end 则交换）。"""
-    s = int(start_yyyymmdd) if start_yyyymmdd else int(default_start)
-    e = int(end_yyyymmdd) if end_yyyymmdd else int(today_yyyymmdd())
-    if s > e:
-        s, e = e, s
-    return s, e
 
 def _ak_symbol_with_prefix(symbol: str) -> str:
     """将代码映射为 ak 的带交易所前缀代码。"""
@@ -69,7 +58,7 @@ def fetch_daily_none_and_factors(
       - factors: ['symbol','date','qfq_factor','hfq_factor']
     """
     # 规范化日期区间
-    s_ymd, e_ymd = _normalize_yyyymmdd_range(start_yyyymmdd, end_yyyymmdd, default_start=19900101)
+    s_ymd, e_ymd = normalize_yyyymmdd_range(start_yyyymmdd, end_yyyymmdd, default_start=19900101)
     s_str = f"{s_ymd:08d}"
     e_str = f"{e_ymd:08d}"
 

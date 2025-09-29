@@ -301,8 +301,13 @@ let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
+// 程序化 dataZoom 阻断：范围签名守护（active + sig + ts）
+// 说明：
+// - 渲染前记录本次程序化应用范围签名（startValue:endValue），onDataZoom 中若签名匹配则早退。
+// - 若签名不匹配，视为真实用户交互，关闭守护继续处理；并设置兜底超时自动关闭。
+let progZoomGuard = { active: false, sig: null, ts: 0 };
+// 最近一次已应用范围（双保险早退，防回环）
 let lastAppliedRange = { s: null, e: null };
-let programmaticZoomInProgress = false;
 
 /* 预设与高级面板 */
 const presets = computed(() => WINDOW_PRESETS.slice());
@@ -415,7 +420,6 @@ function onResizeHandleUp() {
   dragging = false;
   window.removeEventListener("mousemove", onResizeHandleMove);
 }
-let _resizePatchTimer = null;
 function safeResize() {
   if (!chart || !host.value) return;
   const seq = renderSeq;
@@ -436,12 +440,6 @@ function safeResize() {
         hub.execute("ResizeHost", { widthPx: nextW });
       }
     } catch {}
-    // 延迟少许再计算（避免撞到主流程）
-    clearTimeout(_resizePatchTimer);
-    _resizePatchTimer = setTimeout(() => {
-      // 一次性 setOption 已包含覆盖层，不需要额外 patch
-      // 仅保持调用路径存在以兼容先前逻辑（不做 setOption）
-    }, 32);
   });
 }
 
@@ -1516,9 +1514,6 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
 /* onDataZoom：程序化事件早退 + 门卫判定（执行延后到主流程外） */
 function onDataZoom(params) {
   try {
-    // 1) 程序化 dataZoom：直接忽略（阻断回环）
-    if (programmaticZoomInProgress) return;
-
     const info = (params && params.batch && params.batch[0]) || params || {};
     const len = (vm.candles.value || []).length;
     if (!len) return;
@@ -1540,6 +1535,15 @@ function onDataZoom(params) {
     if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
+ 
+    // —— 程序化阻断（签名匹配）：仅当守护 active 且签名一致时早退；否则视为用户交互并关闭守护 —— //
+    const sigEvent = `${sIdx}:${eIdx}`;
+    if (progZoomGuard.active && sigEvent === progZoomGuard.sig) {
+      return;
+    }
+    if (progZoomGuard.active && sigEvent !== progZoomGuard.sig) {
+      progZoomGuard.active = false;
+    }
 
     // —— 若这次 dataZoom 跟“最后一次已应用范围”完全相同，直接返回，打断循环 —— //
     if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) {
@@ -1670,20 +1674,23 @@ function doSinglePassRender(snapshot) {
     // 拼接覆盖层系列（一次性装配，不改变原合并K线数据结构）
     finalOption.series.push(...overlaySeries);
 
-    programmaticZoomInProgress = true;
+    // 程序化 dataZoom 签名守护开启（记录本次应用范围签名）
+    const guardSig = `${initialRange.startValue}:${initialRange.endValue}`;
+    progZoomGuard.active = true;
+    progZoomGuard.sig = guardSig;
+    progZoomGuard.ts = Date.now();
     scheduleSetOption(finalOption, {
       notMerge: true,
       lazyUpdate: false,
       silent: true,
     });
 
-    lastAppliedRange = initialRange;
+    lastAppliedRange = { s: initialRange.startValue, e: initialRange.endValue };
 
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        programmaticZoomInProgress = false;
-      }, 0);
-    });
+    // 兜底关闭守护（避免长时间处于 active 导致误判）
+    setTimeout(() => {
+      progZoomGuard.active = false;
+    }, 300);
 
     // 顶栏预览文案
     const sIdx = initialRange.startValue;
@@ -1818,39 +1825,21 @@ onMounted(() => {
   });
   chart.group = "ct-sync";
 
-  chart.getZr().on("mousemove", (e) => {
-    try {
-      // 就绪判断：必须已有 series
-      const opt = chart.getOption?.() || {};
-      const hasSeries = Array.isArray(opt.series) && opt.series.length > 0;
-      if (!hasSeries) return; // 就绪保护
-      const result = chart.convertFromPixel({ seriesIndex: 0 }, [
-        e.offsetX,
-        e.offsetY,
-      ]);
-      if (Array.isArray(result)) {
-        const idx = Math.round(result[0]);
-        const l = (vm.candles.value || []).length;
-        if (Number.isFinite(idx) && idx >= 0 && idx < l) {
-          currentIndex = idx;
-          const tsVal = vm.candles.value[idx]?.t
-            ? Date.parse(vm.candles.value[idx].t)
-            : null;
-            if (Number.isFinite(tsVal)) {
-              settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
-            }
-        }
-      }
-    } catch {}
-  });
-
   chart.on("updateAxisPointer", (params) => {
     try {
       const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
       const label = axisInfo?.value;
       const dates = (vm.candles.value || []).map((d) => d.t);
       const idx = dates.indexOf(label);
-      if (idx >= 0) currentIndex = idx;
+      const len = (vm.candles.value || []).length;
+      if (idx >= 0 && idx < len) {
+        currentIndex = idx;
+        // 将“最后聚焦 ts”持久化，供键盘左右键作为起跳点
+        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
+        if (Number.isFinite(tsVal)) {
+          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+        }
+      }
     } catch {}
   });
 

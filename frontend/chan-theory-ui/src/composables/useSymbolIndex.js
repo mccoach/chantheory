@@ -4,7 +4,7 @@
 // - API：ready, search(query, limit), findBySymbol(symbol), ensureIndexFresh(force)
 
 import { ref } from "vue";
-import axios from "axios";
+import { api } from "@/api/client";
 import RAW from "@/assets/symbols.index.json";
 
 const LS_KEY = "chan_symbol_index_v1";
@@ -106,7 +106,7 @@ export async function ensureIndexFresh(force = false) {
   await ensurePinyinLib();
   try {
     const url = `/api/symbols/index${force ? "?refresh=1" : ""}`;
-    const { data } = await axios.get(url, { timeout: 20000 });
+    const { data } = await api.get(url, { timeout: 20000 });
     if (Array.isArray(data?.items) && data.items.length) {
       idx.value = buildIndex(data.items);
       ready.value = true;

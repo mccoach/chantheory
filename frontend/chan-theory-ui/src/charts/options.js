@@ -66,155 +66,6 @@ export function createFixedTooltipPositioner(defaultSide = "left", getOffset) {
     return [baseX + (off.x || 0), baseY + (off.y || 0)];
   };
 }
-
-/* =============================
- * 多窗体缩放同步（主/量/指标）
- * ============================= */
-
-/**
- * zoomSync：多窗体缩放同步控制器
- * - attach(key, chart, getLen)：将某个 ECharts 实例加入同步组；
- * - detach(key)：移除；
- * - setRangeByIndex(startIdx,endIdx)：按索引广播范围给其它窗（避免递归）。
- */
-export const zoomSync = (function () {
-  // 保存已注册窗体：key -> { chart, getLen }
-  const charts = new Map();
-  // 当前统一范围（索引）
-  let currentRange = null;
-  // 是否正处于广播中（避免递归触发）
-  let inProgress = false;
-
-  // 工具：索引转百分比（ECharts dataZoom 接收百分比）
-  function idxToPercent(startIdx, endIdx, len) {
-    const n = Math.max(1, Number(len || 0));
-    const maxIdx = n - 1;
-    const s = Math.max(0, Math.min(maxIdx, Number(startIdx || 0)));
-    const e = Math.max(
-      0,
-      Math.min(maxIdx, Number(endIdx != null ? endIdx : maxIdx))
-    );
-    return { start: (s / maxIdx) * 100, end: (e / maxIdx) * 100 };
-  }
-
-  // 广播索引范围给所有从窗
-  function broadcastByIndex(startIdx, endIdx, sourceKey) {
-    inProgress = true;
-    try {
-      charts.forEach((entry, key) => {
-        if (key === sourceKey) return; // 跳过源
-        const len = entry.getLen ? Number(entry.getLen()) : 0;
-        if (!len || !entry.chart) return;
-        const { start, end } = idxToPercent(startIdx, endIdx, len);
-        try {
-          entry.chart.dispatchAction({ type: "dataZoom", start, end });
-        } catch {}
-      });
-    } finally {
-      inProgress = false;
-    }
-  }
-
-  // 设定统一范围
-  function setRangeByIndex(startIdx, endIdx, sourceKey) {
-    currentRange = {
-      startIdx: Number(startIdx || 0),
-      endIdx: Number(endIdx || 0),
-    };
-    broadcastByIndex(
-      currentRange.startIdx,
-      currentRange.endIdx,
-      sourceKey || null
-    );
-  }
-
-  // 注册窗体
-  function attach(key, chart, getLen) {
-    if (!key || !chart || typeof chart.dispatchAction !== "function")
-      return () => {};
-    charts.set(key, { chart, getLen });
-
-    // 监听窗体自身的 dataZoom
-    const onZoom = (params) => {
-      if (inProgress) return; // 广播引起的回调，忽略
-      try {
-        const len = typeof getLen === "function" ? Number(getLen()) : 0;
-        if (!len) return;
-        const info =
-          (params && params.batch && params.batch[0]) || params || {};
-        let sIdx, eIdx;
-        // 先尝试索引表达
-        if (
-          typeof info.startValue !== "undefined" &&
-          typeof info.endValue !== "undefined"
-        ) {
-          sIdx = Number(info.startValue);
-          eIdx = Number(info.endValue);
-        } else if (
-          typeof info.start === "number" &&
-          typeof info.end === "number"
-        ) {
-          // 百分比转索引
-          const maxIdx = len - 1;
-          sIdx = Math.round((info.start / 100) * maxIdx);
-          eIdx = Math.round((info.end / 100) * maxIdx);
-        }
-        if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
-        const maxIdx = len - 1;
-        sIdx = Math.max(0, Math.min(maxIdx, sIdx));
-        eIdx = Math.max(0, Math.min(maxIdx, eIdx));
-        if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
-        // 与当前统一范围不同则广播
-        if (
-          !currentRange ||
-          currentRange.startIdx !== sIdx ||
-          currentRange.endIdx !== eIdx
-        ) {
-          setRangeByIndex(sIdx, eIdx, key);
-        }
-      } catch {}
-    };
-
-    chart.on("dataZoom", onZoom);
-
-    // 新加入的窗体若已有 currentRange，立即应用到新图，保证首帧对齐
-    if (currentRange && typeof getLen === "function") {
-      const len = Number(getLen()) || 0;
-      if (len) {
-        const { start, end } = idxToPercent(
-          currentRange.startIdx,
-          currentRange.endIdx,
-          len
-        );
-        try {
-          chart.dispatchAction({ type: "dataZoom", start, end });
-        } catch {}
-      }
-    }
-
-    // 返回解绑函数
-    return () => {
-      try {
-        chart.off("dataZoom", onZoom);
-      } catch {}
-      charts.delete(key);
-    };
-  }
-
-  // 解绑
-  function detach(key) {
-    const entry = charts.get(key);
-    if (entry && entry.chart) {
-      try {
-        chart.off("dataZoom");
-      } catch {}
-    }
-    charts.delete(key);
-  }
-
-  return { attach, detach, setRangeByIndex };
-})();
-
 /* =============================
  * 统一布局常量（基础 UI）
  * ============================= */
@@ -442,7 +293,6 @@ function applyUi(option, ui, { dates, freq }) {
     : {};
 
   // 合并 dataZoom：主窗含 slider，其它窗只 inside
-  const lenRange = len ? { startValue: 0, endValue: len - 1 } : {};
   option.dataZoom = isMain
     ? [
         // 内置滚轮/拖动联动（注入初始范围）
@@ -941,10 +791,6 @@ export function buildMainChartOption(
   if (ui?.tooltipPositioner) {
     option.tooltip.position = ui.tooltipPositioner;
   }
-
-  option.xAxis = { type: "category", data: dates };
-  option.yAxis = { scale: true };
-  option.series = series;
 
   // 先应用通用 UI
   option = applyUi(

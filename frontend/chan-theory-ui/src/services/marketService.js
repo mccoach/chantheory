@@ -5,31 +5,6 @@
 // - 依然支持 include / ma_periods；start/end 在新模式下不再使用（保持参数兼容）
 import { api } from "@/api/client"; // 统一 axios 客户端（含 trace_id 拦截)
 
-// 工具：YYYY-MM-DD（保留兼容）
-function toDateStr(d) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-const DEFAULT_START = "1990-01-01";
-function todayStr() {
-  return toDateStr(new Date());
-}
-
-function parseToDate(x) {
-  if (x == null || x === "") return null;
-  const s = String(x).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(`${s}T00:00:00`);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  if (!Number.isNaN(Number(s))) {
-    const ms = Number(s);
-    const d = new Date(ms);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-}
-
 /**
  * fetchCandles(params, options?)
  * params: 见调用处（code/freq/adjust/include/ma_periods/window_preset/bars/anchor_ts）

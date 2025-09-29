@@ -92,17 +92,16 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     itemStyle: { color: downFill, opacity: chan.opacity },
   };
 
-  const extra = { xAxisLabelMargin: Math.max(14, markerH + 12) }; // 预留横轴 margin
+  // 移除覆盖层的额外横轴 margin 返回；统一由主图 UI 参数处理标签避让
   if (!upArr.length && !dnArr.length) {
     return {
       series: [
         { ...upSeries, data: [] },
         { ...downSeries, data: [] },
       ],
-      extra,
     };
   }
-  return { series: [upSeries, downSeries], extra };
+  return { series: [upSeries, downSeries] };
 }
 
 // 分型标记：横坐标用 xIndex；绑定主轴 yAxisIndex=0；高度/间距按外部宽度与默认规则

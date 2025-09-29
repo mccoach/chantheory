@@ -6,12 +6,18 @@
 // 注：输入框白名单的扩展逻辑已在 registry.js 中处理
 // ==============================
 
-const keyAlias = {                 // 常见键名别名 → 标准键名
-  Esc: "Escape",                   // Esc → Escape
+const keyAlias = {                   // 常见键名别名 → 标准键名
+  // Escape 系列：覆盖 Windows/Mac/旧 WebKit/国产壳等可能的变体
+  Esc: "Escape",                     // 常见别名
+  ESC: "Escape",                     // 全大写变体
+  Cancel: "Escape",                  // 少量实现会返回 "Cancel"
+  "U+001B": "Escape",                // 极旧实现（早期 WebKit/IE）可能返回的编码样式
+  // 方向键
   Left: "ArrowLeft",               // Left → ArrowLeft
   Right: "ArrowRight",             // Right → ArrowRight
   Up: "ArrowUp",                   // Up → ArrowUp
   Down: "ArrowDown",               // Down → ArrowDown
+  // 其它常见按键
   "+": "Equal",                    // + → 等号键（Equal）
   "-": "Minus",                    // - → 减号键（Minus）
   ",": "Comma",                    // , → 逗号键（Comma）
