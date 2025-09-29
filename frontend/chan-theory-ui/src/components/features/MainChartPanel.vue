@@ -198,7 +198,6 @@
     ref="wrap"
     class="chart"
     tabindex="0"
-    @keydown="onKeydown"
     @mouseenter="focusWrap"
     @dblclick="openSettingsDialog"
   >
@@ -1332,108 +1331,6 @@ function focusWrap() {
     wrap.value?.focus?.();
   } catch {}
 }
-function onKeydown(e) {
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-  e.preventDefault();
-
-  const arr = vm.candles.value || [];
-  const len = arr.length;
-  if (!len) return;
-
-  // NEW: 取“当前激活窗体”的 chart，回退主窗
-  const activeChart = renderHub.getActiveChart() || chart;
-
-  // 优先从“激活 chart”读取实时范围，回退后端 meta
-  const zoomRange = getCurrentZoomIndexRange(activeChart);
-  const sIdxNow =
-    zoomRange && Number.isFinite(zoomRange.sIdx)
-      ? zoomRange.sIdx
-      : Number(vm.meta.value?.view_start_idx ?? 0);
-  const eIdxNow =
-    zoomRange && Number.isFinite(zoomRange.eIdx)
-      ? zoomRange.eIdx
-      : Number(vm.meta.value?.view_end_idx ?? len - 1);
-
-  const tsArr = arr.map((d) => Date.parse(d.t));
-
-  // 起点优先 lastFocusTs；不可用时退回 currentIndex，再兜底右端
-  let startIdx = -1;
-  try {
-    const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
-    if (Number.isFinite(lastTs)) {
-      const found = tsArr.findIndex((t) => Number.isFinite(t) && t === lastTs);
-      if (found >= 0) startIdx = found;
-    }
-  } catch {}
-  if (startIdx < 0) {
-    if (Number.isFinite(currentIndex) && currentIndex >= 0) {
-      startIdx = currentIndex;
-    } else {
-      startIdx = eIdxNow; // 兜底用右端
-    }
-  }
-
-  // 目标索引（一步）
-  let nextIdx = startIdx + (e.key === "ArrowLeft" ? -1 : +1);
-  nextIdx = Math.max(0, Math.min(len - 1, nextIdx));
-
-  // NEW: 视界内判定：使用“当前 ECharts 范围”
-  const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
-
-  // 仅移动十字线（激活 chart）
-  try {
-      activeChart.dispatchAction({
-      type: "showTip",
-      seriesIndex: 0,
-      dataIndex: nextIdx,
-    });
-  } catch {}
-  currentIndex = nextIdx;
-
-  // 持久化（键盘/鼠标一致）
-  try {
-    const tsv = tsArr[nextIdx];
-    if (Number.isFinite(tsv)) {
-      settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
-    }
-  } catch {}
-
-  if (inView) return; // 视界内仅移动指针，视窗不动
-
-  // 越界：在激活 chart 上轻推视窗一格，并把十字线停在边缘
-  const viewWidth = Math.max(1, eIdxNow - sIdxNow + 1);
-  let newS = sIdxNow;
-  let newE = eIdxNow;
-
-  if (nextIdx < sIdxNow) {
-    // 向左越界：将左边界挪到 nextIdx
-    newS = nextIdx;
-    newE = Math.min(len - 1, newS + viewWidth - 1);
-  } else if (nextIdx > eIdxNow) {
-    // 向右越界：将右边界挪到 nextIdx
-    newE = nextIdx;
-    newS = Math.max(0, newE - viewWidth + 1);
-  }
-
-  // ECharts-first：通过 dataZoom 程序化移动范围（组联动实时跟随）
-  try {
-    activeChart.dispatchAction({
-      type: "dataZoom",
-      // 注意：不指定 dataZoomIndex，默认作用于当前图的所有 dataZoom
-      startValue: newS,
-      endValue: newE,
-    });
-    // 推窗后再次 showTip 到当前边缘，保持十字线可见且处在视界边缘
-    const edgeIdx = nextIdx < sIdxNow ? newS : newE;
-    activeChart.dispatchAction({
-      type: "showTip",
-      seriesIndex: 0,
-      dataIndex: edgeIdx,
-    });
-  } catch {}
-
-  // 注意：不直接调用 hub.execute；由 onDataZoom 的 idle-commit 会后承接到中枢与持久化。
-}
 
 /* 缠论/分型覆盖层 —— 构造覆盖层 series（一次性装配） */
 const chanCache = ref({ reduced: [], map: [], meta: null, fractals: [] });
@@ -1576,11 +1473,32 @@ function onDataZoom(params) {
       const maxIdx = len - 1;
       sIdx = Math.round((info.start / 100) * maxIdx);
       eIdx = Math.round((info.end / 100) * maxIdx);
-    } else return;
+    } else {
+      return;
+    }
     if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
     if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
+
+    // NEW: 交互期间即时更新主窗顶栏预览（不改中枢与范围）
+    const arr = vm.candles.value || [];
+    previewStartStr.value = arr[sIdx]?.t || "";
+    previewEndStr.value = arr[eIdx]?.t || "";
+    previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
+    // NEW: 广播给主窗（若交互源是副窗/指标窗）
+    try {
+      window.dispatchEvent(
+        new CustomEvent("chan:preview-range", {
+          detail: {
+            code: vm.code.value,
+            freq: vm.freq.value,
+            sIdx,
+            eIdx,
+          },
+        })
+      );
+    } catch {}
 
     // 会话锁：交互开始
     renderHub.beginInteraction("main");
@@ -1774,6 +1692,25 @@ function onClickPreset(preset) {
   } catch {}
 }
 
+function onPreviewRange(ev) {
+  try {
+    const d = ev?.detail || {};
+    // 仅在当前 code|freq 匹配时更新文案
+    if (
+      String(d.code || "") !== String(vm.code.value || "") ||
+      String(d.freq || "") !== String(vm.freq.value || "")
+    ) {
+      return;
+    }
+    const arr = vm.candles.value || [];
+    const s = Math.max(0, Math.min(arr.length - 1, Number(d.sIdx)));
+    const e = Math.max(0, Math.min(arr.length - 1, Number(d.eIdx)));
+    previewStartStr.value = arr[s]?.t || "";
+    previewEndStr.value = arr[e]?.t || "";
+    previewBarsCount.value = Math.max(1, e - s + 1);
+  } catch {}
+}
+
 /* 生命周期（订阅时机调整到 chart.init 后） */
 onMounted(() => {
   const el = host.value;
@@ -1836,6 +1773,11 @@ onMounted(() => {
   // 绑定 dataZoom：含“程序化守护 + 有效变化判定”
   chart.on("dataZoom", onDataZoom); // 会话锁 + idle-commit，会后承接到中枢
 
+  // NEW: 订阅全局预览事件（来自副窗/指标窗的 dataZoom）
+  try {
+    window.addEventListener("chan:preview-range", onPreviewRange);
+  } catch {}
+
   try {
     ro = new ResizeObserver(() => {
       safeResize();
@@ -1858,9 +1800,9 @@ onBeforeUnmount(() => {
     renderHub.offRender(unsubId);
     unsubId = null;
   }
-  // NEW: 注销主窗 chart
+  // NEW: 解除订阅
   try {
-    renderHub.unregisterChart("main");
+    window.removeEventListener("chan:preview-range", onPreviewRange);
   } catch {}
 
   renderHub.endInteraction("main");

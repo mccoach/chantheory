@@ -1037,8 +1037,7 @@ export function buildVolumeOption(
     // 恢复“聚焦竖线 + 信息浮窗”
     tooltip: {
       trigger: "axis",
-      // 修复：副窗仅纵向联动（x 轴），避免水平线与左下角数值
-      axisPointer: { type: "line", axis: "x" },   // 关键：仅 x 轴
+      axisPointer: { type: "cross" },
       appendToBody: false,
       confine: true,
       formatter: makeVolumeTooltipFormatter({
@@ -1058,8 +1057,7 @@ export function buildVolumeOption(
       // 量窗保持从 0 起（业务共识）
       min: 0,
       scale: true,
-      // 修复：彻底禁用 y 轴轴指示与标签，避免出现水平线与左下角气泡数值
-      axisPointer: { show: false, label: { show: false } },  // 关键：关闭 y 轴指示
+      axisPointer: { show: true, label: { show: true } },
     },
     series,
   };

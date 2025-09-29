@@ -210,6 +210,20 @@ function onDataZoom(params) {
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
 
+    // NEW: 广播预览范围（主窗顶栏实时更新）
+    try {
+      window.dispatchEvent(
+        new CustomEvent("chan:preview-range", {
+          detail: {
+            code: vm.code.value,
+            freq: vm.freq.value,
+            sIdx,
+            eIdx,
+          },
+        })
+      );
+    } catch {}
+
     renderHub.beginInteraction("indicator");
     if (dzIdleTimer) {
       clearTimeout(dzIdleTimer);

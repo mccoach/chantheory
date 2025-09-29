@@ -565,6 +565,20 @@ function onDataZoom(params) {
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
 
+    // NEW: 广播预览范围（主窗顶栏实时更新）
+    try {
+      window.dispatchEvent(
+        new CustomEvent("chan:preview-range", {
+          detail: {
+            code: vm.code.value,
+            freq: vm.freq.value,
+            sIdx,
+            eIdx,
+          },
+        })
+      );
+    } catch {}
+
     renderHub.beginInteraction("volume");
     if (dzIdleTimer) {
       clearTimeout(dzIdleTimer);
@@ -623,36 +637,6 @@ function schedule(fn) {
   }
 }
 
-/**
- * 动态切换当前窗的轴指示模式：
- * - mode='cross'：竖线 + 水平线 + y 轴标签（当鼠标进入本窗）
- * - mode='line' ：仅竖线，禁用水平线与 y 轴标签（当鼠标离开本窗）
- */
-function setAxisPointerMode(mode) {
-  const isCross = String(mode) === "cross";
-  const optPatch = {
-    tooltip: { axisPointer: { type: isCross ? "cross" : "line", axis: "x" } },
-    yAxis: { axisPointer: { show: isCross, label: { show: isCross } } },
-  };
-  schedule(() => {
-    try {
-      chart &&
-        chart.setOption(optPatch, {
-          notMerge: false,
-          lazyUpdate: true,
-          silent: true,
-        });
-    } catch {}
-  });
-}
-
-function onHostEnter() {
-  setAxisPointerMode("cross");
-}
-function onHostLeave() {
-  setAxisPointerMode("line");
-}
-
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
@@ -672,15 +656,6 @@ onMounted(async () => {
     el.addEventListener("mouseenter", () => {
       renderHub.setActivePanel("volume");
     });
-  } catch {}
-
-  // 初始：非本窗时仅纵线（与 options.js 初始一致）
-  setAxisPointerMode("line");
-
-  // 绑定宿主的进入/离开事件（检测范围随宿主尺寸而变，无误判）
-  try {
-    el.addEventListener("mouseenter", onHostEnter);
-    el.addEventListener("mouseleave", onHostLeave);
   } catch {}
 
   // 组内/本窗联动（无需自建广播）
@@ -720,11 +695,6 @@ const unsubId = renderHub.onRender((snapshot) => {
 
 onBeforeUnmount(() => {
   // 卸载宿主事件
-  try {
-    const el = host.value;
-    el && el.removeEventListener("mouseenter", onHostEnter);
-    el && el.removeEventListener("mouseleave", onHostLeave);
-  } catch {}
   try {
     ro && ro.disconnect();
   } catch {}

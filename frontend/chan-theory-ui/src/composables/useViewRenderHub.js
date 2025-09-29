@@ -111,6 +111,116 @@ export function useViewRenderHub() {
       return _charts.get(String(_activePanelKey.value)) || null;
     } catch { return null; }
   }
+
+  /**
+   * NEW: 读取指定 chart 的当前 dataZoom 范围（startValue/endValue）
+   */
+  function _getZoomRangeOf(chartInstance) {
+    try {
+      const c = chartInstance;
+      if (!c || typeof c.getOption !== "function") return null;
+      const opt = c.getOption();
+      const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
+      if (!dz.length) return null;
+      const z = dz.find(
+        (x) =>
+          typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
+      );
+      const len = (_vmRef.vm?.candles?.value || []).length;
+      if (z && len > 0) {
+        const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
+        const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
+        return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * NEW: 键盘步进移动十字线（ECharts-first；作用于当前激活窗体）
+   * @param {number} dir -1 左，一步；+1 右，一步
+   */
+  function moveCursorByStep(dir) {
+    try {
+      const vm = _vmRef.vm;
+      if (!vm) return;
+      const arr = vm.candles.value || [];
+      const len = arr.length;
+      if (!len) return;
+
+      const activeChart = getActiveChart();
+      const zoomRange = _getZoomRangeOf(activeChart);
+      const sIdxNow =
+        zoomRange && Number.isFinite(zoomRange.sIdx)
+          ? zoomRange.sIdx
+          : Number(vm.meta.value?.view_start_idx ?? 0);
+      const eIdxNow =
+        zoomRange && Number.isFinite(zoomRange.eIdx)
+          ? zoomRange.eIdx
+          : Number(vm.meta.value?.view_end_idx ?? len - 1);
+
+      const tsArr = arr.map((d) => Date.parse(d.t));
+
+      // 起点优先 lastFocusTs；缺失时退回右端
+      let startIdx = -1;
+      try {
+        const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
+        if (Number.isFinite(lastTs)) {
+          const found = tsArr.findIndex((t) => Number.isFinite(t) && t === lastTs);
+          if (found >= 0) startIdx = found;
+        }
+      } catch {}
+      if (startIdx < 0) startIdx = eIdxNow;
+
+      let nextIdx = Math.max(0, Math.min(len - 1, startIdx + (dir < 0 ? -1 : +1)));
+      const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
+
+      // 视界内：仅移动十字线
+      try {
+        activeChart?.dispatchAction({
+          type: "showTip",
+          seriesIndex: 0,
+          dataIndex: nextIdx,
+        });
+      } catch {}
+
+      // 持久化起点（鼠标/键盘一致）
+      try {
+        const tsv = tsArr[nextIdx];
+        if (Number.isFinite(tsv)) {
+          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
+        }
+      } catch {}
+
+      if (inView) return;
+
+      // 越界：轻推视窗一格，并把十字线停在边缘
+      const viewWidth = Math.max(1, eIdxNow - sIdxNow + 1);
+      let newS = sIdxNow;
+      let newE = eIdxNow;
+      if (nextIdx < sIdxNow) {
+        newS = nextIdx;
+        newE = Math.min(len - 1, newS + viewWidth - 1);
+      } else if (nextIdx > eIdxNow) {
+        newE = nextIdx;
+        newS = Math.max(0, newE - viewWidth + 1);
+      }
+      try {
+        activeChart?.dispatchAction({
+          type: "dataZoom",
+          startValue: newS,
+          endValue: newE,
+        });
+        const edgeIdx = nextIdx < sIdxNow ? newS : newE;
+        activeChart?.dispatchAction({
+          type: "showTip",
+          seriesIndex: 0,
+          dataIndex: edgeIdx,
+        });
+      } catch {}
+      // 会后承接按各窗 onDataZoom 的 idle-commit 完成。
+    } catch {}
+  }
   function setMarketView(vm) {
     _vmRef.vm = vm;
     // 订阅数据变更以触发统一计算
@@ -309,6 +419,8 @@ export function useViewRenderHub() {
     getActivePanel,
     getChart,
     getActiveChart,
+    // NEW: 键盘步进移动
+    moveCursorByStep,
   };
   return _singleton;
 }

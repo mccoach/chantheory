@@ -107,15 +107,14 @@ if (hotkeys) {
         });
       });
     },
+    // NEW: 全局左右键 → 由渲染中枢作用于“激活窗体”
+    cursorLeft() { try { renderHub.moveCursorByStep(-1); } catch {} },
+    cursorRight() { try { renderHub.moveCursorByStep(+1); } catch {} },
   });
 
   hotkeys.registerHandlers("modal:settings", {
-    closeSettings() {
-      handleModalClose();
-    },
-    saveSettings() {
-      handleModalSave();
-    },
+    closeSettings() { handleModalClose(); },
+    saveSettings() { handleModalSave(); },
   });
 }
 
