@@ -197,6 +197,14 @@ export function useViewCommandHub() {
     }
     // 维护 atRightEdge
     _updateEdgeFlag();
+
+  // MOD: 数据集边界落地后，基于当前 barsCount + totalRows 重算窗宽高亮（由 bars 决定）
+  currentPresetKey.value = pickPresetByBarsCountDown(
+    currentFreq.value,
+    Math.max(1, Number(barsCount.value || 1)),
+    Math.max(0, Number(allRows.value || 0))
+  );
+
     // 持久化 + 广播
     _persist();
     _scheduleNotify();
@@ -288,13 +296,25 @@ export function useViewCommandHub() {
         const total = Math.max(0, Number(p.allRows || allRows.value || 0));
         const nextBars = presetToBars(currentFreq.value, presetKey, total);
         barsCount.value = Math.max(1, Number(nextBars || 1));
-        // 右端不变；若提供边界则按越界夹取
+
+        // —— 变更点（满足“点击 ALL 完全覆盖全量”）：当点击 ALL 时，除 bars=ALL 外，还应将 rightTs 主动锚到数据集右端 —— //
+        // 说明：若 maxTsRef 已知，则将 rightTs 设为 maxTs，并置 atRightEdge=true，以保证“完全覆盖全量”的语义；
+        //       若尚未知（初次加载阶段），保持 rightTs 不变，后续 setDatasetBounds 落地时会触底保持到最右。
+        if (presetKey === "ALL") {
+          if (Number.isFinite(+maxTsRef.value)) {
+            rightTs.value = +maxTsRef.value;
+            atRightEdge.value = true;
+          }
+        } else {
+          // 非 ALL：右端不变；若提供边界则按越界夹取（与原语义一致）
         if (rightTs.value != null) {
           if (Number.isFinite(+p.minTs) && rightTs.value < +p.minTs)
             rightTs.value = +p.minTs;
           if (Number.isFinite(+p.maxTs) && rightTs.value > +p.maxTs)
             rightTs.value = +p.maxTs;
         }
+        }
+
         _recalcMarkerWidth();
         _updateEdgeFlag(); // 新增：维护 atRightEdge
         _persist();

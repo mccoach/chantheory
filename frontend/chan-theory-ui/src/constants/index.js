@@ -217,7 +217,7 @@ export const CHAN_DEFAULTS = {
   upColor: "#f56c6c", // 上涨符号与颜色
   downShape: "triangle",
   downColor: "#00ff00", // 下跌符号与颜色
-  maxVisibleMarkers: 1000, // 单视窗可见标记上限（超过抽稀）
+  maxVisibleMarkers: 8000, // 单视窗可见标记上限（超过抽稀）
 }; // 对象结束
 
 export const CHAN_MARKER_PRESETS = {

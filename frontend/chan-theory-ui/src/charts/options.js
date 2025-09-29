@@ -912,8 +912,6 @@ export function buildMainChartOption(
       // 避免 body 附着与溢出滚动
       appendToBody: false,
       confine: true,
-      // tooltip 固定位置（由 ui 传入固定器）
-      position: ui?.tooltipPositioner || null,
       // 自定义内容
       formatter: makeMainTooltipFormatter({
         theme,
@@ -938,6 +936,11 @@ export function buildMainChartOption(
     // 系列
     series,
   };
+
+  // MOD: 仅当传入了定位器时才设置 position；否则保留默认（跟随鼠标）
+  if (ui?.tooltipPositioner) {
+    option.tooltip.position = ui.tooltipPositioner;
+  }
 
   option.xAxis = { type: "category", data: dates };
   option.yAxis = { scale: true };
@@ -1188,11 +1191,10 @@ export function buildVolumeOption(
     // 恢复“聚焦竖线 + 信息浮窗”
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "cross" },
+      // 修复：副窗仅纵向联动（x 轴），避免水平线与左下角数值
+      axisPointer: { type: "line", axis: "x" },   // 关键：仅 x 轴
       appendToBody: false,
       confine: true,
-      position: ui?.tooltipPositioner || null,
-      // —— 恢复为调用独立格式化器（保持原结构职责清晰） —— //
       formatter: makeVolumeTooltipFormatter({
         candles: list,
         freq,
@@ -1210,9 +1212,14 @@ export function buildVolumeOption(
       // 量窗保持从 0 起（业务共识）
       min: 0,
       scale: true,
+      // 修复：彻底禁用 y 轴轴指示与标签，避免出现水平线与左下角气泡数值
+      axisPointer: { show: false, label: { show: false } },  // 关键：关闭 y 轴指示
     },
     series,
   };
+  if (ui?.tooltipPositioner) {
+    option.tooltip.position = ui.tooltipPositioner;
+  }
 
   // 应用通用 UI
   return applyUi(
@@ -1288,7 +1295,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       axisPointer: { type: "cross" },
       appendToBody: false,
       confine: true,
-      position: ui?.tooltipPositioner || null,
       formatter: (params) => {
         if (!Array.isArray(params) || !params.length) return "";
         const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
@@ -1328,6 +1334,9 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   option.xAxis = { type: "category", data: dates };
   option.yAxis = { scale: true };
   option.series = series;
+  if (ui?.tooltipPositioner) {
+    option.tooltip.position = ui.tooltipPositioner;
+  }
 
   // 应用通用 UI
   return applyUi(
@@ -1416,7 +1425,6 @@ export function buildKdjOrRsiOption(
       axisPointer: { type: "cross" },
       appendToBody: false,
       confine: true,
-      position: ui?.tooltipPositioner || null,
       formatter: (params) => {
         if (!Array.isArray(params) || !params.length) return "";
         const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
@@ -1444,6 +1452,9 @@ export function buildKdjOrRsiOption(
   option.xAxis = { type: "category", data: dates };
   option.yAxis = { scale: true };
   option.series = series;
+  if (ui?.tooltipPositioner) {
+    option.tooltip.position = ui.tooltipPositioner;
+  }
 
   // 应用通用 UI（含轴与网格颜色、防止变亮）
   return applyUi(

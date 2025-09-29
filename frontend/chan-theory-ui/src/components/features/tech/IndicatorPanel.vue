@@ -1,8 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\IndicatorPanel.vue -->
 <!-- ============================== -->
-<!-- 指标窗（维持副窗 inside-only，绝不作为交互源；与中枢/主窗保持联动一致） -->
-<!-- 本次重构说明：不扩大范围，不改动现有函数/变量顺序，仅补充注释强调“副窗不触发 bars/rightTs 改变”。 -->
-
+<!-- 指标窗（接入统一渲染中枢 · 移除 zoomSync 与 meta watcher）
+     - 订阅 useViewRenderHub.onRender(snapshot) 后，调用 renderHub.getIndicatorOption(kind) 构建 option 并一次性 setOption。
+     - 不作为交互源；onDataZoom inside-only 并早退。
+-->
 <template>
   <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
     <div class="top-info">
@@ -80,14 +81,14 @@ import {
   h,
 } from "vue";
 import * as echarts from "echarts";
-import {
-  buildKdjOrRsiOption,
-  buildMacdOption,
-  zoomSync,
-} from "@/charts/options";
+// NEW: 统一渲染中枢
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
+import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 
 const vm = inject("marketView");
+const hub = useViewCommandHub();
+const renderHub = useViewRenderHub();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
@@ -113,8 +114,6 @@ const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
-let detachSync = null;
-let isProgrammaticZoom = false;
 
 const kindLocal = ref(props.kind);
 watch(
@@ -156,15 +155,16 @@ function openSettingsDialog() {
     title: `${String(kindLocal.value).toUpperCase()} 指标设置`,
     contentComponent: IndicatorSettingsContent,
     onSave: () => {
+      // MOD: 保存后立即触发刷新（即使当前无可编辑项，保持一致的即时重绘行为）
+      hub.execute("Refresh", {});
       dialogManager.close();
-      render();
     },
     onClose: () => dialogManager.close(),
   });
 }
 function onKindChange() {
   emit("update:kind", kindLocal.value);
-  render();
+  // 渲染由 renderHub 快照驱动，无需主动 render
 }
 
 // —— 副窗不作为交互源（保持原逻辑）：仅 inside 联动，绝不更改 bars/rightTs —— //
@@ -172,24 +172,16 @@ function onDataZoom(_params) {
   return;
 }
 
-function applyZoomByMeta(seq) {
-  if (!chart) return;
-  if (isStale(seq)) return;
-  const len = (vm.candles.value || []).length;
-  if (!len) return;
-  const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
-  const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
-
-  const delta = {
-    dataZoom: [{ type: "inside", startValue: sIdx, endValue: eIdx }],
-  };
-
-  try {
-    if (isStale(seq)) return;
-    chart.dispatchAction({ type: "hideTip" });
-  } catch {}
-  chart.setOption(delta, { notMerge: false, lazyUpdate: true, silent: true });
-}
+  // 订阅全局 hover，在本窗显示 tooltip/竖线
+  function onGlobalHoverIndex(e) {
+    try {
+      const idx = Number(e?.detail?.idx);
+      const arr = vm.candles.value || [];
+      if (!chart || !arr.length) return;
+      if (!Number.isFinite(idx) || idx < 0 || idx >= arr.length) return;
+      chart.dispatchAction({ type: "showTip", dataIndex: idx, seriesIndex: 0 });
+    } catch {}
+  }
 
 onMounted(async () => {
   const el = host.value;
@@ -200,81 +192,47 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-  try {
-    echarts.connect("ct-sync");
-  } catch {}
-  chart.on("dataZoom", onDataZoom);
-  try {
-    ro = new ResizeObserver(() => {
-      try {
-        const seq = renderSeq;
-        chart &&
-          chart.resize({
-            width: host.value.clientWidth,
-            height: host.value.clientHeight,
-          });
-      } catch {}
-    });
-    ro.observe(el);
-  } catch {}
-  requestAnimationFrame(() => {
     try {
-      chart &&
-        chart.resize({
-          width: host.value.clientWidth,
-          height: host.value.clientHeight,
-        });
+      echarts.connect("ct-sync");
     } catch {}
-  });
-  const key = `indicator-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 6)}`;
-  detachSync = zoomSync.attach(
-    key,
-    chart,
-    () => (vm.candles.value || []).length
-  );
 
+  // 组内/本窗联动：不再自建广播
   chart.getZr().on("mousemove", (e) => {
-    try {
-      const point = [e.offsetX, e.offsetY];
-      const result = chart.convertFromPixel({ seriesIndex: 0 }, point);
-      if (Array.isArray(result)) {
-        const idx = Math.round(result[0]);
-        const l = (vm.candles.value || []).length;
-        if (Number.isFinite(idx) && idx >= 0 && idx < l) {
-          broadcastHoverIndex(idx);
-        }
-      }
-    } catch {}
   });
   chart.on("updateAxisPointer", (params) => {
-    try {
-      const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-      const label = axisInfo?.value;
-      const dates = (vm.candles.value || []).map((d) => d.t);
-      const idx = dates.indexOf(label);
-      if (idx >= 0) {
-        broadcastHoverIndex(idx);
-      }
-    } catch {}
   });
 
-  render();
+  // 仍保留订阅：响应“非鼠标触发”的统一广播（如键盘左右）
+    window.addEventListener("chan:hover-index", onGlobalHoverIndex);
+
   updateHeaderFromCurrent();
 });
+
+// 订阅上游渲染快照：一次性渲染（按当前 kind 构建）
+const unsubId = renderHub.onRender((snapshot) => {
+  try {
+    if (!chart) return;
+    const mySeq = ++renderSeq;
+    if (String(kindLocal.value).toUpperCase() === "OFF") {
+      chart.clear();
+      return;
+    }
+    const option = renderHub.getIndicatorOption(kindLocal.value);
+    if (!option) return;
+    chart.setOption(option, true);
+  } catch (e) {
+    console.error("Indicator renderHub onRender error:", e);
+  }
+});
+
 onBeforeUnmount(() => {
+  renderHub.offRender(unsubId);
+
   if (ro) {
     try {
       ro.disconnect();
     } catch {}
     ro = null;
-  }
-  if (detachSync) {
-    try {
-      detachSync();
-    } catch {}
-    detachSync = null;
   }
   if (chart) {
     try {
@@ -284,54 +242,17 @@ onBeforeUnmount(() => {
   }
 });
 
-function render() {
-  if (!chart) return;
-  const mySeq = ++renderSeq;
-
-  const data = {
-    candles: vm.candles.value,
-    indicators: vm.indicators.value,
-    freq: vm.freq.value,
-  };
-  const uiOpts = { tooltipClass: "ct-fixed-tooltip" };
-  let option = null;
-  const k = String(kindLocal.value || "").toUpperCase();
-  if (k === "OFF") {
-    chart.clear();
-    return;
-  }
-  if (k === "MACD") option = buildMacdOption(data, uiOpts);
-  else if (k === "KDJ")
-    option = buildKdjOrRsiOption(
-      { ...data, useKDJ: true, useRSI: false },
-      uiOpts
-    );
-  else if (k === "RSI" || k === "BOLL")
-    option = buildKdjOrRsiOption(
-      { ...data, useKDJ: false, useRSI: true },
-      uiOpts
-    );
-  else
-    option = buildKdjOrRsiOption(
-      { ...data, useKDJ: false, useRSI: true },
-      uiOpts
-    );
-
-  if (isStale(mySeq)) return;
-  chart.setOption(option, true);
-  applyZoomByMeta(mySeq);
-}
 watch(
   () => [vm.candles.value, vm.indicators.value, vm.freq.value, kindLocal.value],
-  () => render(),
+  () => {
+    // 渲染由 renderHub 快照驱动，无需主动 render
+  },
   { deep: true }
 );
 watch(
   () => vm.meta.value,
   async () => {
     await nextTick();
-    const mySeq = ++renderSeq;
-    applyZoomByMeta(mySeq);
     updateHeaderFromCurrent();
   },
   { deep: true }

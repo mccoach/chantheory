@@ -7,10 +7,10 @@
   - **程序化 dataZoom 阻断**：为渲染层程序化应用视窗范围引入明确标识或范围签名；**onDataZoom** 遇到此类事件必须直接返回，不得进入中枢，彻底阻断回环。
   - **持久化前置与原子化**：在判定“关键三项发生变化”的当帧，先写入**紧凑快照**（**原子化持久化**），再调用中枢 **execute** 更新权威内存态与广播；持久化作为独立链路的尽端，不作为下一步处理的前置条件。
   - **两帧合并的写频控制**：中枢广播层继续执行“**两帧合并**”并只广播最终值；在持久化链路上优先采用“**两帧合并 + 原子快照**”的最简策略，是否增加“**有界处理**（节流/防抖 + maxWait）”可根据实测性能做开关控制，不强制。
-- 严格遵循“**以代码为准**”的原则：文档描述与当前实现一致；如后续实现演进，优先更新守护脚本与本文同步。
+- 严格遵循“**以代码为准**”的原则：文档描述必须与实现一致；当实现演进，守护脚本与文档同步更新。
 - 关键修订与澄清（相对 v1.2）：
   - **有效交互白名单**改为“**第一性原则判定**”：仅当 **barsCount**/**rightTs**/**hostWidthPx**（派生 **markerWidthPx**）发生实际变化时才触发中枢，动作类型不再作为判断依据；离散量判定采用 **e_idx**（右端索引）、**bars** 整数与 **markerWidthPx** 派生值。
-  - **程序化 dataZoom 阻断**：渲染层应用范围（**dispatchAction**/**setOption**）前设置**程序化标志**或**范围签名**；**onDataZoom** 内遇到标志或签名一致立即 **return**，不做 **Pan**/**ScrollZoom** 判定、不进入中枢。
+  - **程序化 dataZoom 阻断**：渲染层应用范围（**dispatchAction**/**setOption**）前设置**程序化标志**或**范围签名**；**onDataZoom** 内遇到标志或签名一致立即 **return**，不做 **Pan**/**ScrollZoom** 判定、不进入中枢，**阻断回环**。
   - **持久化链路前置与原子化**：变化发生的当帧先写入**紧凑快照**（单键或逻辑原子分组），再走中枢；持久化不作为请求参数的来源，API 锚点参数依然来自中枢权威内存态（**anchor_ts=hub.rightTs**）。
   - 保留**两帧合并**与**覆盖式防抖**：中枢层的**两帧合并**与请求层的**覆盖式防抖**继续有效；持久化链路默认不再额外加节流/防抖（可选开关依据实测启用）。
 
@@ -248,7 +248,7 @@
       - **鼠标滚轮缩放**：以当前聚焦 bar 为中心同时改变左右端（双改：bars+右端）；**门卫判定有效变化**后执行**前置原子化持久化**并中枢 **ScrollZoom**。
       - **预设窗宽按钮/手动输入根数**：保持右端不变，仅改变 bars（仅 bars）；若左端触底无法再扩展，按“左端触底反推右端移动”规则改变右端；**门卫判定**与**前置持久化**后中枢。
       - **持久化**：变化当帧**前置原子化持久化**（紧凑快照）。
-      - **窗宽高亮**：缩放后向下就近 **pickPresetByBarsCountDown**；**barsCount≥allRows → 高亮 ALL**。
+      - **窗宽高亮**：缩放后向下就近 **pickPresetByBarsCountDown**；**barsCount≥all_rows → 高亮 ALL**。
     - 鼠标拖动平移或键盘左右键导致窗口移动
       - 仅移动切片（**Pan**/**KeyMove**），**门卫判定有效变化**后**前置原子化持久化**并中枢 **Pan**/**KeyMove**；不触发后台处理。
   - 强制锚定
@@ -263,6 +263,26 @@
 
 - 交互解耦
   - 复权切换（none/qfq/hfq）、技术指标开关与参数、主图样式（K/HL 柱）、缠论/分型可视参数变化、主题切换、窗口 resize、导出：均不触发后台数据处理；右端不变；仅渲染层重绘与宽度应用。
+
+- 一次性装配渲染（Single-pass setOption）
+  - **渲染链**（保持模块职责不变，仅“合并为一次 setOption”）
+    - 渲染中枢 **useViewRenderHub** 在 hub.onChange 或 vm 数据落地时发布快照（candles/indicators/freq/bars/rightTs/sIdx/eIdx/markerWidthPx）。
+    - 主窗组件在 ECharts 初始化完成后再订阅 onRender（避免首帧快照丢失）。
+    - 回调内：
+      1) 先调用本地 **recomputeChan** 得到合并K线序列（reducedBars、mapOrigToReduced）；
+      2) 将 reducedBars 传入 **buildMainChartOption** 一次性构造“主图基础 option”（包含原始K/合并K/MA），并注入初始范围；
+      3) 由 **buildUpDownMarkers** 与 **buildFractalMarkers** 仅生成覆盖层 series（不 setOption）；
+      4) 将覆盖层 series 拼接到主图 series 数组；
+      5) 仅调用一次 **chart.setOption(finalOption, {notMerge:true})** 完成整图渲染。
+  - **调度与时机约束**
+    - 为避免 ECharts “main process” 期间调用报错，“所有 setOption/resize 均采用 rAF + setTimeout(0) 双跳脱调度”。
+    - 不再依赖 ECharts ‘finished’ 事件；所有补丁合并到了单次 setOption。
+    - **禁止深拷贝丢失函数**：选项对象中存在函数（如 itemStyle.color 回调）；不得使用 JSON 深拷贝构造 finalOption，使用浅拷贝保留函数引用（否则会退回系统默认色）。
+    - convertFromPixel 前做“series 就绪”检查（opt.series.length>0），避免 “No coordinate system …”。
+  - **轴标签避让（与涨跌标记联动）**
+    - 保持涨跌标记原位置不变（**yAxisIndex=1**；不改变 symbolOffset）；当开启涨跌标记时，主图**横轴标签向下避让**：
+      - 在 **buildMainChartOption** 的 UI 参数层面动态提升 **xAxisLabelMargin** 与 **mainAxisLabelSpacePx**；
+      - 关闭标记时恢复默认值；确保标签与标记不重叠。
 
 ---
 
@@ -305,9 +325,9 @@
 
 - **覆盖式防抖**：**Abort**+**reqId**+**renderSeq**；仅最后一次请求/动作落地。
 - **中枢两帧合并**：滚轮/拖动等高频指令仅广播最终值；避免抖动。
-- **前置原子化持久化**：有效交互发生当帧写入**紧凑快照**（单键或逻辑原子分组）；默认依靠**两帧合并**自然限制写频；是否启用“**有界处理**（节流/防抖 + maxWait）”由实测性能决定，可作为开关（不强制）。
+- **前置原子化持久化**：有效交互发生当帧写入**紧凑快照**（单键或逻辑原子分组）；默认依靠**两帧合并**自然限制写频；是否启用“**有界处理**（节流/防抛 + maxWait）”由实测性能决定，可作为开关（不强制）。
 - **显示层即时预览**：任意**有效交互**都即时更新 **barsCount**/**rightTs** 与 symbol 文案，高亮与 **markerWidthPx** 同步；**前置持久化**后由中枢广播；回包一致。
-- **日志与可观测**：**NDJSON** + 基本度量；**trace_id** 贯穿链路；建议增加“**过滤无效事件数**”“**每秒持久化写次数/耗时**”打点以便调参。
+- **日志与可观测**：**NDJSON** + 基本度量；**trace_id** 贯穿链路；建议增加“**过滤无效事件数**”“**每秒持久化写次数/耗时**”“**渲染掉帧统计**”打点以便调参。
 
 ---
 
@@ -413,6 +433,9 @@
 - **缠论覆盖层**：**overlayMarkerYAxis**（**index=1**）+ **CHAN_UP**/**CHAN_DOWN** 占位系列；仅更新 data。
 - **渲染与重绘**：变化即重绘；主窗越界重置 dataZoom；展示层动作以 **renderSeq** 校验。
 - **程序化 dataZoom 阻断**（新增）：渲染层应用范围的 dataZoom 事件不得进入中枢。
+- **一次性装配渲染**（Single-pass setOption）（新增要点）
+  - 主窗 onRender 中将主图基础 series 与覆盖层 series 合并为单个 **finalOption**，并仅调用一次 **setOption(notMerge)**；不得在 ECharts 主流程期间调用 setOption/resize（统一经 **rAF+setTimeout(0)** 调度）。
+  - 不得使用 JSON 深拷贝构造 finalOption（避免 **itemStyle.color** 等函数样式丢失），使用浅拷贝保留函数。
 
 ### 17.4 切频/切窗解耦与右端锚定缩放规则（修订 · 显示状态中枢版 · 项目专用唯一规则）
 
@@ -452,6 +475,7 @@
   - **VolumePanel.vue** 必含订阅中枢快照应用 **overrideMarkWidth** 与传入 **buildVolumeOption**。
   - **useMarketView.js** 必含 **hub.onChange** 中 **presetKey**/**barsCount**/**rightTs** 文案更新、reload **anchor_ts=hub.rightTs**。
   - **有效交互门卫令牌**：在交互源中判定 **nextBars**/**nextRightTs**/**nextHostWidth** 与快照差异后方执行下游。
+  - 新增守护点：**一次性装配渲染**（主窗单次 **setOption**）；**禁止 JSON 深拷贝 finalOption**（函数样式保真）。
 
 ---
 
@@ -492,6 +516,9 @@
 - 覆盖层不变量
   - 主图存在 **overlayMarkerYAxis**（**index=1**，隐藏）；**CHAN_UP**/**CHAN_DOWN** 占位系列稳定存在（仅更新 data）。
   - 分型标记绑定主价格轴 **yAxisIndex=0**；确认分型连线按设置绘制；仅受统一宽度源影响其符号宽高与偏移。
+
+- 新增：与轴标签避让的协同
+  - 开启涨跌标记时，**标记位置不变**（仍绑定 **yAxisIndex=1**，不做上移）；**主图横轴标签向下避让**由主图 UI 参数（**xAxisLabelMargin**、**mainAxisLabelSpacePx**）动态增量实现；关闭标记则恢复默认，确保“标签与标记不重叠”。
 
 ---
 
@@ -568,6 +595,12 @@
 - **anchor_ts=hub.rightTs** 强制锚定；服务端返回 **ALL + meta.view*** 正确；前端仅依 meta 设置 dataZoom。
 - **缠论覆盖层不变量**：**overlayMarkerYAxis**（**index=1**）存在，**CHAN_UP**/**CHAN_DOWN** 占位存在。
 - **跨窗 hover 同步**与 **dataZoom 联动**保持一致；结构化日志打点可观测“**过滤的无效事件数**/**持久化写频与耗时**”。
+
+- 新增：**一次性装配渲染** 验收项
+  - **一次性装配渲染**：主窗 onRender 中将主图基础 series 与覆盖层 series 合并为单个 **finalOption**，并仅调用一次 **setOption(notMerge)**。
+  - **时机安全**：不在 ECharts 主流程期间调用 setOption/resize（全链路经 **rAF+setTimeout(0)** 调度），无 “setOption/resize during main process” 报错。
+  - **函数样式保真**：finalOption 不使用 JSON 深拷贝，**itemStyle.color** 等函数样式可用（如合并K线填充按 **fillFadePercent** 生效）。
+  - **轴标签避让**：开启涨跌标记时主图横轴标签向下避让（**xAxisLabelMargin** 与 **mainAxisLabelSpacePx** 动态增量），关闭标记恢复默认，标记位置不动且不与标签重叠。
 
 ---
 

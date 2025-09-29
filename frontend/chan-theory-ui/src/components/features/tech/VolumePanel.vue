@@ -1,10 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\VolumePanel.vue -->
 <!-- ============================== -->
-<!-- 量窗（统一使用“唯一权威符号宽度广播” chan:marker-size；不自估宽度） -->
-<!-- 本次重构： -->
-<!-- - 保持本窗不作为交互源（inside-only），不更改 bars/rightTs；仅订阅事件以应用统一宽度。 -->
-<!-- - 不扩范围：保留现有逻辑与顺序，新增注释说明中枢化策略；构造 option 时传入 overrideMarkWidth。 -->
-
+<!-- 量窗（接入统一渲染中枢 · 恢复 MAVOL/放缩量标记设置 UI · 移除旧链路）
+     - 只订阅 useViewRenderHub.onRender(snapshot)，一次性 setOption 渲染（含统一 initialRange 与 overrideMarkWidth）。
+     - 设置面板恢复 MAVOL 三条线与放/缩量标记的参数编辑，保存到 settings.volSettings，并由渲染中枢监控 settings 变化重新发布快照。
+     - 不再监听 meta 或使用 zoomSync；onDataZoom inside-only 并早退。
+-->
 <template>
   <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
     <div class="top-info">
@@ -58,46 +58,21 @@ import {
   reactive,
 } from "vue";
 import * as echarts from "echarts";
-import { buildVolumeOption, zoomSync } from "@/charts/options";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { DEFAULT_VOL_SETTINGS } from "@/constants";
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
+import { useViewRenderHub } from "@/composables/useViewRenderHub";
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 defineOptions({ directives: { selectAll: vSelectAll } });
 
 const vm = inject("marketView");
+const renderHub = useViewRenderHub();
 const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
-
-// —— 统一标记宽度来源：仅订阅全局事件 chan:marker-size（保持项目不变量） —— //
-const overrideMarkWidth = ref(null);
-function onMarkerSize(ev) {
-  try {
-    const px = Number(ev?.detail?.px);
-    if (Number.isFinite(px) && px > 0) overrideMarkWidth.value = px;
-  } catch {}
-}
-onMounted(() => {
-  window.addEventListener("chan:marker-size", onMarkerSize);
-});
-onBeforeUnmount(() => {
-  window.removeEventListener("chan:marker-size", onMarkerSize);
-});
-
-// —— NEW: 宽度一旦变化，立即重绘 —— //
-// 原因：buildVolumeOption 中的 symbolSize 闭包捕获了当前宽度值；若不重建 option，ECharts 不会重新取新的宽度。
-watch(
-  () => overrideMarkWidth.value,
-  () => {
-    try {
-      render();
-    } catch (e) {
-      console.error("VolumePanel: re-render on marker size change failed:", e);
-    }
-  }
-);
+const hub = useViewCommandHub();
 
 let renderSeq = 0;
 function isStale(seq) {
@@ -117,7 +92,6 @@ const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
-let detachSync = null;
 
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
@@ -202,9 +176,9 @@ const VolumeSettingsContent = defineComponent({
           type: "button",
         }),
       ]);
-    return () => {
+
+    // 行：量额柱基础样式
       const rows = [];
-      const vb = settingsDraftVol.volBar;
       rows.push(
         h("div", { class: "std-row", key: `volbar-${draftRev.value}` }, [
           nameCell("量额柱"),
@@ -216,7 +190,7 @@ const VolumeSettingsContent = defineComponent({
               min: 10,
               max: 100,
               step: 1,
-              value: Number(vb.barPercent ?? 100),
+            value: Number(settingsDraftVol.volBar.barPercent ?? 100),
               onInput: (e) =>
                 (settingsDraftVol.volBar.barPercent = Math.max(
                   10,
@@ -229,10 +203,12 @@ const VolumeSettingsContent = defineComponent({
             h("input", {
               class: "input color",
               type: "color",
-              value: vb.upColor || "#ef5350",
+            value:
+              settingsDraftVol.volBar.upColor ||
+              DEFAULT_VOL_SETTINGS.volBar.upColor,
               onInput: (e) =>
                 (settingsDraftVol.volBar.upColor = String(
-                  e.target.value || "#ef5350"
+                e.target.value || DEFAULT_VOL_SETTINGS.volBar.upColor
                 )),
             })
           ),
@@ -241,10 +217,12 @@ const VolumeSettingsContent = defineComponent({
             h("input", {
               class: "input color",
               type: "color",
-              value: vb.downColor || "#26a69a",
+            value:
+              settingsDraftVol.volBar.downColor ||
+              DEFAULT_VOL_SETTINGS.volBar.downColor,
               onInput: (e) =>
                 (settingsDraftVol.volBar.downColor = String(
-                  e.target.value || "#26a69a"
+                e.target.value || DEFAULT_VOL_SETTINGS.volBar.downColor
                 )),
             })
           ),
@@ -257,6 +235,8 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
+
+    // 行：MAVOL 三条线参数
       Object.entries(settingsDraftVol.mavolForm).forEach(([k, conf]) => {
         rows.push(
           h("div", { class: "std-row", key: `mrow-${k}-${draftRev.value}` }, [
@@ -329,6 +309,8 @@ const VolumeSettingsContent = defineComponent({
           ])
         );
       });
+
+    // 行：放量标记
       rows.push(
         h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
           nameCell("放量标记"),
@@ -397,6 +379,8 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
+
+    // 行：缩量标记
       rows.push(
         h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
           nameCell("缩量标记"),
@@ -465,12 +449,16 @@ const VolumeSettingsContent = defineComponent({
           }),
         ])
       );
-      return h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
-    };
+
+    return () => h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
   },
 });
+
+// 打开设置窗：从 settings 加载现值到草稿，保存时写回 settings.volSettings
 function openSettingsDialog() {
   const vs = settings.volSettings.value || {};
+
+  // 量柱样式
   Object.assign(settingsDraftVol.volBar, {
     barPercent: Math.max(
       10,
@@ -484,6 +472,8 @@ function openSettingsDialog() {
     upColor: vs?.volBar?.upColor || DEFAULT_VOL_SETTINGS.volBar.upColor,
     downColor: vs?.volBar?.downColor || DEFAULT_VOL_SETTINGS.volBar.downColor,
   });
+
+  // MAVOL 三条线
   const form = {};
   ["MAVOL5", "MAVOL10", "MAVOL20"].forEach((key) => {
     const d = DEFAULT_VOL_SETTINGS.mavolStyles[key];
@@ -497,6 +487,8 @@ function openSettingsDialog() {
     };
   });
   settingsDraftVol.mavolForm = form;
+
+  // 放/缩量标记
   Object.assign(settingsDraftVol.markerPump, {
     enabled: (vs?.markerPump?.enabled ?? true) === true,
     shape: vs?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
@@ -532,13 +524,19 @@ function openSettingsDialog() {
       }
     },
     onSave: () => {
+      // 写回 settings.volSettings，并由渲染中枢监听 settings 变化后重新发布快照
       settings.setVolSettings({
         ...vs,
         volBar: { ...settingsDraftVol.volBar },
         mavolStyles: { ...settingsDraftVol.mavolForm },
         markerPump: { ...settingsDraftVol.markerPump },
         markerDump: { ...settingsDraftVol.markerDump },
+        mode: mode.value,
       });
+
+      // MOD: 立即触发中枢刷新，发布新快照 -> 即时应用新设置
+      hub.execute("Refresh", {});
+
       dialogManager.close();
     },
     onClose: () => dialogManager.close(),
@@ -548,25 +546,6 @@ function openSettingsDialog() {
 function onDataZoom(_params) {
   // 副窗不作为交互源；仅主图触发 setBars，副窗跟随 meta（避免循环）
   return;
-}
-
-function applyZoomByMeta(seq) {
-  if (!chart) return;
-  if (isStale(seq)) return;
-  const len = (vm.candles.value || []).length;
-  if (!len) return;
-  const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
-  const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
-
-  const delta = {
-    dataZoom: [{ type: "inside", startValue: sIdx, endValue: eIdx }],
-  };
-
-  try {
-    if (isStale(seq)) return;
-    chart.dispatchAction({ type: "hideTip" });
-  } catch {}
-  chart.setOption(delta, { notMerge: false, lazyUpdate: true, silent: true });
 }
 
 function safeResize() {
@@ -583,6 +562,39 @@ function safeResize() {
   });
 }
 
+function schedule(fn) {
+  try {
+    requestAnimationFrame(() => setTimeout(fn, 0));
+  } catch {
+    setTimeout(fn, 0);
+  }
+}
+
+/**
+ * 动态切换当前窗的轴指示模式：
+ * - mode='cross'：竖线 + 水平线 + y 轴标签（当鼠标进入本窗）
+ * - mode='line' ：仅竖线，禁用水平线与 y 轴标签（当鼠标离开本窗）
+ */
+function setAxisPointerMode(mode) {
+  const isCross = String(mode) === "cross";
+  const optPatch = {
+    tooltip: { axisPointer: { type: isCross ? "cross" : "line", axis: "x" } },
+    yAxis: { axisPointer: { show: isCross, label: { show: isCross } } },
+  };
+  schedule(() => {
+    try {
+      chart && chart.setOption(optPatch, { notMerge: false, lazyUpdate: true, silent: true });
+    } catch {}
+  });
+}
+
+function onHostEnter() {
+  setAxisPointerMode("cross");
+}
+function onHostLeave() {
+  setAxisPointerMode("line");
+}
+
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
@@ -592,34 +604,25 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
+  try { echarts.connect("ct-sync"); } catch {}
+
+  // 初始：非本窗时仅纵线（与 options.js 初始一致）
+  setAxisPointerMode("line");
+
+  // 绑定宿主的进入/离开事件（检测范围随宿主尺寸而变，无误判）
   try {
-    echarts.connect("ct-sync");
-  } catch {}
-  chart.getZr().on("mousemove", (e) => {
-    try {
-      const point = [e.offsetX, e.offsetY];
-      const result = chart.convertFromPixel({ seriesIndex: 0 }, point);
-      if (Array.isArray(result)) {
-        const idx = Math.round(result[0]);
-        const l = (vm.candles.value || []).length;
-        if (Number.isFinite(idx) && idx >= 0 && idx < l) {
-          broadcastHoverIndex(idx);
-        }
-      }
+    el.addEventListener("mouseenter", onHostEnter);
+    el.addEventListener("mouseleave", onHostLeave);
     } catch {}
+
+  // 组内/本窗联动（无需自建广播）
+  chart.getZr().on("mousemove", (_e) => {
+    // 交由 ECharts 内建处理悬浮即可，无需显式 showTip
   });
-  chart.on("updateAxisPointer", (params) => {
-    try {
-      const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-      const label = axisInfo?.value;
-      const dates = (vm.candles.value || []).map((d) => d.t);
-      const idx = dates.indexOf(label);
-      if (idx >= 0) {
-        broadcastHoverIndex(idx);
-      }
-    } catch {}
+  chart.on("updateAxisPointer", (_params) => {
+    // 交由组联动对齐，无需转发
   });
-  chart.on("dataZoom", onDataZoom);
+
   try {
     ro = new ResizeObserver(() => {
       safeResize();
@@ -629,55 +632,38 @@ onMounted(async () => {
   requestAnimationFrame(() => {
     safeResize();
   });
-  detachSync = zoomSync.attach(
-    "volume",
-    chart,
-    () => (vm.candles.value || []).length
-  );
-  render();
+
   updateHeaderFromCurrent();
 });
 
+// 订阅上游渲染快照：一次性渲染
+const unsubId = renderHub.onRender((snapshot) => {
+  try {
+    if (!chart) return;
+    const mySeq = ++renderSeq;
+    chart.setOption(snapshot.volume.option, true);
+    recomputeVisibleStats(mySeq);
+  } catch (e) {
+    console.error("Volume renderHub onRender error:", e);
+  }
+});
+
 onBeforeUnmount(() => {
+  // 卸载宿主事件
+  try {
+    const el = host.value;
+    el && el.removeEventListener("mouseenter", onHostEnter);
+    el && el.removeEventListener("mouseleave", onHostLeave);
+  } catch {}
   try {
     ro && ro.disconnect();
   } catch {}
   ro = null;
   try {
-    detachSync && detachSync();
-  } catch {}
-  detachSync = null;
-  try {
     chart && chart.dispose();
   } catch {}
   chart = null;
 });
-
-function render() {
-  if (!chart) return;
-  const mySeq = ++renderSeq;
-
-  const option = buildVolumeOption(
-    {
-      candles: vm.candles.value,
-      indicators: vm.indicators.value,
-      freq: vm.freq.value,
-      volCfg: settings.volSettings.value,
-      volEnv: {
-        hostWidth: host.value ? host.value.clientWidth : 0,
-        visCount: Number(vm.meta.value?.view_rows || 1),
-        overrideMarkWidth: overrideMarkWidth.value, // —— 统一宽度来源（事件） —— //
-      },
-    },
-    {}
-  );
-
-  if (isStale(mySeq)) return;
-  chart.setOption(option, true);
-  applyZoomByMeta(mySeq);
-  recomputeVisibleStats(mySeq);
-  updateHeaderFromCurrent();
-}
 
 function getCurrentZoomIndexRange() {
   try {
@@ -756,27 +742,6 @@ function recomputeVisibleStats(seq) {
   }
 }
 
-watch(
-  () => [
-    vm.candles.value,
-    vm.indicators.value,
-    vm.freq.value,
-    settings.volSettings.value,
-  ],
-  () => render(),
-  { deep: true }
-);
-watch(
-  () => vm.meta.value,
-  async () => {
-    await nextTick();
-    const mySeq = ++renderSeq;
-    applyZoomByMeta(mySeq);
-    updateHeaderFromCurrent();
-  },
-  { deep: true }
-);
-
 let dragging = false,
   startY = 0,
   startH = 0;
@@ -799,7 +764,9 @@ function onResizeHandleMove(e) {
           width: host.value.clientWidth,
           height: host.value.clientHeight,
         });
-      if (!isStale(seq)) render();
+      if (!isStale(seq)) {
+        // 渲染由渲染中枢快照驱动，无需手动 render
+      }
     } catch {}
   }
 }

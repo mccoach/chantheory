@@ -1,9 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
-<!-- 说明：应用根组件（组合根） -->
-<!-- - 变更点：useMarketView({ autoStart:false })，等待后端探活成功后再触发 vm.reload()。 -->
-<!-- ============================== -->
-
+<!-- 说明：应用根组件（组合根）
+     - 增加：初始化并提供统一渲染中枢 useViewRenderHub（上游唯一源头）。
+     - 下游（主/量/技窗）将订阅该中枢以一次性渲染，避免二次订阅与多源竞态。
+-->
 <template>
   <div class="page-wrap">
     <TopTitle />
@@ -68,9 +68,16 @@ import { useDialogManager } from "./composables/useDialogManager";
 import { buildExportFilename } from "./utils/download";
 import { waitBackendAlive } from "./utils/backendReady";
 import { ensureIndexFresh } from "./composables/useSymbolIndex";
+// NEW: 统一渲染中枢
+import { useViewRenderHub } from "@/composables/useViewRenderHub";
 
 const vm = useMarketView({ autoStart: false }); // 关键变更：延迟首刷
 provide("marketView", vm);
+
+// 初始化并提供渲染中枢（上游唯一源头）
+const renderHub = useViewRenderHub();
+renderHub.setMarketView(vm);
+provide("renderHub", renderHub);
 
 const dialogManager = useDialogManager();
 provide("dialogManager", dialogManager);

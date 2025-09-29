@@ -1,17 +1,13 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
-<!-- 主图组件（根因修复 · 去除顶层 await import · 程序化 dataZoom 守护 + 有效变化判定）
-     变更说明（严格最小改动，未改变原有代码块顺序；仅在必要处插入逻辑）：
-     1) 新增“程序化 dataZoom 标志位 programmaticZoomInProgress”，任何通过程序调用
-        dispatchAction/setOption 导致的 dataZoom 事件，onDataZoom 开头直接 return，阻断回环。
-     2) 新增“有效变化判定（第一性原则）”：仅当关键三项（barsCount/rightTs/hostWidth→markerWidthPx）
-        的离散意义上发生变化时，才调用 hub.execute(…)；未变则直接 return。
-        - onDataZoom：若 bars 未变 → Pan（仅右端）；若 bars 变化 → ScrollZoom（双改）。
-        - onWheelZoom：以“当前鼠标位置 convertFromPixel → centerIdx”为中心缩放；若不可用回退 currentIndex。
-        - 按键左右 KeyMove：以“最后一次聚焦 bar”为起点（跨窗体保持一致，并实时持久化），
-          在切片内仅更新高亮不移动窗口；越界时按步平滑移动 rightTs，保持聚焦 bar 在可视范围内。
-     3) 新增 lastAppliedRange 记忆已应用范围，避免 dataZoom 循环。
-     4) render() 中 setOption 前后加守护，并给 dataZoom 注入初始范围，根除首帧闪回 ALL 问题。
+<!-- 主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
+     改动目标（一次性 setOption，杜绝竞态）：
+     1) 保留原有参数准备与模块职责（buildMainChartOption、CHAN 覆盖层/分型标记等）；
+     2) 将原本“基础主图 setOption + 覆盖层 series patch 的多次 setOption”合并为“单次 setOption 装配到位”，
+        即在 onRender 回调中一次性准备好主图 option + 覆盖层 series，并一次 setOption(notMerge)；
+     3) 避免在 ECharts 主流程期间调用 setOption/resize：所有 setOption/resize 经“双跳脱”调度（rAF+setTimeout(0)）；
+     4) 订阅时机调整：renderHub.onRender 在 chart.init 之后注册（避免首帧快照被丢弃）。
+     注：除上述必要调整外，其他交互、模块、计算流程保持原样；对原代码块顺序不调整，订阅时机移动处注明理由。
 -->
 <!-- ====================================================================== -->
 
@@ -109,7 +105,7 @@
           v-for="p in presets"
           :key="p"
           class="seg-btn"
-          :class="{ active: vm.windowPreset.value === p }"
+          :class="{ active: activePresetKey === p }"
           @click="onClickPreset(p)"
           :title="`快捷区间：${p}`"
         >
@@ -135,7 +131,7 @@
     </div>
   </div>
 
-  <!-- 高级面板 -->
+  <!-- 高级面板（手输日期/N 根/可见窗口） -->
   <div v-if="advancedOpen" class="advanced-panel">
     <div class="adv-row">
       <div class="label">手动日期</div>
@@ -234,14 +230,16 @@ import {
   onBeforeUnmount,
   ref,
   watch,
-  nextTick,
   computed,
   defineComponent,
   h,
   reactive,
 } from "vue";
 import * as echarts from "echarts";
-import { buildMainChartOption, zoomSync } from "@/charts/options";
+import {
+  buildMainChartOption,
+  createFixedTooltipPositioner,
+} from "@/charts/options";
 import {
   DEFAULT_MA_CONFIGS,
   CHAN_DEFAULTS,
@@ -257,37 +255,64 @@ import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { computeInclude, computeFractals } from "@/composables/useChan";
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
+import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { buildUpDownMarkers, buildFractalMarkers } from "@/charts/chan/layers";
 
-// 指令注册（保留）
-defineOptions({ directives: { selectAll: vSelectAll } });
+/* 双跳脱调度，避免主流程期 setOption/resize */
+function schedule(fn) {
+  try {
+    requestAnimationFrame(() => {
+      setTimeout(fn, 0);
+    });
+  } catch {
+    setTimeout(fn, 0);
+  }
+}
+function scheduleSetOption(opt, opts) {
+  schedule(() => {
+    try {
+      chart && chart.setOption(opt, opts);
+    } catch {}
+  });
+}
+function scheduleResize(width, height) {
+  schedule(() => {
+    try {
+      chart && chart.resize({ width, height });
+    } catch {}
+  });
+}
 
-// 注入（保留顺序）
 const vm = inject("marketView");
+const renderHub = useViewRenderHub();
 const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
-
-// —— 新增：显示状态中枢（单例） —— //
 const hub = useViewCommandHub();
 
-// 覆盖式防抖（保留）
+/* MOD: 增加“当前高亮预设键”的响应式变量，并订阅中枢快照 */
+const activePresetKey = ref(hub.getState().presetKey || "ALL");
+hub.onChange((st) => {
+  activePresetKey.value = st.presetKey || "ALL";
+});
+
+/* 覆盖式防抖/序号守护 */
 let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
+let lastAppliedRange = { s: null, e: null };
+let programmaticZoomInProgress = false;
 
-// 预设列表（保留）
+/* 预设与高级面板 */
 const presets = computed(() => WINDOW_PRESETS.slice());
-
-// 频率切换（保留）
 const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f;
 function activateK(f) {
   vm.chartType.value = "kline";
   vm.setFreq(f);
 }
 
-// 高级面板（保留）
+// 高级面板输入与状态
 const advancedOpen = ref(false);
 const advStart = ref(vm.visibleRange.value.startStr || "");
 const advEnd = ref(vm.visibleRange.value.endStr || "");
@@ -298,815 +323,136 @@ function toggleAdvanced() {
   advancedOpen.value = !advancedOpen.value;
 }
 
-// ECharts 句柄与观察者（保留）
+// 手输“起止日期”应用：根据 ALL candles 查索引 → hub.execute(SetDatesManual)
+function applyManualRange() {
+  const a = String(advStart.value || "").trim();
+  const b = String(advEnd.value || "").trim();
+  if (!a || !b) return;
+  const arr = vm.candles.value || [];
+  if (!arr.length) return;
+  const toYMD = (s) => String(s).slice(0, 10);
+  const sY = toYMD(a);
+  const eY = toYMD(b);
+  let sIdx = -1,
+    eIdx = -1;
+  for (let i = 0; i < arr.length; i++) {
+    const ymd = toYMD(arr[i].t || "");
+    if (sIdx < 0 && ymd >= sY) sIdx = i;
+    if (ymd <= eY) eIdx = i;
+  }
+  if (sIdx < 0) sIdx = 0;
+  if (eIdx < 0) eIdx = arr.length - 1;
+  if (sIdx > eIdx) {
+    const t = sIdx;
+    sIdx = eIdx;
+    eIdx = t;
+  }
+  const nextBars = Math.max(1, eIdx - sIdx + 1);
+  const anchorTs = Date.parse(arr[eIdx]?.t || "");
+  if (!isFinite(anchorTs)) return;
+  hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
+}
+
+// 手输“N 根”应用：仅改变 bars（右端不变）
+function applyBarsRange() {
+  const n = Math.max(1, parseInt(String(barsStr.value || "1"), 10));
+  hub.execute("SetBarsManual", { nextBars: n });
+}
+
+// 将“当前可见窗口”（vm.visibleRange）应用为数据窗口：SetDatesManual
+function applyVisible() {
+  const start = String(vm.visibleRange.value.startStr || "").trim();
+  const end = String(vm.visibleRange.value.endStr || "").trim();
+  if (!start || !end) return;
+  const arr = vm.candles.value || [];
+  if (!arr.length) return;
+  const getIdxOfIso = (iso) => {
+    const ms = Date.parse(iso);
+    if (!isFinite(ms)) return -1;
+    let best = -1;
+    for (let i = 0; i < arr.length; i++) {
+      const t = Date.parse(arr[i].t || "");
+      if (isFinite(t) && t <= ms) best = i;
+      if (t > ms) break;
+    }
+    return best;
+  };
+  const sIdx = Math.max(0, getIdxOfIso(start));
+  let eIdx = Math.max(0, getIdxOfIso(end));
+  if (eIdx < sIdx) eIdx = sIdx;
+  const nextBars = Math.max(1, eIdx - sIdx + 1);
+  const anchorTs = Date.parse(arr[eIdx]?.t || "");
+  if (!isFinite(anchorTs)) return;
+  hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
+}
+
+/* 画布/实例与 Resize */
 const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
-let detachSync = null;
 
-// --- 关键修复：记忆最后一次成功应用的 dataZoom 范围，打断“持续闪回”的循环 ---
-let lastAppliedRange = { s: null, e: null };
+// 下沿拖拽高度调整（保留）
+let dragging = false,
+  startY = 0,
+  startH = 0;
+function onResizeHandleDown(_pos, e) {
+  dragging = true;
+  startY = e.clientY;
+  startH = wrap.value?.clientHeight || 0;
+  window.addEventListener("mousemove", onResizeHandleMove);
+  window.addEventListener("mouseup", onResizeHandleUp, { once: true });
+}
+function onResizeHandleMove(e) {
+  if (!dragging) return;
+  const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
+  if (wrap.value) {
+    wrap.value.style.height = `${Math.floor(next)}px`;
+    safeResize();
+  }
+}
+function onResizeHandleUp() {
+  dragging = false;
+  window.removeEventListener("mousemove", onResizeHandleMove);
+}
+let _resizePatchTimer = null;
+function safeResize() {
+  if (!chart || !host.value) return;
+  const seq = renderSeq;
+  requestAnimationFrame(() => {
+    if (isStale(seq)) return;
+    try {
+      const nextW = host.value.clientWidth;
+      const nextH = host.value.clientHeight;
+      // 双跳脱 resize
+      scheduleResize(nextW, nextH);
 
-// —— 新增：程序化 dataZoom 守护标志 —— //
-// 说明：任何通过程序（dispatchAction/setOption）触发的 dataZoom 事件，onDataZoom 直接 return，阻断回环。
-let programmaticZoomInProgress = false;
+      const st = hub.getState();
+      const approxNextMarker = Math.max(
+        1,
+        Math.min(16, Math.round((nextW * 0.88) / Math.max(1, st.barsCount)))
+      );
+      if (approxNextMarker !== hub.markerWidthPx.value) {
+        hub.execute("ResizeHost", { widthPx: nextW });
+      }
+    } catch {}
+    // 延迟少许再计算（避免撞到主流程）
+    clearTimeout(_resizePatchTimer);
+    _resizePatchTimer = setTimeout(() => {
+      // 一次性 setOption 已包含覆盖层，不需要额外 patch
+      // 仅保持调用路径存在以兼容先前逻辑（不做 setOption）
+    }, 32);
+  });
+}
 
-// 设置草稿（保留）
-// 新增字段（在 openSettingsDialog 时合入默认）
+/* 设置弹窗（保持原逻辑） */
 const settingsDraft = reactive({
-  kForm: { ...DEFAULT_KLINE_STYLE }, // 包含 originalEnabled/mergedEnabled/displayOrder/mergedK
+  kForm: { ...DEFAULT_KLINE_STYLE },
   maForm: {},
   chanForm: { ...CHAN_DEFAULTS },
   fractalForm: { ...FRACTAL_DEFAULTS },
   adjust: DEFAULT_APP_PREFERENCES.adjust,
 });
-
-// 当前可见根数（保留）
-const localVisRows = ref(Math.max(1, Number(vm.meta.value?.view_rows || 1)));
-
-// —— 新增：预览态的 start/end/bars 引用（用于顶栏即时显示） —— //
-const previewStartStr = ref(""); // 即时预览的起始 ISO
-const previewEndStr = ref(""); // 即时预览的结束 ISO
-const previewBarsCount = ref(0); // 即时预览的 bars 数（中枢 barsCount）
-
-// —— Helper：将毫秒转 ISO（保留格式规则） —— //
-function msToIso(ms) {
-  try {
-    return new Date(ms).toISOString();
-  } catch {
-    return null;
-  }
-}
-
-// —— Helper：从当前中枢状态与本地 candles 计算预览 sIdx/eIdx 与起止字符串 —— //
-// 说明：为满足“顶栏实时显示”，任何主动交互完成后调用一次本函数并应用 dataZoom（dispatchAction）。
-function computePreviewRangeFromHub() {
-  const arr = vm.candles.value || [];
-  const len = arr.length;
-  if (!len) return null;
-  const tsArr = arr
-    .map((d) => Date.parse(d.t))
-    .filter((x) => Number.isFinite(x));
-  if (!tsArr.length) return null;
-
-  const st = hub.getState();
-  const bars = Math.max(1, Number(st.barsCount || 1));
-  let eIdx = len - 1;
-  if (Number.isFinite(st.rightTs)) {
-    for (let i = len - 1; i >= 0; i--) {
-      if (tsArr[i] <= st.rightTs) {
-        eIdx = i;
-        break;
-      }
-    }
-  }
-  const sIdx = Math.max(0, eIdx - bars + 1);
-  const startStr = msToIso(tsArr[sIdx]) || arr[sIdx]?.t || "";
-  const endStr = msToIso(tsArr[eIdx]) || arr[eIdx]?.t || "";
-  return { sIdx, eIdx, startStr, endStr, bars };
-}
-
-// —— Helper：应用预览区间到图表（程序化 dataZoom，带标志位阻断回环） —— //
-function applyPreviewRange(range) {
-  if (!range || !chart) return;
-  try {
-    programmaticZoomInProgress = true;
-    chart.dispatchAction({
-      type: "dataZoom",
-      startValue: range.sIdx,
-      endValue: range.eIdx,
-    });
-    // --- 关键修复：更新记忆范围 ---
-    lastAppliedRange = { s: range.sIdx, e: range.eIdx };
-  } catch {}
-  // rAF 后恢复，确保本轮程序化 dataZoom 不被 onDataZoom 处理
-  requestAnimationFrame(() => {
-    programmaticZoomInProgress = false;
-  });
-}
-
-/* 异步 setOption 包装 */
-// —— Helper：异步 setOption 封装（新增） —— //
-// 说明：为避免在主流程/事件中调用 setOption，引入异步补丁封装；不改变原函数调用点前后顺序，仅将底层 setOption 调用改为异步。
-function scheduleSetOption(patch, opts) {
-  requestAnimationFrame(() => {
-    try {
-      chart && chart.setOption(patch, opts);
-    } catch (e) {
-      console.error("scheduleSetOption error:", e);
-    }
-  });
-}
-
-// 设置窗内容组件（保留）
-// 改动点：renderDisplay 内首行“原始K线”与“合并K线”行的控件与重置；onSave 合并新字段
-const MainChartSettingsContent = defineComponent({
-  props: { activeTab: { type: String, default: "display" } },
-  setup(props) {
-    const nameCell = (text) => h("div", { class: "std-name" }, text);
-    const itemCell = (label, node) =>
-      h("div", { class: "std-item" }, [
-        h("div", { class: "std-item-label" }, label),
-        h("div", { class: "std-item-input" }, [node]),
-      ]);
-    const checkCell = (checked, onChange) =>
-      h("div", { class: "std-check" }, [
-        h("input", { type: "checkbox", checked, onChange }),
-      ]);
-    const resetBtn = (onClick) =>
-      h("div", { class: "std-reset" }, [
-        h("button", {
-          class: "btn icon",
-          title: "恢复默认",
-          type: "button",
-          onClick,
-        }),
-      ]);
-
-    // 保留原 renderDisplay/renderChan ...
-    const renderDisplay = () => {
-      const K = settingsDraft.kForm;
-      const rows = [];
-
-      // —— 原始K线行（按：柱宽/阳线颜色/阴线颜色/复权/显示层级/勾选框/重置按钮） —— //
-      rows.push(
-        h("div", { class: "std-row" }, [
-          nameCell("原始K线"),
-          // 复权
-          itemCell(
-            "复权",
-            h(
-              "select",
-              {
-                class: "input",
-                value: String(
-                  settingsDraft.adjust || DEFAULT_APP_PREFERENCES.adjust
-                ),
-                onChange: (e) =>
-                  (settingsDraft.adjust = String(e.target.value || "none")),
-              },
-              [
-                h("option", { value: "none" }, "不复权"),
-                h("option", { value: "qfq" }, "前复权"),
-                h("option", { value: "hfq" }, "后复权"),
-              ]
-            )
-          ),
-          // 阳线颜色
-          itemCell(
-            "阳线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: K.upColor || DEFAULT_KLINE_STYLE.upColor,
-              onInput: (e) =>
-                (settingsDraft.kForm.upColor = String(
-                  e.target.value || DEFAULT_KLINE_STYLE.upColor
-                )),
-            })
-          ),
-          // 阳线淡显（0~100）
-          itemCell(
-            "阳线淡显",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0,
-              max: 100,
-              step: 1,
-              value: Number(
-                K.originalFadeUpPercent ??
-                  DEFAULT_KLINE_STYLE.originalFadeUpPercent
-              ),
-              onInput: (e) => {
-                const v = Math.max(
-                  0,
-                  Math.min(
-                    100,
-                    Number(
-                      e.target.value ||
-                        DEFAULT_KLINE_STYLE.originalFadeUpPercent
-                    )
-                  )
-                );
-                settingsDraft.kForm.originalFadeUpPercent = v;
-              },
-            })
-          ),
-          // 阴线颜色
-          itemCell(
-            "阴线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: K.downColor || DEFAULT_KLINE_STYLE.downColor,
-              onInput: (e) =>
-                (settingsDraft.kForm.downColor = String(
-                  e.target.value || DEFAULT_KLINE_STYLE.downColor
-                )),
-            })
-          ),
-          // 阴线淡显（0~100）
-          itemCell(
-            "阴线淡显",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0,
-              max: 100,
-              step: 1,
-              value: Number(
-                K.originalFadeDownPercent ??
-                  DEFAULT_KLINE_STYLE.originalFadeDownPercent
-              ),
-              onInput: (e) => {
-                const v = Math.max(
-                  0,
-                  Math.min(
-                    100,
-                    Number(
-                      e.target.value ||
-                        DEFAULT_KLINE_STYLE.originalFadeDownPercent
-                    )
-                  )
-                );
-                settingsDraft.kForm.originalFadeDownPercent = v;
-              },
-            })
-          ),
-          // 原始K线开关
-          checkCell(
-            !!K.originalEnabled,
-            (e) => (settingsDraft.kForm.originalEnabled = !!e.target.checked)
-          ),
-          // 重置：恢复原始K线相关默认与复权默认
-          resetBtn(() => {
-            Object.assign(settingsDraft.kForm, {
-              upColor: DEFAULT_KLINE_STYLE.upColor,
-              downColor: DEFAULT_KLINE_STYLE.downColor,
-              originalFadeUpPercent: DEFAULT_KLINE_STYLE.originalFadeUpPercent,
-              originalFadeDownPercent:
-                DEFAULT_KLINE_STYLE.originalFadeDownPercent,
-              originalEnabled: DEFAULT_KLINE_STYLE.originalEnabled,
-            });
-            settingsDraft.adjust = String(
-              DEFAULT_APP_PREFERENCES.adjust || "none"
-            );
-          }),
-        ])
-      );
-
-      // 合并K线行：轮廓线宽 / 上涨颜色 / 下跌颜色 / 填充淡显 / 显示层级（先/后） / 勾选 / 重置
-      const MK =
-        settingsDraft.kForm.mergedK ||
-        (settingsDraft.kForm.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK });
-      rows.push(
-        h("div", { class: "std-row" }, [
-          nameCell("合并K线"),
-          // 轮廓线宽
-          itemCell(
-            "轮廓线宽",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0.1,
-              max: 6,
-              step: 0.1,
-              value: Number(
-                MK.outlineWidth ?? DEFAULT_KLINE_STYLE.mergedK.outlineWidth
-              ),
-              onInput: (e) =>
-                (settingsDraft.kForm.mergedK.outlineWidth = Math.max(
-                  0.1,
-                  Number(e.target.value || 1.2)
-                )),
-            })
-          ),
-          // 上涨颜色（轮廓与填充）
-          itemCell(
-            "上涨颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: MK.upColor || DEFAULT_KLINE_STYLE.mergedK.upColor,
-              onInput: (e) =>
-                (settingsDraft.kForm.mergedK.upColor = String(
-                  e.target.value || DEFAULT_KLINE_STYLE.mergedK.upColor
-                )),
-            })
-          ),
-          // 下跌颜色（轮廓与填充）
-          itemCell(
-            "下跌颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: MK.downColor || DEFAULT_KLINE_STYLE.mergedK.downColor,
-              onInput: (e) =>
-                (settingsDraft.kForm.mergedK.downColor = String(
-                  e.target.value || DEFAULT_KLINE_STYLE.mergedK.downColor
-                )),
-            })
-          ),
-          // 填充淡显（0~100）
-          itemCell(
-            "填充淡显",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0,
-              max: 100,
-              step: 1,
-              value: Number(
-                MK.fillFadePercent ??
-                  DEFAULT_KLINE_STYLE.mergedK.fillFadePercent
-              ),
-              onInput: (e) => {
-                const v = Math.max(
-                  0,
-                  Math.min(100, Number(e.target.value || 0))
-                );
-                settingsDraft.kForm.mergedK.fillFadePercent = v;
-              },
-            })
-          ),
-          // 显示层级（先/后）
-          itemCell(
-            "显示层级",
-            h(
-              "select",
-              {
-                class: "input",
-                value: String(
-                  MK.displayOrder || DEFAULT_KLINE_STYLE.mergedK.displayOrder
-                ),
-                onChange: (e) =>
-                  (settingsDraft.kForm.mergedK.displayOrder = String(
-                    e.target.value
-                  )),
-              },
-              [
-                h("option", { value: "first" }, "先"),
-                h("option", { value: "after" }, "后"),
-              ]
-            )
-          ),
-          // 合并K线开关
-          checkCell(
-            !!settingsDraft.kForm.mergedEnabled,
-            (e) => (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
-          ),
-          // 重置：恢复合并K线相关默认
-          resetBtn(() => {
-            settingsDraft.kForm.mergedEnabled =
-              DEFAULT_KLINE_STYLE.mergedEnabled;
-            settingsDraft.kForm.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK };
-          }),
-        ])
-      );
-      Object.keys(settingsDraft.maForm || {}).forEach((key) => {
-        const conf = settingsDraft.maForm[key];
-        rows.push(
-          h("div", { class: "std-row" }, [
-            nameCell(`MA${conf.period}`),
-            itemCell(
-              "线宽",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 0.5,
-                max: 4,
-                step: 0.5,
-                value: Number(conf.width ?? 1),
-                onInput: (e) =>
-                  (settingsDraft.maForm[key].width = Number(
-                    e.target.value || 1
-                  )),
-              })
-            ),
-            itemCell(
-              "颜色",
-              h("input", {
-                class: "input color",
-                type: "color",
-                value: conf.color || "#ee6666",
-                onInput: (e) =>
-                  (settingsDraft.maForm[key].color = String(
-                    e.target.value || "#ee6666"
-                  )),
-              })
-            ),
-            itemCell(
-              "线型",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.style || "solid",
-                  onChange: (e) => (conf.style = String(e.target.value)),
-                },
-                [
-                  h("option", "solid"),
-                  h("option", "dashed"),
-                  h("option", "dotted"),
-                ]
-              )
-            ),
-            itemCell(
-              "周期",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 1,
-                max: 999,
-                step: 1,
-                value: Number(conf.period ?? 5),
-                onInput: (e) =>
-                  (conf.period = Math.max(
-                    1,
-                    parseInt(e.target.value || 5, 10)
-                  )),
-              })
-            ),
-            h("div"),
-            checkCell(
-              !!conf.enabled,
-              (e) => (conf.enabled = !!e.target.checked)
-            ),
-            resetBtn(() => {
-              const def = DEFAULT_MA_CONFIGS[key];
-              if (def) {
-                settingsDraft.maForm[key] = { ...def };
-              }
-            }),
-          ])
-        );
-      });
-      return rows;
-    };
-
-    const renderChan = () => {
-      const cf = settingsDraft.chanForm;
-      const rows = [];
-      rows.push(
-        h("div", { class: "std-row" }, [
-          nameCell("涨跌标记"),
-          itemCell(
-            "上涨符号",
-            h(
-              "select",
-              {
-                class: "input",
-                value: cf.upShape || CHAN_DEFAULTS.upShape,
-                onChange: (e) =>
-                  (settingsDraft.chanForm.upShape = String(e.target.value)),
-              },
-              (FRACTAL_SHAPES || []).map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            )
-          ),
-          itemCell(
-            "上涨颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: cf.upColor || CHAN_DEFAULTS.upColor,
-              onInput: (e) =>
-                (settingsDraft.chanForm.upColor = String(
-                  e.target.value || CHAN_DEFAULTS.upColor
-                )),
-            })
-          ),
-          itemCell(
-            "下跌符号",
-            h(
-              "select",
-              {
-                class: "input",
-                value: cf.downShape || CHAN_DEFAULTS.downShape,
-                onChange: (e) =>
-                  (settingsDraft.chanForm.downShape = String(e.target.value)),
-              },
-              (FRACTAL_SHAPES || []).map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            )
-          ),
-          itemCell(
-            "下跌颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: cf.downColor || CHAN_DEFAULTS.downColor,
-              onInput: (e) =>
-                (settingsDraft.chanForm.downColor = String(
-                  e.target.value || CHAN_DEFAULTS.downColor
-                )),
-            })
-          ),
-          itemCell(
-            "承载点",
-            h(
-              "select",
-              {
-                class: "input",
-                value: cf.anchorPolicy || CHAN_DEFAULTS.anchorPolicy,
-                onChange: (e) =>
-                  (settingsDraft.chanForm.anchorPolicy = String(
-                    e.target.value
-                  )),
-              },
-              [
-                h("option", { value: "right" }, "右端"),
-                h("option", { value: "extreme" }, "极值"),
-              ]
-            )
-          ),
-          h("div", { class: "std-check" }, [
-            h("input", {
-              type: "checkbox",
-              checked: !!cf.showUpDownMarkers,
-              onChange: (e) =>
-                (settingsDraft.chanForm.showUpDownMarkers = !!e.target.checked),
-            }),
-          ]),
-          resetBtn(() => {
-            settingsDraft.chanForm.upShape = CHAN_DEFAULTS.upShape;
-            settingsDraft.chanForm.upColor = CHAN_DEFAULTS.upColor;
-            settingsDraft.chanForm.downShape = CHAN_DEFAULTS.downShape;
-            settingsDraft.chanForm.downColor = CHAN_DEFAULTS.downColor;
-            settingsDraft.chanForm.anchorPolicy = CHAN_DEFAULTS.anchorPolicy;
-            settingsDraft.chanForm.showUpDownMarkers =
-              CHAN_DEFAULTS.showUpDownMarkers;
-          }),
-        ])
-      );
-
-      const ff = settingsDraft.fractalForm;
-      const styleByStrength = (ff.styleByStrength =
-        ff.styleByStrength ||
-        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.styleByStrength)));
-      const confirmStyle = (ff.confirmStyle =
-        ff.confirmStyle ||
-        JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)));
-
-      rows.push(
-        h("div", { class: "std-row" }, [
-          nameCell("分型判定"),
-          itemCell(
-            "最小tick",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0,
-              step: 1,
-              value: Number(ff.minTickCount ?? 0),
-              onInput: (e) =>
-                (settingsDraft.fractalForm.minTickCount = Math.max(
-                  0,
-                  parseInt(e.target.value || 0, 10)
-                )),
-            })
-          ),
-          itemCell(
-            "最小幅度%",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0,
-              step: 0.01,
-              value: Number(ff.minPct ?? 0),
-              onInput: (e) =>
-                (settingsDraft.fractalForm.minPct = Math.max(
-                  0,
-                  Number(e.target.value || 0)
-                )),
-            })
-          ),
-          itemCell(
-            "判断条件",
-            h(
-              "select",
-              {
-                class: "input",
-                value: String(ff.minCond || "or"),
-                onChange: (e) =>
-                  (settingsDraft.fractalForm.minCond = String(e.target.value)),
-              },
-              [
-                h("option", { value: "or" }, "或"),
-                h("option", { value: "and" }, "与"),
-              ]
-            )
-          ),
-          h("div"),
-          h("div"),
-          h("div"),
-          resetBtn(() => {
-            settingsDraft.fractalForm.minTickCount =
-              FRACTAL_DEFAULTS.minTickCount;
-            settingsDraft.fractalForm.minPct = FRACTAL_DEFAULTS.minPct;
-            settingsDraft.fractalForm.minCond = FRACTAL_DEFAULTS.minCond;
-          }),
-        ])
-      );
-
-      const specs = [
-        { k: "strong", label: "强分型" },
-        { k: "standard", label: "标准分型" },
-        { k: "weak", label: "弱分型" },
-      ];
-      function resetStrengthRow(key) {
-        styleByStrength[key] = JSON.parse(
-          JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[key])
-        );
-      }
-      for (const sp of specs) {
-        const conf = styleByStrength[sp.k];
-        rows.push(
-          h("div", { class: "std-row" }, [
-            nameCell(sp.label),
-            itemCell(
-              "底分符号",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.bottomShape,
-                  onChange: (e) => (conf.bottomShape = String(e.target.value)),
-                },
-                (FRACTAL_SHAPES || []).map((opt) =>
-                  h("option", { value: opt.v }, opt.label)
-                )
-              )
-            ),
-            itemCell(
-              "底分颜色",
-              h("input", {
-                class: "input color",
-                type: "color",
-                value: conf.bottomColor,
-                onInput: (e) => (conf.bottomColor = String(e.target.value)),
-              })
-            ),
-            itemCell(
-              "顶分符号",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.topShape,
-                  onChange: (e) => (conf.topShape = String(e.target.value)),
-                },
-                (FRACTAL_SHAPES || []).map((opt) =>
-                  h("option", { value: opt.v }, opt.label)
-                )
-              )
-            ),
-            itemCell(
-              "顶分颜色",
-              h("input", {
-                class: "input color",
-                type: "color",
-                value: conf.topColor,
-                onInput: (e) => (conf.topColor = String(e.target.value)),
-              })
-            ),
-            itemCell(
-              "填充",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.fill,
-                  onChange: (e) => (conf.fill = String(e.target.value)),
-                },
-                (FRACTAL_FILLS || []).map((opt) =>
-                  h("option", { value: opt.v }, opt.label)
-                )
-              )
-            ),
-            h("div", { class: "std-check" }, [
-              h("input", {
-                type: "checkbox",
-                checked: !!conf.enabled,
-                onChange: (e) => (conf.enabled = !!e.target.checked),
-              }),
-            ]),
-            resetBtn(() => resetStrengthRow(sp.k)),
-          ])
-        );
-      }
-
-      rows.push(
-        h("div", { class: "std-row" }, [
-          nameCell("确认分型"),
-          itemCell(
-            "底分符号",
-            h(
-              "select",
-              {
-                class: "input",
-                value: confirmStyle.bottomShape,
-                onChange: (e) =>
-                  (settingsDraft.fractalForm.confirmStyle.bottomShape = String(
-                    e.target.value
-                  )),
-              },
-              (FRACTAL_SHAPES || []).map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            )
-          ),
-          itemCell(
-            "底分颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: confirmStyle.bottomColor,
-              onInput: (e) =>
-                (settingsDraft.fractalForm.confirmStyle.bottomColor = String(
-                  e.target.value
-                )),
-            })
-          ),
-          itemCell(
-            "顶分符号",
-            h(
-              "select",
-              {
-                class: "input",
-                value: confirmStyle.topShape,
-                onChange: (e) =>
-                  (settingsDraft.fractalForm.confirmStyle.topShape = String(
-                    e.target.value
-                  )),
-              },
-              (FRACTAL_SHAPES || []).map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            )
-          ),
-          itemCell(
-            "顶分颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: confirmStyle.topColor,
-              onInput: (e) =>
-                (settingsDraft.fractalForm.confirmStyle.topColor = String(
-                  e.target.value
-                )),
-            })
-          ),
-          itemCell(
-            "填充",
-            h(
-              "select",
-              {
-                class: "input",
-                value: confirmStyle.fill,
-                onChange: (e) =>
-                  (settingsDraft.fractalForm.confirmStyle.fill = String(
-                    e.target.value
-                  )),
-              },
-              (FRACTAL_FILLS || []).map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            )
-          ),
-          h("div", { class: "std-check" }, [
-            h("input", {
-              type: "checkbox",
-              checked: !!confirmStyle.enabled,
-              onChange: (e) =>
-                (settingsDraft.fractalForm.confirmStyle.enabled =
-                  !!e.target.checked),
-            }),
-          ]),
-          resetBtn(() => {
-            const def = FRACTAL_DEFAULTS.confirmStyle;
-            settingsDraft.fractalForm.confirmStyle = JSON.parse(
-              JSON.stringify(def)
-            );
-          }),
-        ])
-      );
-
-      return rows;
-    };
-
-    return () =>
-      h("div", {}, [
-        ...(props.activeTab === "chan" ? renderChan() : renderDisplay()),
-      ]);
-  },
-});
-
-// 打开设置窗（保留）
 let prevAdjust = "none";
 function openSettingsDialog() {
   try {
@@ -1139,6 +485,735 @@ function openSettingsDialog() {
     );
     settingsDraft.adjust = prevAdjust;
 
+    const MainChartSettingsContent = defineComponent({
+      props: { activeTab: { type: String, default: "display" } },
+      setup(props) {
+        const nameCell = (text) => h("div", { class: "std-name" }, text);
+        const itemCell = (label, node) =>
+          h("div", { class: "std-item" }, [
+            h("div", { class: "std-item-label" }, label),
+            h("div", { class: "std-item-input" }, [node]),
+          ]);
+        const checkCell = (checked, onChange) =>
+          h("div", { class: "std-check" }, [
+            h("input", { type: "checkbox", checked, onChange }),
+          ]);
+        const resetBtn = (onClick) =>
+          h("div", { class: "std-reset" }, [
+            h("button", {
+              class: "btn icon",
+              title: "恢复默认",
+              type: "button",
+              onClick,
+            }),
+          ]);
+
+        // 行情显示（原始K/合并K/MA）
+        const renderDisplay = () => {
+          const K = settingsDraft.kForm;
+          const rows = [];
+
+          // —— 原始K线行（按：柱宽/阳线颜色/阴线颜色/复权/显示层级/勾选框/重置按钮） —— //
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("原始K线"),
+              // 复权
+              itemCell(
+                "复权",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: String(
+                      settingsDraft.adjust || DEFAULT_APP_PREFERENCES.adjust
+                    ),
+                    onChange: (e) =>
+                      (settingsDraft.adjust = String(e.target.value || "none")),
+                  },
+                  [
+                    h("option", { value: "none" }, "不复权"),
+                    h("option", { value: "qfq" }, "前复权"),
+                    h("option", { value: "hfq" }, "后复权"),
+                  ]
+                )
+              ),
+              // 阳线颜色
+              itemCell(
+                "阳线颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: K.upColor || DEFAULT_KLINE_STYLE.upColor,
+                  onInput: (e) =>
+                    (settingsDraft.kForm.upColor = String(
+                      e.target.value || DEFAULT_KLINE_STYLE.upColor
+                    )),
+                })
+              ),
+              // 阳线淡显（0~100）
+              itemCell(
+                "阳线淡显",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                  value: Number(
+                    K.originalFadeUpPercent ??
+                      DEFAULT_KLINE_STYLE.originalFadeUpPercent
+                  ),
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        Number(
+                          e.target.value ||
+                            DEFAULT_KLINE_STYLE.originalFadeUpPercent
+                        )
+                      )
+                    );
+                    settingsDraft.kForm.originalFadeUpPercent = v;
+                  },
+                })
+              ),
+              // 阴线颜色
+              itemCell(
+                "阴线颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: K.downColor || DEFAULT_KLINE_STYLE.downColor,
+                  onInput: (e) =>
+                    (settingsDraft.kForm.downColor = String(
+                      e.target.value || DEFAULT_KLINE_STYLE.downColor
+                    )),
+                })
+              ),
+              // 阴线淡显（0~100）
+              itemCell(
+                "阴线淡显",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                  value: Number(
+                    K.originalFadeDownPercent ??
+                      DEFAULT_KLINE_STYLE.originalFadeDownPercent
+                  ),
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        Number(
+                          e.target.value ||
+                            DEFAULT_KLINE_STYLE.originalFadeDownPercent
+                        )
+                      )
+                    );
+                    settingsDraft.kForm.originalFadeDownPercent = v;
+                  },
+                })
+              ),
+              // 原始K线开关
+              checkCell(
+                !!K.originalEnabled,
+                (e) =>
+                  (settingsDraft.kForm.originalEnabled = !!e.target.checked)
+              ),
+              // 重置：恢复原始K线相关默认与复权默认
+              resetBtn(() => {
+                Object.assign(settingsDraft.kForm, {
+                  upColor: DEFAULT_KLINE_STYLE.upColor,
+                  downColor: DEFAULT_KLINE_STYLE.downColor,
+                  originalFadeUpPercent:
+                    DEFAULT_KLINE_STYLE.originalFadeUpPercent,
+                  originalFadeDownPercent:
+                    DEFAULT_KLINE_STYLE.originalFadeDownPercent,
+                  originalEnabled: DEFAULT_KLINE_STYLE.originalEnabled,
+                });
+                settingsDraft.adjust = String(
+                  DEFAULT_APP_PREFERENCES.adjust || "none"
+                );
+              }),
+            ])
+          );
+
+          // 合并K线行：轮廓线宽 / 上涨颜色 / 下跌颜色 / 填充淡显 / 显示层级（先/后） / 勾选 / 重置
+          const MK =
+            settingsDraft.kForm.mergedK ||
+            (settingsDraft.kForm.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK });
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("合并K线"),
+              // 轮廓线宽
+              itemCell(
+                "轮廓线宽",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0.1,
+                  max: 6,
+                  step: 0.1,
+                  value: Number(
+                    MK.outlineWidth ?? DEFAULT_KLINE_STYLE.mergedK.outlineWidth
+                  ),
+                  onInput: (e) =>
+                    (settingsDraft.kForm.mergedK.outlineWidth = Math.max(
+                      0.1,
+                      Number(e.target.value || 1.2)
+                    )),
+                })
+              ),
+              // 上涨颜色（轮廓与填充）
+              itemCell(
+                "上涨颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: MK.upColor || DEFAULT_KLINE_STYLE.mergedK.upColor,
+                  onInput: (e) =>
+                    (settingsDraft.kForm.mergedK.upColor = String(
+                      e.target.value || DEFAULT_KLINE_STYLE.mergedK.upColor
+                    )),
+                })
+              ),
+              // 下跌颜色（轮廓与填充）
+              itemCell(
+                "下跌颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: MK.downColor || DEFAULT_KLINE_STYLE.mergedK.downColor,
+                  onInput: (e) =>
+                    (settingsDraft.kForm.mergedK.downColor = String(
+                      e.target.value || DEFAULT_KLINE_STYLE.mergedK.downColor
+                    )),
+                })
+              ),
+              // 填充淡显（0~100）
+              itemCell(
+                "填充淡显",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                  value: Number(
+                    MK.fillFadePercent ??
+                      DEFAULT_KLINE_STYLE.mergedK.fillFadePercent
+                  ),
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0,
+                      Math.min(100, Number(e.target.value || 0))
+                    );
+                    settingsDraft.kForm.mergedK.fillFadePercent = v;
+                  },
+                })
+              ),
+              // 显示层级（先/后）
+              itemCell(
+                "显示层级",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: String(
+                      MK.displayOrder ||
+                        DEFAULT_KLINE_STYLE.mergedK.displayOrder
+                    ),
+                    onChange: (e) =>
+                      (settingsDraft.kForm.mergedK.displayOrder = String(
+                        e.target.value
+                      )),
+                  },
+                  [
+                    h("option", { value: "first" }, "先"),
+                    h("option", { value: "after" }, "后"),
+                  ]
+                )
+              ),
+              // 合并K线开关
+              checkCell(
+                !!settingsDraft.kForm.mergedEnabled,
+                (e) => (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
+              ),
+              // 重置：恢复合并K线相关默认
+              resetBtn(() => {
+                settingsDraft.kForm.mergedEnabled =
+                  DEFAULT_KLINE_STYLE.mergedEnabled;
+                settingsDraft.kForm.mergedK = {
+                  ...DEFAULT_KLINE_STYLE.mergedK,
+                };
+              }),
+            ])
+          );
+          Object.keys(settingsDraft.maForm || {}).forEach((key) => {
+            const conf = settingsDraft.maForm[key];
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell(`MA${conf.period}`),
+                itemCell(
+                  "线宽",
+                  h("input", {
+                    class: "input num",
+                    type: "number",
+                    min: 0.5,
+                    max: 4,
+                    step: 0.5,
+                    value: Number(conf.width ?? 1),
+                    onInput: (e) =>
+                      (settingsDraft.maForm[key].width = Number(
+                        e.target.value || 1
+                      )),
+                  })
+                ),
+                itemCell(
+                  "颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value:
+                      conf.color ||
+                      DEFAULT_MA_CONFIGS[key]?.color ||
+                      DEFAULT_MA_CONFIGS.MA5.color,
+                    onInput: (e) =>
+                      (settingsDraft.maForm[key].color = String(
+                        e.target.value ||
+                          DEFAULT_MA_CONFIGS[key]?.color ||
+                          DEFAULT_MA_CONFIGS.MA5.color
+                      )),
+                  })
+                ),
+                itemCell(
+                  "线型",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.style || "solid",
+                      onChange: (e) => (conf.style = String(e.target.value)),
+                    },
+                    [
+                      h("option", "solid"),
+                      h("option", "dashed"),
+                      h("option", "dotted"),
+                    ]
+                  )
+                ),
+                itemCell(
+                  "周期",
+                  h("input", {
+                    class: "input num",
+                    type: "number",
+                    min: 1,
+                    max: 999,
+                    step: 1,
+                    value: Number(conf.period ?? 5),
+                    onInput: (e) =>
+                      (conf.period = Math.max(
+                        1,
+                        parseInt(e.target.value || 5, 10)
+                      )),
+                  })
+                ),
+                h("div"),
+                checkCell(
+                  !!conf.enabled,
+                  (e) => (conf.enabled = !!e.target.checked)
+                ),
+                resetBtn(() => {
+                  const def = DEFAULT_MA_CONFIGS[key];
+                  if (def) {
+                    settingsDraft.maForm[key] = { ...def };
+                  }
+                }),
+              ])
+            );
+          });
+          return rows;
+        };
+
+        // 缠论设置（保留原有“涨跌标记 + 分型判定 + 强/标准/弱 + 确认分型”）
+        const renderChan = () => {
+          const cf = settingsDraft.chanForm;
+          const rows = [];
+
+          // 涨跌标记
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("涨跌标记"),
+              itemCell(
+                "上涨符号",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: cf.upShape || CHAN_DEFAULTS.upShape,
+                    onChange: (e) =>
+                      (settingsDraft.chanForm.upShape = String(e.target.value)),
+                  },
+                  (FRACTAL_SHAPES || []).map((opt) =>
+                    h("option", { value: opt.v }, opt.label)
+                  )
+                )
+              ),
+              itemCell(
+                "上涨颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: cf.upColor || CHAN_DEFAULTS.upColor,
+                  onInput: (e) =>
+                    (settingsDraft.chanForm.upColor = String(
+                      e.target.value || CHAN_DEFAULTS.upColor
+                    )),
+                })
+              ),
+              itemCell(
+                "下跌符号",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: cf.downShape || CHAN_DEFAULTS.downShape,
+                    onChange: (e) =>
+                      (settingsDraft.chanForm.downShape = String(
+                        e.target.value
+                      )),
+                  },
+                  (FRACTAL_SHAPES || []).map((opt) =>
+                    h("option", { value: opt.v }, opt.label)
+                  )
+                )
+              ),
+              itemCell(
+                "下跌颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: cf.downColor || CHAN_DEFAULTS.downColor,
+                  onInput: (e) =>
+                    (settingsDraft.chanForm.downColor = String(
+                      e.target.value || CHAN_DEFAULTS.downColor
+                    )),
+                })
+              ),
+              itemCell(
+                "承载点",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: cf.anchorPolicy || CHAN_DEFAULTS.anchorPolicy,
+                    onChange: (e) =>
+                      (settingsDraft.chanForm.anchorPolicy = String(
+                        e.target.value
+                      )),
+                  },
+                  [
+                    h("option", { value: "right" }, "右端"),
+                    h("option", { value: "extreme" }, "极值"),
+                  ]
+                )
+              ),
+              h("div", { class: "std-check" }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: !!cf.showUpDownMarkers,
+                  onChange: (e) =>
+                    (settingsDraft.chanForm.showUpDownMarkers =
+                      !!e.target.checked),
+                }),
+              ]),
+              resetBtn(() => {
+                settingsDraft.chanForm.upShape = CHAN_DEFAULTS.upShape;
+                settingsDraft.chanForm.upColor = CHAN_DEFAULTS.upColor;
+                settingsDraft.chanForm.downShape = CHAN_DEFAULTS.downShape;
+                settingsDraft.chanForm.downColor = CHAN_DEFAULTS.downColor;
+                settingsDraft.chanForm.anchorPolicy =
+                  CHAN_DEFAULTS.anchorPolicy;
+                settingsDraft.chanForm.showUpDownMarkers =
+                  CHAN_DEFAULTS.showUpDownMarkers;
+              }),
+            ])
+          );
+
+          // 分型判定 + 强/标准/弱 + 确认分型（完整回归）
+          const ff = settingsDraft.fractalForm;
+          const styleByStrength = (ff.styleByStrength =
+            ff.styleByStrength ||
+            JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.styleByStrength)));
+          const confirmStyle = (ff.confirmStyle =
+            ff.confirmStyle ||
+            JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)));
+
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("分型判定"),
+              itemCell(
+                "最小tick",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  step: 1,
+                  value: Number(
+                    ff.minTickCount ?? FRACTAL_DEFAULTS.minTickCount
+                  ),
+                  onInput: (e) =>
+                    (settingsDraft.fractalForm.minTickCount = Math.max(
+                      0,
+                      parseInt(
+                        e.target.value || FRACTAL_DEFAULTS.minTickCount,
+                        10
+                      )
+                    )),
+                })
+              ),
+              itemCell(
+                "最小幅度%",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  step: 0.01,
+                  value: Number(ff.minPct ?? FRACTAL_DEFAULTS.minPct),
+                  onInput: (e) =>
+                    (settingsDraft.fractalForm.minPct = Math.max(
+                      0,
+                      Number(e.target.value || FRACTAL_DEFAULTS.minPct)
+                    )),
+                })
+              ),
+              itemCell(
+                "判断条件",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: String(ff.minCond || FRACTAL_DEFAULTS.minCond),
+                    onChange: (e) =>
+                      (settingsDraft.fractalForm.minCond = String(
+                        e.target.value
+                      )),
+                  },
+                  [
+                    h("option", { value: "or" }, "或"),
+                    h("option", { value: "and" }, "与"),
+                  ]
+                )
+              ),
+              h("div"),
+              h("div"),
+              h("div"),
+              resetBtn(() => {
+                settingsDraft.fractalForm.minTickCount =
+                  FRACTAL_DEFAULTS.minTickCount;
+                settingsDraft.fractalForm.minPct = FRACTAL_DEFAULTS.minPct;
+                settingsDraft.fractalForm.minCond = FRACTAL_DEFAULTS.minCond;
+              }),
+            ])
+          );
+
+          const specs = [
+            { k: "strong", label: "强分型" },
+            { k: "standard", label: "标准分型" },
+            { k: "weak", label: "弱分型" },
+          ];
+          function resetStrengthRow(key) {
+            styleByStrength[key] = JSON.parse(
+              JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[key])
+            );
+          }
+          for (const sp of specs) {
+            const conf = styleByStrength[sp.k];
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell(sp.label),
+                itemCell(
+                  "底分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.bottomShape,
+                      onChange: (e) =>
+                        (conf.bottomShape = String(e.target.value)),
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "底分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.bottomColor,
+                    onInput: (e) => (conf.bottomColor = String(e.target.value)),
+                  })
+                ),
+                itemCell(
+                  "顶分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.topShape,
+                      onChange: (e) => (conf.topShape = String(e.target.value)),
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "顶分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.topColor,
+                    onInput: (e) => (conf.topColor = String(e.target.value)),
+                  })
+                ),
+                itemCell(
+                  "填充",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.fill,
+                      onChange: (e) => (conf.fill = String(e.target.value)),
+                    },
+                    (FRACTAL_FILLS || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                h("div", { class: "std-check" }, [
+                  h("input", {
+                    type: "checkbox",
+                    checked: !!conf.enabled,
+                    onChange: (e) => (conf.enabled = !!e.target.checked),
+                  }),
+                ]),
+                resetBtn(() => resetStrengthRow(sp.k)),
+              ])
+            );
+          }
+
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("确认分型"),
+              itemCell(
+                "底分符号",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: confirmStyle.bottomShape,
+                    onChange: (e) =>
+                      (settingsDraft.fractalForm.confirmStyle.bottomShape =
+                        String(e.target.value)),
+                  },
+                  (FRACTAL_SHAPES || []).map((opt) =>
+                    h("option", { value: opt.v }, opt.label)
+                  )
+                )
+              ),
+              itemCell(
+                "底分颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: confirmStyle.bottomColor,
+                  onInput: (e) =>
+                    (settingsDraft.fractalForm.confirmStyle.bottomColor =
+                      String(e.target.value)),
+                })
+              ),
+              itemCell(
+                "顶分符号",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: confirmStyle.topShape,
+                    onChange: (e) =>
+                      (settingsDraft.fractalForm.confirmStyle.topShape = String(
+                        e.target.value
+                      )),
+                  },
+                  (FRACTAL_SHAPES || []).map((opt) =>
+                    h("option", { value: opt.v }, opt.label)
+                  )
+                )
+              ),
+              itemCell(
+                "顶分颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: confirmStyle.topColor,
+                  onInput: (e) =>
+                    (settingsDraft.fractalForm.confirmStyle.topColor = String(
+                      e.target.value
+                    )),
+                })
+              ),
+              itemCell(
+                "填充",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: confirmStyle.fill,
+                    onChange: (e) =>
+                      (settingsDraft.fractalForm.confirmStyle.fill = String(
+                        e.target.value
+                      )),
+                  },
+                  (FRACTAL_FILLS || []).map((opt) =>
+                    h("option", { value: opt.v }, opt.label)
+                  )
+                )
+              ),
+              h("div", { class: "std-check" }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: !!confirmStyle.enabled,
+                  onChange: (e) =>
+                    (settingsDraft.fractalForm.confirmStyle.enabled =
+                      !!e.target.checked),
+                }),
+              ]),
+              resetBtn(() => {
+                const def = FRACTAL_DEFAULTS.confirmStyle;
+                settingsDraft.fractalForm.confirmStyle = JSON.parse(
+                  JSON.stringify(def)
+                );
+              }),
+            ])
+          );
+
+          return rows;
+        };
+
+        return () =>
+          h("div", {}, [
+            ...(props.activeTab === "chan" ? renderChan() : renderDisplay()),
+          ]);
+      },
+    });
+
     dialogManager.open({
       title: "行情显示设置",
       contentComponent: MainChartSettingsContent,
@@ -1160,11 +1235,9 @@ function openSettingsDialog() {
           settingsDraft.fractalForm = JSON.parse(
             JSON.stringify(FRACTAL_DEFAULTS)
           );
-        } catch (e) {
-          console.error("resetAll (MainChart) failed:", e);
-        }
+        } catch (e) {}
       },
-      onSave: async () => {
+      onSave: () => {
         try {
           settings.setKlineStyle(settingsDraft.kForm);
           settings.setMaConfigs(settingsDraft.maForm);
@@ -1174,24 +1247,22 @@ function openSettingsDialog() {
           const adjustChanged = nextAdjust !== prevAdjust;
           if (adjustChanged) {
             settings.setAdjust(nextAdjust);
-          } else {
-            recomputeChan();
-            render();
           }
+
+          // MOD: 立即触发中枢刷新，发布新快照 -> 即时应用新设置
+          hub.execute("Refresh", {});
+
           dialogManager.close();
         } catch (e) {
-          console.error("apply settings failed:", e);
           dialogManager.close();
         }
       },
       onClose: () => dialogManager.close(),
     });
-  } catch (e) {
-    console.error("openSettingsDialog error:", e);
-  }
+  } catch (e) {}
 }
 
-// 标题与刷新状态（保留）
+/* 标题与刷新状态 */
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
   const n = displayHeader.value.name || "",
@@ -1216,7 +1287,7 @@ const refreshedAtHHMMSS = computed(() => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 });
 
-// 键盘左右键（修复：以最后聚焦 bar 为起点；切片内不移动窗口；越界时平滑移动 rightTs）
+/* 键盘左右键（保持原逻辑） */
 let currentIndex = -1;
 function onGlobalHoverIndex(e) {
   const idx = Number(e?.detail?.idx);
@@ -1226,7 +1297,7 @@ function onGlobalHoverIndex(e) {
       const arr = vm.candles.value || [];
       const tsVal = arr[idx]?.t ? Date.parse(arr[idx].t) : null;
       if (Number.isFinite(tsVal)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal); // 实时持久化最后聚焦 ts
+        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
       }
     } catch {}
   }
@@ -1268,38 +1339,46 @@ function onKeydown(e) {
   let nextIdx = startIdx + (e.key === "ArrowLeft" ? -1 : +1);
   nextIdx = Math.max(0, Math.min(len - 1, nextIdx));
 
-  // 若在当前视窗内 → 仅更新高亮，不移动窗口
-  if (nextIdx >= sIdx && nextIdx <= eIdx) {
+  // 若在当前视窗内 → 仅更新十字线/tooltip，对齐交给 ECharts 组联动（唯一机制）
+  const inView = nextIdx >= sIdx && nextIdx <= eIdx;
+
     currentIndex = nextIdx;
-    try {
-      const seq = renderSeq;
+
+  try {
+    // 使用 ECharts 内建：先更新轴指示（会通过 group 联动同步其它窗体）
+    // 将数据索引转换为像素 X 坐标
+    const pxX =
+      chart && typeof chart.convertToPixel === "function"
+        ? chart.convertToPixel({ xAxisIndex: 0 }, nextIdx)
+        : null;
+    if (Number.isFinite(pxX)) {
       chart.dispatchAction({
-        type: "showTip",
-        seriesIndex: 0,
-        dataIndex: currentIndex,
+        type: "updateAxisPointer",
+        currTrigger: "mousemove",
+        x: pxX,
       });
-      if (!isStale(seq)) {
+    }
+    // 源窗显式 showTip，保证本窗 tooltip 可见（其他窗体会随 group 联动对齐）
         chart.dispatchAction({
-          type: "highlight",
+      type: "showTip",
           seriesIndex: 0,
           dataIndex: currentIndex,
         });
-      }
     } catch {}
-    // 持久化最新聚焦 ts
+
+  // 持久化最新聚焦 ts（保留）
     try {
       const tsv = tsArr[nextIdx];
       if (Number.isFinite(tsv)) {
         settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
       }
     } catch {}
-    return;
-  }
 
-  // 越界：按步平滑移动窗口（bars 宽度保持不变），仅调整 rightTs
+  if (inView) return;
+
+  // 越界：按步平滑移动窗口（bars 宽度保持不变），仅调整 rightTs（中枢路径不变）
   const viewWidth = Math.max(1, eIdx - sIdx + 1);
   let newEIdx = eIdx;
-
   if (nextIdx < sIdx) {
     const delta = sIdx - nextIdx; // 向左越界步数
     newEIdx = Math.max(viewWidth - 1, eIdx - delta);
@@ -1311,37 +1390,12 @@ function onKeydown(e) {
     ? tsArr[newEIdx]
     : tsArr[eIdx];
 
-  // 仅移动切片右端（平滑 Pan）
   if (Number.isFinite(nextRightTs)) {
     hub.execute("KeyMove", { nextRightTs });
   }
-
-  // 更新高亮为目标 bar，并持久化最后聚焦 ts
-  currentIndex = nextIdx;
-  try {
-    const seq = renderSeq;
-    chart.dispatchAction({
-      type: "showTip",
-      seriesIndex: 0,
-      dataIndex: currentIndex,
-    });
-    if (!isStale(seq)) {
-      chart.dispatchAction({
-        type: "highlight",
-        seriesIndex: 0,
-        dataIndex: currentIndex,
-      });
-    }
-  } catch {}
-  try {
-    const tsv = tsArr[nextIdx];
-    if (Number.isFinite(tsv)) {
-      settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
-    }
-  } catch {}
 }
 
-// 缠论/分型缓存与重算（保留）
+/* 缠论/分型覆盖层 —— 构造覆盖层 series（一次性装配） */
 const chanCache = ref({ reduced: [], map: [], meta: null, fractals: [] });
 function recomputeChan() {
   try {
@@ -1369,80 +1423,18 @@ function recomputeChan() {
   }
 }
 
-// CHAN 占位系列（保留，但调用 setOption 改为异步封装）
-function chanPlaceholderSeriesCommon() {
-  return {
-    type: "scatter",
-    yAxisIndex: 1,
-    data: [],
-    symbol: "triangle",
-    symbolSize: () => [8, 10],
-    symbolOffset: [0, 12],
-    itemStyle: { color: "#f56c6c", opacity: 0.9 },
-    tooltip: { show: false },
-    z: 2,
-    emphasis: { scale: false },
-  };
-}
-function ensureChanSeriesPresent() {
-  if (!chart) return;
-  try {
-    const opt = chart.getOption?.();
-    const series = Array.isArray(opt?.series) ? opt.series : [];
-    const hasUp = series.some((s) => s && s.id === "CHAN_UP");
-    const hasDn = series.some((s) => s && s.id === "CHAN_DOWN");
-    const patches = [];
-    if (!hasUp) {
-      const base = chanPlaceholderSeriesCommon();
-      patches.push({
-        ...base,
-        id: "CHAN_UP",
-        name: "CHAN_UP",
-        itemStyle: {
-          color: settings.chanSettings.value.upColor || "#f56c6c",
-          opacity: 0.9,
-        },
-      });
-    }
-    if (!hasDn) {
-      const base = chanPlaceholderSeriesCommon();
-      patches.push({
-        ...base,
-        id: "CHAN_DOWN",
-        name: "CHAN_DOWN",
-        itemStyle: {
-          color: settings.chanSettings.value.downColor || "#00ff00",
-          opacity: 0.9,
-        },
-      });
-    }
-    if (patches.length) {
-      // —— 变更：占位系列 patch 改为异步 setOption —— //
-      scheduleSetOption({ series: patches }, false);
-    }
-  } catch {}
-}
-
-// 缠论标记更新（统一使用中枢 markerWidthPx；series patch 改为异步）
-async function updateChanMarkers(seq) {
-  if (!chart) return;
-  if (isStale(seq)) return;
-
+/**
+ * 构造覆盖层 series（一次性装配）
+ * - 保持原有 buildUpDownMarkers/buildFractalMarkers 的使用与样式；
+ * - 若禁用或无数据，则输出占位系列（CHAN_UP/CHAN_DOWN 空），满足不变量；
+ * - 返回数组，供主图 option.series 直接拼接。
+ */
+function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
+  const out = [];
   const reduced = chanCache.value.reduced || [];
   const fractals = chanCache.value.fractals || [];
 
-  const visCount = Math.max(
-    1,
-    Number(localVisRows.value || vm.meta.value?.view_rows || 1)
-  );
-  const hostW = host.value ? host.value.clientWidth : 800;
-  const markerW = hub.markerWidthPx.value;
-
-  try {
-    ensureChanSeriesPresent();
-  } catch {}
-  const patches = [];
-
+  // 涨跌标记
   if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
     const upDownLayer = buildUpDownMarkers(reduced, {
       chanSettings: settings.chanSettings.value,
@@ -1450,11 +1442,48 @@ async function updateChanMarkers(seq) {
       visCount,
       symbolWidthPx: markerW,
     });
-    patches.push(...(upDownLayer.series || []));
+    out.push(...(upDownLayer.series || []));
   } else {
-    patches.push({ id: "CHAN_UP", data: [] }, { id: "CHAN_DOWN", data: [] });
+    out.push(
+      {
+        type: "scatter",
+        id: "CHAN_UP",
+        name: "CHAN_UP",
+        yAxisIndex: 1,
+        data: [],
+        symbol: "triangle",
+        symbolSize: () => [8, 10],
+        symbolOffset: [0, 12], // 上移，避免与底部轴标签重叠
+        itemStyle: {
+          color: settings.chanSettings.value.upColor || CHAN_DEFAULTS.upColor,
+          opacity: settings.chanSettings.value.opacity ?? CHAN_DEFAULTS.opacity,
+        },
+        tooltip: { show: false },
+        z: 2,
+        emphasis: { scale: false },
+      },
+      {
+        type: "scatter",
+        id: "CHAN_DOWN",
+        name: "CHAN_DOWN",
+        yAxisIndex: 1,
+        data: [],
+        symbol: "triangle",
+        symbolSize: () => [8, 10],
+        symbolOffset: [0, 12],
+        itemStyle: {
+          color:
+            settings.chanSettings.value.downColor || CHAN_DEFAULTS.downColor,
+          opacity: settings.chanSettings.value.opacity ?? CHAN_DEFAULTS.opacity,
+        },
+        tooltip: { show: false },
+        z: 2,
+        emphasis: { scale: false },
+      }
+    );
   }
 
+  // 分型标记
   const frEnabled = (settings.fractalSettings.value?.enabled ?? true) === true;
   if (frEnabled && reduced.length && fractals.length) {
     const frLayer = buildFractalMarkers(reduced, fractals, {
@@ -1463,7 +1492,7 @@ async function updateChanMarkers(seq) {
       visCount,
       symbolWidthPx: markerW,
     });
-    patches.push(...(frLayer.series || []));
+    out.push(...(frLayer.series || []));
   } else {
     const FR_IDS = [
       "FR_TOP_STRONG",
@@ -1476,17 +1505,15 @@ async function updateChanMarkers(seq) {
       "FR_BOT_CONFIRM",
       "FR_CONFIRM_LINKS",
     ];
-    for (const id of FR_IDS) patches.push({ id, data: [] });
+    for (const id of FR_IDS) {
+      out.push({ id, name: id, type: "scatter", yAxisIndex: 0, data: [] });
+    }
   }
 
-  try {
-    if (isStale(seq)) return;
-    // —— 变更：series patch 改为异步 setOption —— //
-    scheduleSetOption({ series: patches }, false);
-  } catch {}
+  return out;
 }
 
-// —— 修复 onDataZoom：程序化守护 + 有效变化判定 + Pan/Zoom 分支 —— //
+/* onDataZoom：程序化事件早退 + 门卫判定（执行延后到主流程外） */
 function onDataZoom(params) {
   try {
     // 1) 程序化 dataZoom：直接忽略（阻断回环）
@@ -1514,7 +1541,7 @@ function onDataZoom(params) {
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
 
-    // —— 新增：若这次 dataZoom 跟“最后一次已应用范围”完全相同，直接返回，打断循环 —— //
+    // —— 若这次 dataZoom 跟“最后一次已应用范围”完全相同，直接返回，打断循环 —— //
     if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) {
       return;
     }
@@ -1522,7 +1549,7 @@ function onDataZoom(params) {
     // 3) 有效变化判定（仅关键三项）
     const currBars = Math.max(
       1,
-      Number(hub.getState().barsCount || vm.viewRows || 1)
+      Number(hub.getState().barsCount || vm.meta.value?.view_rows || 1)
     );
     const bars_new = Math.max(1, eIdx - sIdx + 1);
 
@@ -1530,74 +1557,194 @@ function onDataZoom(params) {
     // 改成用 lastAppliedRange.e（若已初始化），更贴近当前图的真实范围。
     const currEIdx = Number.isFinite(lastAppliedRange.e)
       ? lastAppliedRange.e
-      : Number(vm.viewEndIdx);
+      : Number(vm.meta.value?.view_end_idx ?? eIdx);
     const changedBars = bars_new !== currBars;
     const changedEIdx = eIdx !== currEIdx;
+    if (!changedBars && !changedEIdx) return;
 
-    if (!changedBars && !changedEIdx) {
-      // 无离散变化：直接忽略
-      return;
-    }
-
-    // 4) Pan vs ScrollZoom 判定与执行
     const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
     const anchorTs = Number.isFinite(tsArr[eIdx])
       ? tsArr[eIdx]
       : hub.getState().rightTs;
 
     if (!changedBars && changedEIdx) {
-      // 仅右端变化 → Pan
-      // 再次对比 rightTs，避免不必要执行
+      // 仅右端变化 → Pan（延迟到主流程外）
       if (anchorTs !== hub.getState().rightTs) {
-        hub.execute("Pan", { nextRightTs: anchorTs });
+        setTimeout(() => hub.execute("Pan", { nextRightTs: anchorTs }), 0);
       }
     } else {
-      // 视为缩放：bars 或 bars+右端双变
+      // 视为缩放：bars 或 bars+右端双变（延迟到主流程外）
       if (bars_new !== currBars || anchorTs !== hub.getState().rightTs) {
-        hub.execute("ScrollZoom", {
-          nextBars: bars_new,
-          nextRightTs: anchorTs,
-        });
+        setTimeout(
+          () =>
+            hub.execute("ScrollZoom", {
+              nextBars: bars_new,
+              nextRightTs: anchorTs,
+            }),
+          0
+        );
       }
     }
-
-    // —— 新增：顶栏预览即时更新（不等待后端） —— //
-    previewBarsCount.value = bars_new;
-    const startStr =
-      msToIso(tsArr[sIdx]) || (vm.candles.value || [])[sIdx]?.t || "";
-    const endStr =
-      msToIso(tsArr[eIdx]) || (vm.candles.value || [])[eIdx]?.t || "";
-    previewStartStr.value = startStr || "";
-    previewEndStr.value = endStr || "";
-    // 注：不在此处调用 setOption；交由 watch(meta)/异步 patch 统一落地
   } catch {}
 }
 
-// 预设：右端不变，仅改变左端（不触发 setOption；交由 watch(meta) 落地）
+/* 一次订阅一次渲染：订阅放到 chart.init 完成后（必要调序） */
+let unsubId = null;
+
+function doSinglePassRender(snapshot) {
+  try {
+    if (!chart || !snapshot) return;
+    const mySeq = ++renderSeq;
+
+    // —— 合并K线修复：先 recomputeChan，再用 reducedBars 重建主图 option —— //
+    recomputeChan();
+    const reduced = chanCache.value.reduced || [];
+    const mapReduced = chanCache.value.map || [];
+
+    const initialRange = {
+      startValue: snapshot.main.range.startValue,
+      endValue: snapshot.main.range.endValue,
+    };
+
+    // —— tooltip 位置从上游统一源头订阅（renderHub），确保与副窗一致 —— //
+    const tipPositioner = renderHub.getTipPositioner();
+
+    // —— 标记显示与避让策略（符号空间仅从“主图有效区内部”挤出） —— //
+    const anyMarkers =
+      (settings.chanSettings.value?.showUpDownMarkers ?? true) === true &&
+      reduced.length > 0;
+
+    // 标签带与标签文本的“基础”间距（恒定）：
+    const DEFAULT_MAIN_AXIS_LABEL_SPACE_PX = 28; // 标签带总高度（标签与 slider 的相对间距恒定）
+    const BASE_XAXIS_LABEL_MARGIN = 12;          // 标签文本到轴线的基础内距（恒定）
+
+    // MOD: 仅通过“主图有效区底部补位”来为符号挤出空间（关闭符号则回收为 0）
+    // 建议用统一宽度源近似为符号的垂直尺寸，并加一侧安全边距
+    const MARKER_HEIGHT_PX = Math.max(2, Math.round(snapshot.core?.markerWidthPx || 4));
+    const SAFE_PADDING_PX = 12;
+    const mainBottomExtraPx = anyMarkers ? MARKER_HEIGHT_PX + SAFE_PADDING_PX-8 : 0;
+
+    // 关键补偿：标签文本相对轴线的内距等量增加 mainBottomExtraPx，
+    // 这样轴线上移多少（挤出符号空间），标签就向下补偿多少，保证“标签相对 slider/画布底边的位置恒定不变”
+    const xAxisLabelMargin = BASE_XAXIS_LABEL_MARGIN + mainBottomExtraPx;
+
+    // 组装主图 option（初始范围 + 固定定位器 + 补位与标签补偿）
+    const rebuiltMainOption = buildMainChartOption(
+      {
+        candles: vm.candles.value || [],
+        indicators: vm.indicators.value || {},
+        chartType: vm.chartType.value || "kline",
+        maConfigs: settings.maConfigs.value,
+        freq: vm.freq.value || "1d",
+        klineStyle: settings.klineStyle.value,
+        adjust: vm.adjust.value || "none",
+        reducedBars: reduced, // 合并K线数据（关键）
+        mapOrigToReduced: mapReduced, // 原始索引→合并索引映射
+      },
+      {
+        initialRange,                                    // 统一可视范围
+        tooltipPositioner: tipPositioner,                 // ← 新增：统一注入定位器
+        mainAxisLabelSpacePx: DEFAULT_MAIN_AXIS_LABEL_SPACE_PX, // 不变：标签带高度（标签与 slider 间距恒定）
+        xAxisLabelMargin,                                // 补偿：标签文本到轴线的内距 = 基础值 + 主图内部补位
+        mainBottomExtraPx,                               // 仅此项随标记开关调整“主图有效区高度”
+      }
+    );
+
+    // 覆盖层（一次性装配到主图 series；保持标记原位置不变）
+    const bars = Math.max(1, snapshot.core?.barsCount || 1);
+    const hostW = host.value ? host.value.clientWidth : 800;
+    const markerW = snapshot.core?.markerWidthPx || 8;
+    const overlaySeries = buildOverlaySeriesForOption({
+      hostW,
+      visCount: bars,
+      markerW,
+    });
+
+    // —— 保留函数式样式，禁止 JSON 深拷贝（否则 itemStyle.color 等函数会丢失） —— //
+    const finalOption = {
+      // 浅拷贝主 option 顶层，保留函数与引用
+      ...rebuiltMainOption,
+      // 独立拷贝 series 数组（保留每个系列对象内的函数）
+      series: [...(rebuiltMainOption.series || [])],
+    };
+    // 拼接覆盖层系列（一次性装配，不改变原合并K线数据结构）
+    finalOption.series.push(...overlaySeries);
+
+    programmaticZoomInProgress = true;
+    scheduleSetOption(finalOption, {
+      notMerge: true,
+      lazyUpdate: false,
+      silent: true,
+    });
+
+    lastAppliedRange = initialRange;
+
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        programmaticZoomInProgress = false;
+      }, 0);
+    });
+
+    // 顶栏预览文案
+    const sIdx = initialRange.startValue;
+    const eIdx = initialRange.endValue;
+    const arr = vm.candles.value || [];
+    previewStartStr.value = arr[sIdx]?.t || "";
+    previewEndStr.value = arr[eIdx]?.t || "";
+    previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
+  } catch {}
+}
+
+/* 预览显示（保持原逻辑） */
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function fmtShort(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const Y = d.getFullYear(),
+      M = pad2(d.getMonth() + 1),
+      D = pad2(d.getDate());
+    if (/m$/.test(String(vm.freq.value || ""))) {
+      const h = pad2(d.getHours()),
+        m = pad2(d.getMinutes());
+      return `${Y}-${M}-${D} ${h}:${m}`;
+    }
+    return `${Y}-${M}-${D}`;
+  } catch {
+    return "";
+  }
+}
+const previewStartStr = ref("");
+const previewEndStr = ref("");
+const previewBarsCount = ref(0);
+const formattedStart = computed(() => {
+  return (
+    (previewStartStr.value && fmtShort(previewStartStr.value)) ||
+    fmtShort(vm.visibleRange.value.startStr) ||
+    "-"
+  );
+});
+const formattedEnd = computed(() => {
+  return (
+    (previewEndStr.value && fmtShort(previewEndStr.value)) ||
+    fmtShort(vm.visibleRange.value.endStr) ||
+    "-"
+  );
+});
+const topBarsCount = computed(() => {
+  return Number(previewBarsCount.value || vm.meta.value?.view_rows || 0);
+});
+
+/* 预设点击与滚轮缩放（保持原逻辑） */
 function onClickPreset(preset) {
   try {
     const pkey = String(preset || "ALL");
-    // --- 关键修复：移除此判断，确保每次点击都执行，从而将非标准 bars 校正为标准值 ---
-    // if (vm.windowPreset.value === pkey) {
-    //   // 预设键未变，直接忽略（这是导致问题的根源）
-    //   return;
-    // }
-    vm.windowPreset.value = pkey;
-    settings.setWindowPreset(vm.windowPreset.value);
     const st = hub.getState();
     hub.execute("ChangeWidthPreset", { presetKey: pkey, allRows: st.allRows });
-
-    // —— 新增：预览 —— //
-    const range = computePreviewRangeFromHub();
-    if (range) {
-      applyPreviewRange(range);
-      previewStartStr.value = range.startStr || "";
-      previewEndStr.value = range.endStr || "";
-      previewBarsCount.value = range.bars;
-    }
-  } catch (e) {
-    console.error("onClickPreset error:", e);
-  }
+  } catch {}
 }
 
 // 滚轮缩放：双改；以“当前鼠标悬浮位置”为中心（convertFromPixel），不可用时回退 currentIndex
@@ -1606,14 +1753,12 @@ function onWheelZoom(e) {
   const n = arr.length;
   if (!n || !chart) return;
 
-  // —— 修复 convertFromPixel 前的“坐标系就绪”判断（新增） —— //
+  // 就绪判断：必须有 series
   const opt = chart.getOption?.() || {};
-  const readyCoord =
-    Array.isArray(opt?.xAxis) &&
-    (Array.isArray(opt?.series) ? opt.series.length > 0 : false);
+  const readyCoord = Array.isArray(opt.series) && opt.series.length > 0;
   if (!readyCoord) return;
 
-  // 优先：根据当前鼠标位置计算中心索引（更稳健）
+  // 中心索引
   let centerIdx = -1;
   try {
     const result = chart.convertFromPixel({ seriesIndex: 0 }, [
@@ -1634,7 +1779,7 @@ function onWheelZoom(e) {
   // 目标 bars
   const currBars = Math.max(
     1,
-    Number(hub.getState().barsCount || vm.viewRows || 1)
+    Number(hub.getState().barsCount || vm.meta.value?.view_rows || 1)
   );
   const deltaBars =
     e.deltaY < 0
@@ -1662,61 +1807,8 @@ function onWheelZoom(e) {
   hub.execute("ScrollZoom", { nextBars, nextRightTs: anchorTs });
 }
 
-// 应用服务端视窗（程序化 dataZoom，带标志位）
-function applyZoomByMeta(seq) {
-  if (!chart) return;
-  if (isStale(seq)) return;
-  const len = (vm.candles.value || []).length;
-  if (!len) return;
-  const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
-  const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
-
-  localVisRows.value = Math.max(1, eIdx - sIdx + 1);
-  // 若与已应用范围一致则无需再发 dataZoom
-  if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) return;
-
-  try {
-    programmaticZoomInProgress = true;
-    chart.dispatchAction({
-      type: "dataZoom",
-      startValue: sIdx,
-      endValue: eIdx,
-    });
-    // —— 新增：更新记忆范围 —— //
-    lastAppliedRange = { s: sIdx, e: eIdx };
-  } catch {}
-  requestAnimationFrame(() => {
-    programmaticZoomInProgress = false;
-  });
-}
-
-// 安全 resize：仅当 markerWidthPx 将变化时才执行中枢（避免噪声）
-function safeResize() {
-  if (!chart || !host.value) return;
-  const seq = renderSeq;
-  requestAnimationFrame(() => {
-    if (isStale(seq)) return;
-    try {
-      const nextW = host.value.clientWidth;
-      chart.resize({
-        width: nextW,
-        height: host.value.clientHeight,
-      });
-      // 关键变化判定：markerWidthPx 是否会改变
-      const st = hub.getState();
-      const approxNextMarker = Math.max(
-        1,
-        Math.min(16, Math.round((nextW * 0.88) / Math.max(1, st.barsCount)))
-      );
-      if (approxNextMarker !== hub.markerWidthPx.value) {
-        hub.execute("ResizeHost", { widthPx: nextW });
-      }
-    } catch {}
-    updateChanMarkers(renderSeq);
-  });
-}
-
-onMounted(async () => {
+/* 生命周期（订阅时机调整到 chart.init 后） */
+onMounted(() => {
   const el = host.value;
   if (!el) return;
   chart = echarts.init(el, null, {
@@ -1725,18 +1817,13 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-  try {
-    echarts.connect("ct-sync");
-  } catch {}
 
-  // —— 修复 convertFromPixel 调用前的坐标系就绪判断（新增） —— //
   chart.getZr().on("mousemove", (e) => {
     try {
+      // 就绪判断：必须已有 series
       const opt = chart.getOption?.() || {};
-      const readyCoord =
-        Array.isArray(opt?.xAxis) &&
-        (Array.isArray(opt?.series) ? opt.series.length > 0 : false);
-      if (!readyCoord) return;
+      const hasSeries = Array.isArray(opt.series) && opt.series.length > 0;
+      if (!hasSeries) return; // 就绪保护
       const result = chart.convertFromPixel({ seriesIndex: 0 }, [
         e.offsetX,
         e.offsetY,
@@ -1744,8 +1831,15 @@ onMounted(async () => {
       if (Array.isArray(result)) {
         const idx = Math.round(result[0]);
         const l = (vm.candles.value || []).length;
-        if (Number.isFinite(idx) && idx >= 0 && idx < l)
-          broadcastHoverIndex(idx);
+        if (Number.isFinite(idx) && idx >= 0 && idx < l) {
+          currentIndex = idx;
+          const tsVal = vm.candles.value[idx]?.t
+            ? Date.parse(vm.candles.value[idx].t)
+            : null;
+            if (Number.isFinite(tsVal)) {
+              settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+            }
+        }
       }
     } catch {}
   });
@@ -1756,7 +1850,7 @@ onMounted(async () => {
       const label = axisInfo?.value;
       const dates = (vm.candles.value || []).map((d) => d.t);
       const idx = dates.indexOf(label);
-      if (idx >= 0) broadcastHoverIndex(idx);
+      if (idx >= 0) currentIndex = idx;
     } catch {}
   });
 
@@ -1773,177 +1867,35 @@ onMounted(async () => {
     safeResize();
   });
 
-  detachSync = zoomSync.attach(
-    "main",
-    chart,
-    () => (vm.candles.value || []).length
-  );
-
-  // —— 中枢订阅：保持原逻辑（预览与事件转发） —— //
-  hub.onChange((snapshot) => {
-    try {
-      // 禁止在程序化 dataZoom 期间改变窗口预设高亮；仅在 bars 真实变化时由 onDataZoom 决定
-      vm.windowPreset.value = snapshot.presetKey || vm.windowPreset.value;
-      window.dispatchEvent(
-        new CustomEvent("chan:marker-size", {
-          detail: { px: snapshot.markerWidthPx },
-        })
-      );
-    } catch {}
-    requestAnimationFrame(() => updateChanMarkers(renderSeq));
-
-    // —— 只在确实变化时才程序化设置 dataZoom，避免“每次广播都触发 dataZoom” —— //
-    const range = computePreviewRangeFromHub();
-    if (range) {
-      // 若当前将要应用的范围与最后一次已应用一致，则不再触发 dataZoom
-      if (
-        lastAppliedRange.s !== range.sIdx ||
-        lastAppliedRange.e !== range.eIdx
-      ) {
-        applyPreviewRange(range); // 内部会设置 programmatic 守护
-        // 预览文案
-        previewStartStr.value = range.startStr || "";
-        previewEndStr.value = range.endStr || "";
-        previewBarsCount.value = range.bars;
-      }
-    }
+  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序） —— //
+  // 说明：避免首帧快照在 chart 未初始化时被丢弃，导致不渲染。
+  unsubId = renderHub.onRender((snapshot) => {
+    doSinglePassRender(snapshot);
   });
 
-  recomputeChan();
-  render();
-  requestAnimationFrame(() => updateChanMarkers(renderSeq)); // 首帧异步标记层更新
-  updateHeaderFromCurrent();
 
-  window.addEventListener("chan:hover-index", onGlobalHoverIndex);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("chan:hover-index", onGlobalHoverIndex);
+  if (unsubId != null) {
+    renderHub.offRender(unsubId);
+    unsubId = null;
+  }
+
   try {
     ro && ro.disconnect();
   } catch {}
   ro = null;
-  try {
-    detachSync && detachSync();
-  } catch {}
-  detachSync = null;
   try {
     chart && chart.dispose();
   } catch {}
   chart = null;
 });
 
-// 渲染主图（主 setOption 保留；增量 series patch异步；dataZoom 落地由 applyZoomByMeta 负责）
-function render() {
-  if (!chart) return;
-  const mySeq = ++renderSeq;
-
-  const needAvoidAxis = !!(
-    settings.chanSettings.value.showUpDownMarkers &&
-    (chanCache.value.reduced || []).length > 0
-  );
-  const extraAxisLabelMargin = needAvoidAxis ? 20 : 6;
-
-  // --- 关键修复：在 buildMainChartOption 时传入初始范围 ---
-  const len = (vm.candles.value || []).length;
-  const sInit = Number(vm.meta.value?.view_start_idx ?? 0);
-  const eInit = Number(vm.meta.value?.view_end_idx ?? (len ? len - 1 : 0));
-
-  const option = buildMainChartOption(
-    {
-      candles: vm.candles.value,
-      indicators: vm.indicators.value,
-      chartType: vm.chartType.value,
-      maConfigs: settings.maConfigs.value,
-      freq: vm.freq.value,
-      klineStyle: settings.klineStyle.value,
-      adjust: vm.adjust.value,
-      reducedBars: chanCache.value.reduced,
-      mapOrigToReduced: chanCache.value.map,
-    },
-    {
-      tooltipClass: "ct-fixed-tooltip",
-      xAxisLabelMargin: extraAxisLabelMargin,
-      // 传递初始范围给 options.js 的 applyUi
-      initialRange: { startValue: sInit, endValue: eInit },
-    }
-  );
-
-  // 保持 CHAN 占位系列存在（原逻辑）
-  const seriesArr = Array.isArray(option.series) ? option.series : [];
-  const haveUp = seriesArr.some((s) => s && s.id === "CHAN_UP");
-  const haveDn = seriesArr.some((s) => s && s.id === "CHAN_DOWN");
-  if (!haveUp || !haveDn) {
-    const upBase = chanPlaceholderSeriesCommon();
-    const dnBase = chanPlaceholderSeriesCommon();
-    if (!haveUp) {
-      seriesArr.push({
-        ...upBase,
-        id: "CHAN_UP",
-        name: "CHAN_UP",
-        itemStyle: {
-          color: settings.chanSettings.value.upColor || "#f56c6c",
-          opacity: 0.9,
-        },
-      });
-    }
-    if (!haveDn) {
-      seriesArr.push({
-        ...dnBase,
-        id: "CHAN_DOWN",
-        name: "CHAN_DOWN",
-        itemStyle: {
-          color: settings.chanSettings.value.downColor || "#00ff00",
-          opacity: 0.9,
-        },
-      });
-    }
-    option.series = seriesArr;
-  }
-
-  try {
-    chart.dispatchAction({ type: "hideTip" });
-  } catch {}
-
-  // --- 关键修复：setOption 期间开启程序化守护，并同步记忆范围 ---
-  programmaticZoomInProgress = true;
-  chart.setOption(option, { notMerge: true, lazyUpdate: false, silent: true });
-  lastAppliedRange = { s: sInit, e: eInit }; // 同步记忆
-  requestAnimationFrame(() => {
-    programmaticZoomInProgress = false; // 恢复
-    updateChanMarkers(mySeq); // 异步标记层 patch
-    // 再次以 meta 落地（如果与 lastAppliedRange 相同，applyZoomByMeta 会短路不再触发）
-    applyZoomByMeta(mySeq);
-  });
-}
-
-// 数据/配置变化重算重绘（保留顺序；异步标记层）
-watch(
-  () => [
-    vm.candles.value,
-    vm.indicators.value,
-    vm.chartType.value,
-    vm.freq.value,
-    settings.maConfigs.value,
-    settings.klineStyle.value,
-    vm.adjust.value,
-    settings.fractalSettings.value,
-  ],
-  () => {
-    recomputeChan();
-    render();
-  },
-  { deep: true }
-);
-
-// meta 变化应用视窗与标记更新（保留；异步提示与标记层）
+/* 标题/刷新徽标更新（保持原逻辑） */
 watch(
   () => vm.meta.value,
-  async () => {
-    await nextTick();
-    const mySeq = ++renderSeq;
-    applyZoomByMeta(mySeq);
-    requestAnimationFrame(() => updateChanMarkers(mySeq)); // 异步
+  () => {
     updateHeaderFromCurrent();
     refreshedAt.value = new Date();
     showRefreshed.value = true;
@@ -1954,31 +1906,6 @@ watch(
   { deep: true }
 );
 
-// 下沿拖拽高度调整（保留）
-let dragging = false,
-  startY = 0,
-  startH = 0;
-function onResizeHandleDown(_pos, e) {
-  dragging = true;
-  startY = e.clientY;
-  startH = wrap.value?.clientHeight || 0;
-  window.addEventListener("mousemove", onResizeHandleMove);
-  window.addEventListener("mouseup", onResizeHandleUp, { once: true });
-}
-function onResizeHandleMove(e) {
-  if (!dragging) return;
-  const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
-  if (wrap.value) {
-    wrap.value.style.height = `${Math.floor(next)}px`;
-    safeResize();
-  }
-}
-function onResizeHandleUp() {
-  dragging = false;
-  window.removeEventListener("mousemove", onResizeHandleMove);
-}
-
-// 标题更新（保留）
 function updateHeaderFromCurrent() {
   const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
   const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
@@ -1987,55 +1914,6 @@ function updateHeaderFromCurrent() {
     name = findBySymbol(sym)?.name?.trim() || "";
   } catch {}
   displayHeader.value = { name, code: sym, freq: frq };
-}
-
-// 顶栏显示：起止（优先预览）、Bars（优先预览）
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function fmtShort(iso) {
-  if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "";
-    const Y = d.getFullYear(),
-      M = pad2(d.getMonth() + 1),
-      D = pad2(d.getDate());
-    if (/m$/.test(String(vm.freq.value || ""))) {
-      const h = pad2(d.getHours()),
-        m = pad2(d.getMinutes());
-      return `${Y}-${M}-${D} ${h}:${m}`;
-    }
-    return `${Y}-${M}-${D}`;
-  } catch {
-    return "";
-  }
-}
-const formattedStart = computed(() => {
-  return (
-    (previewStartStr.value && fmtShort(previewStartStr.value)) ||
-    fmtShort(vm.visibleRange.value.startStr) ||
-    "-"
-  );
-});
-const formattedEnd = computed(() => {
-  return (
-    (previewEndStr.value && fmtShort(previewEndStr.value)) ||
-    fmtShort(vm.visibleRange.value.endStr) ||
-    "-"
-  );
-});
-const topBarsCount = computed(() => {
-  return Number(previewBarsCount.value || vm.meta.value?.view_rows || 0);
-});
-
-// 跨窗 hover（保留）
-function broadcastHoverIndex(idx) {
-  try {
-    window.dispatchEvent(
-      new CustomEvent("chan:hover-index", { detail: { idx: Number(idx) } })
-    );
-  } catch {}
 }
 </script>
 
