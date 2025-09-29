@@ -446,6 +446,30 @@ function safeResize() {
   });
 }
 
+/**
+ * NEW: 读取当前图的 dataZoom 范围（startValue/endValue），优先用于“十字线是否在视界内”的判定。
+ * 说明：使用 ECharts 实时范围，避免用后端 meta 的滞后值导致误判和切片抢权。
+ */
+function getCurrentZoomIndexRange() {
+  try {
+    if (!chart) return null;
+    const opt = chart.getOption?.();
+    const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
+    if (!dz.length) return null;
+    const z = dz.find(
+      (x) =>
+        typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
+    );
+    const len = (vm.candles.value || []).length;
+    if (z && len > 0) {
+      const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
+      const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
+      return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
+    }
+  } catch {}
+  return null;
+}
+
 /* 设置弹窗（保持原逻辑） */
 const settingsDraft = reactive({
   kForm: { ...DEFAULT_KLINE_STYLE },
@@ -1316,84 +1340,98 @@ function onKeydown(e) {
   const len = arr.length;
   if (!len) return;
 
-  const sIdx = Number(vm.meta.value?.view_start_idx ?? 0);
-  const eIdx = Number(vm.meta.value?.view_end_idx ?? len - 1);
+  // REPLACED: 原先使用 vm.meta.view_start_idx / view_end_idx 判定 inView，这在联动后可能滞后。
+  // NEW: 优先从 ECharts dataZoom 读取实时范围，回退到后端 meta。
+  const zoomRange = getCurrentZoomIndexRange();
+  const sIdxNow =
+    zoomRange && Number.isFinite(zoomRange.sIdx)
+      ? zoomRange.sIdx
+      : Number(vm.meta.value?.view_start_idx ?? 0);
+  const eIdxNow =
+    zoomRange && Number.isFinite(zoomRange.eIdx)
+      ? zoomRange.eIdx
+      : Number(vm.meta.value?.view_end_idx ?? len - 1);
+
   const tsArr = arr.map((d) => Date.parse(d.t));
 
-  // 起点：优先当前 currentIndex；否则从持久化的最后聚焦 ts 回找索引；再否则以 eIdx 起
-  let startIdx =
-    Number.isFinite(currentIndex) && currentIndex >= 0 ? currentIndex : -1;
+  // NEW: 起点优先 lastFocusTs；仅当 lastFocusTs 不可用时再退回 currentIndex
+  let startIdx = -1;
+  try {
+    const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
+    if (Number.isFinite(lastTs)) {
+      const found = tsArr.findIndex((t) => Number.isFinite(t) && t === lastTs);
+      if (found >= 0) startIdx = found;
+    }
+  } catch {}
   if (startIdx < 0) {
-    try {
-      const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
-      if (Number.isFinite(lastTs)) {
-        const found = tsArr.findIndex(
-          (t) => Number.isFinite(t) && t === lastTs
-        );
-        startIdx = found >= 0 ? found : -1;
-      }
-    } catch {}
+    if (Number.isFinite(currentIndex) && currentIndex >= 0) {
+      startIdx = currentIndex;
+    } else {
+      startIdx = eIdxNow; // 兜底用右端
+    }
   }
-  if (startIdx < 0) startIdx = eIdx; // 兜底以右端为起点
 
   // 目标索引（一步）
   let nextIdx = startIdx + (e.key === "ArrowLeft" ? -1 : +1);
   nextIdx = Math.max(0, Math.min(len - 1, nextIdx));
 
-  // 若在当前视窗内 → 仅更新十字线/tooltip，对齐交给 ECharts 组联动（唯一机制）
-  const inView = nextIdx >= sIdx && nextIdx <= eIdx;
+  // NEW: 视界内判定：使用“当前 ECharts 范围”
+  const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
 
-    currentIndex = nextIdx;
-
+  // 更新当前索引与十字线（ECharts-first）
+  currentIndex = nextIdx;
   try {
-    // 使用 ECharts 内建：先更新轴指示（会通过 group 联动同步其它窗体）
-    // 将数据索引转换为像素 X 坐标
-    const pxX =
-      chart && typeof chart.convertToPixel === "function"
-        ? chart.convertToPixel({ xAxisIndex: 0 }, nextIdx)
-        : null;
-    if (Number.isFinite(pxX)) {
-      chart.dispatchAction({
-        type: "updateAxisPointer",
-        currTrigger: "mousemove",
-        x: pxX,
-      });
-    }
-    // 源窗显式 showTip，保证本窗 tooltip 可见（其他窗体会随 group 联动对齐）
-        chart.dispatchAction({
+    // 仅用 showTip 即可驱动十字线与 tooltip；updateAxisPointer 可选
+    chart.dispatchAction({
       type: "showTip",
-          seriesIndex: 0,
-          dataIndex: currentIndex,
-        });
-    } catch {}
+      seriesIndex: 0,
+      dataIndex: nextIdx,
+    });
+  } catch {}
 
-  // 持久化最新聚焦 ts（保留）
-    try {
-      const tsv = tsArr[nextIdx];
-      if (Number.isFinite(tsv)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
-      }
-    } catch {}
+  // 持久化最新聚焦 ts（跨窗统一起点）
+  try {
+    const tsv = tsArr[nextIdx];
+    if (Number.isFinite(tsv)) {
+      settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
+    }
+  } catch {}
 
-  if (inView) return;
+  if (inView) return; // 视界内仅移动指针，视窗不动
 
-  // 越界：按步平滑移动窗口（bars 宽度保持不变），仅调整 rightTs（中枢路径不变）
-  const viewWidth = Math.max(1, eIdx - sIdx + 1);
-  let newEIdx = eIdx;
-  if (nextIdx < sIdx) {
-    const delta = sIdx - nextIdx; // 向左越界步数
-    newEIdx = Math.max(viewWidth - 1, eIdx - delta);
-  } else if (nextIdx > eIdx) {
-    const delta = nextIdx - eIdx; // 向右越界步数
-    newEIdx = Math.min(len - 1, eIdx + delta);
+  // —— 出界：通过 ECharts dataZoom 轻推视窗一格，使十字线停在视界边缘 —— //
+  const viewWidth = Math.max(1, eIdxNow - sIdxNow + 1);
+  let newS = sIdxNow;
+  let newE = eIdxNow;
+
+  if (nextIdx < sIdxNow) {
+    // 向左越界：将左边界挪到 nextIdx
+    newS = nextIdx;
+    newE = Math.min(len - 1, newS + viewWidth - 1);
+  } else if (nextIdx > eIdxNow) {
+    // 向右越界：将右边界挪到 nextIdx
+    newE = nextIdx;
+    newS = Math.max(0, newE - viewWidth + 1);
   }
-  const nextRightTs = Number.isFinite(tsArr[newEIdx])
-    ? tsArr[newEIdx]
-    : tsArr[eIdx];
 
-  if (Number.isFinite(nextRightTs)) {
-    hub.execute("KeyMove", { nextRightTs });
-  }
+  // ECharts-first：通过 dataZoom 程序化移动范围（组联动实时跟随）
+  try {
+    chart.dispatchAction({
+      type: "dataZoom",
+      // 注意：不指定 dataZoomIndex，默认作用于当前图的所有 dataZoom
+      startValue: newS,
+      endValue: newE,
+    });
+    // 推窗后再次 showTip 到当前边缘，保持十字线可见且处在视界边缘
+    const edgeIdx = nextIdx < sIdxNow ? newS : newE;
+    chart.dispatchAction({
+      type: "showTip",
+      seriesIndex: 0,
+      dataIndex: edgeIdx,
+    });
+  } catch {}
+
+  // 注意：不直接调用 hub.execute；由 onDataZoom 的 idle-commit 会后承接到中枢与持久化。
 }
 
 /* 缠论/分型覆盖层 —— 构造覆盖层 series（一次性装配） */
@@ -1556,16 +1594,22 @@ function onDataZoom(params) {
         // 交互结束：会后承接一次
         const bars_new = Math.max(1, eIdx - sIdx + 1);
         const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
-        const anchorTs = Number.isFinite(tsArr[eIdx]) ? tsArr[eIdx] : hub.getState().rightTs;
+        const anchorTs = Number.isFinite(tsArr[eIdx])
+          ? tsArr[eIdx]
+          : hub.getState().rightTs;
 
         const st = hub.getState();
         const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
-        const changedEIdx = Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
+        const changedEIdx =
+          Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
 
         if (changedBars || changedEIdx) {
           // 会后承接：仅这一次 hub.execute，触发持久化与锚定
           if (changedBars && changedEIdx) {
-            hub.execute("ScrollZoom", { nextBars: bars_new, nextRightTs: anchorTs });
+            hub.execute("ScrollZoom", {
+              nextBars: bars_new,
+              nextRightTs: anchorTs,
+            });
           } else if (changedBars) {
             hub.execute("SetBarsManual", { nextBars: bars_new });
           } else if (changedEIdx) {
@@ -1597,10 +1641,17 @@ function doSinglePassRender(snapshot) {
     const tipPositioner = renderHub.getTipPositioner();
 
     // 标记存在则给主图内部挤空间（逻辑保持不变）
-    const anyMarkers = (settings.chanSettings.value?.showUpDownMarkers ?? true) === true && reduced.length > 0;
-    const MARKER_HEIGHT_PX = Math.max(2, Math.round(snapshot.core?.markerWidthPx || 4));
+    const anyMarkers =
+      (settings.chanSettings.value?.showUpDownMarkers ?? true) === true &&
+      reduced.length > 0;
+    const MARKER_HEIGHT_PX = Math.max(
+      2,
+      Math.round(snapshot.core?.markerWidthPx || 4)
+    );
     const SAFE_PADDING_PX = 12;
-    const mainBottomExtraPx = anyMarkers ? MARKER_HEIGHT_PX + SAFE_PADDING_PX - 8 : 0;
+    const mainBottomExtraPx = anyMarkers
+      ? MARKER_HEIGHT_PX + SAFE_PADDING_PX - 8
+      : 0;
     const xAxisLabelMargin = 12 + mainBottomExtraPx;
 
     const rebuiltMainOption = buildMainChartOption(
@@ -1627,7 +1678,11 @@ function doSinglePassRender(snapshot) {
     const bars = Math.max(1, snapshot.core?.barsCount || 1);
     const hostW = host.value ? host.value.clientWidth : 800;
     const markerW = snapshot.core?.markerWidthPx || 8;
-    const overlaySeries = buildOverlaySeriesForOption({ hostW, visCount: bars, markerW });
+    const overlaySeries = buildOverlaySeriesForOption({
+      hostW,
+      visCount: bars,
+      markerW,
+    });
 
     // 交互期间：跳过 notMerge 重绘（避免抢权）；可按需做轻量样式 patch（此处直接跳过）
     if (renderHub.isInteracting()) {
@@ -1646,9 +1701,15 @@ function doSinglePassRender(snapshot) {
     progZoomGuard.active = true;
     progZoomGuard.sig = guardSig;
     progZoomGuard.ts = Date.now();
-    scheduleSetOption(finalOption, { notMerge: true, lazyUpdate: false, silent: true });
+    scheduleSetOption(finalOption, {
+      notMerge: true,
+      lazyUpdate: false,
+      silent: true,
+    });
     lastAppliedRange = { s: initialRange.startValue, e: initialRange.endValue };
-    setTimeout(() => { progZoomGuard.active = false; }, 300);
+    setTimeout(() => {
+      progZoomGuard.active = false;
+    }, 300);
 
     // 顶栏预览文案（保持不变）
     const sIdx = initialRange.startValue;
@@ -1722,28 +1783,49 @@ onMounted(() => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-  try { echarts.connect("ct-sync"); } catch {}
+  try {
+    echarts.connect("ct-sync");
+  } catch {}
 
   chart.on("updateAxisPointer", (params) => {
     try {
-      const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-      const label = axisInfo?.value;
-      const dates = (vm.candles.value || []).map((d) => d.t);
-      const idx = dates.indexOf(label);
       const len = (vm.candles.value || []).length;
-      if (idx >= 0 && idx < len) {
-        currentIndex = idx;
-        // 将“最后聚焦 ts”持久化，供键盘左右键作为起跳点
-        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
-        if (Number.isFinite(tsVal)) {
-          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+      if (!len) return;
+
+      // NEW: 更稳的索引提取 —— 优先 seriesData[0].dataIndex，回退 axesInfo.value（数字=下标，字符串=ISO类目）
+      let idx = -1;
+      const sd = Array.isArray(params?.seriesData)
+        ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
+        : null;
+      if (sd && Number.isFinite(sd.dataIndex)) {
+        idx = sd.dataIndex;
+      } else {
+        const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
+        const v = axisInfo?.value;
+        if (Number.isFinite(v)) {
+          idx = Math.max(0, Math.min(len - 1, Number(v)));
+        } else if (typeof v === "string" && v) {
+          const dates = (vm.candles.value || []).map((d) => d.t);
+          idx = dates.indexOf(v);
         }
+      }
+      if (idx < 0 || idx >= len) return;
+
+      // 保持当前索引（供本窗 UI 使用）
+      currentIndex = idx;
+
+      // 持久化“最后聚焦 ts”，作为全局起点（任何窗触发都算数）
+      const tsVal = vm.candles.value[idx]?.t
+        ? Date.parse(vm.candles.value[idx].t)
+        : null;
+      if (Number.isFinite(tsVal)) {
+        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
       }
     } catch {}
   });
 
   // 绑定 dataZoom：含“程序化守护 + 有效变化判定”
-  chart.on("dataZoom", onDataZoom);  // 会话锁 + idle-commit，会后承接到中枢
+  chart.on("dataZoom", onDataZoom); // 会话锁 + idle-commit，会后承接到中枢
 
   try {
     ro = new ResizeObserver(() => {

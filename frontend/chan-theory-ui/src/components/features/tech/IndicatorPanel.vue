@@ -194,7 +194,10 @@ function onDataZoom(params) {
     if (!len) return;
 
     let sIdx, eIdx;
-    if (typeof info.startValue !== "undefined" && typeof info.endValue !== "undefined") {
+    if (
+      typeof info.startValue !== "undefined" &&
+      typeof info.endValue !== "undefined"
+    ) {
       sIdx = Number(info.startValue);
       eIdx = Number(info.endValue);
     } else if (typeof info.start === "number" && typeof info.end === "number") {
@@ -208,19 +211,28 @@ function onDataZoom(params) {
     eIdx = Math.min(len - 1, eIdx);
 
     renderHub.beginInteraction("indicator");
-    if (dzIdleTimer) { clearTimeout(dzIdleTimer); dzIdleTimer = null; }
+    if (dzIdleTimer) {
+      clearTimeout(dzIdleTimer);
+      dzIdleTimer = null;
+    }
     dzIdleTimer = setTimeout(() => {
       try {
         const bars_new = Math.max(1, eIdx - sIdx + 1);
         const tsArr = arr.map((d) => Date.parse(d.t));
-        const anchorTs = Number.isFinite(tsArr[eIdx]) ? tsArr[eIdx] : hub.getState().rightTs;
+        const anchorTs = Number.isFinite(tsArr[eIdx])
+          ? tsArr[eIdx]
+          : hub.getState().rightTs;
         const st = hub.getState();
         const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
-        const changedEIdx = Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
+        const changedEIdx =
+          Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
 
         if (changedBars || changedEIdx) {
           if (changedBars && changedEIdx) {
-            hub.execute("ScrollZoom", { nextBars: bars_new, nextRightTs: anchorTs });
+            hub.execute("ScrollZoom", {
+              nextBars: bars_new,
+              nextRightTs: anchorTs,
+            });
           } else if (changedBars) {
             hub.execute("SetBarsManual", { nextBars: bars_new });
           } else if (changedEIdx) {
@@ -234,16 +246,16 @@ function onDataZoom(params) {
   } catch {}
 }
 
-  // 订阅全局 hover，在本窗显示 tooltip/竖线
-  function onGlobalHoverIndex(e) {
-    try {
-      const idx = Number(e?.detail?.idx);
-      const arr = vm.candles.value || [];
-      if (!chart || !arr.length) return;
-      if (!Number.isFinite(idx) || idx < 0 || idx >= arr.length) return;
-      chart.dispatchAction({ type: "showTip", dataIndex: idx, seriesIndex: 0 });
-    } catch {}
-  }
+// 订阅全局 hover，在本窗显示 tooltip/竖线
+function onGlobalHoverIndex(e) {
+  try {
+    const idx = Number(e?.detail?.idx);
+    const arr = vm.candles.value || [];
+    if (!chart || !arr.length) return;
+    if (!Number.isFinite(idx) || idx < 0 || idx >= arr.length) return;
+    chart.dispatchAction({ type: "showTip", dataIndex: idx, seriesIndex: 0 });
+  } catch {}
+}
 
 onMounted(async () => {
   const el = host.value;
@@ -254,34 +266,54 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-    try {
-      echarts.connect("ct-sync");
-    } catch {}
+    try { echarts.connect("ct-sync"); } catch {}
 
-  // 组内/本窗联动：不再自建广播
-  chart.getZr().on("mousemove", (e) => {
-  });
+    chart.getZr().on("mousemove", (e) => {});
+
+    // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
   chart.on("updateAxisPointer", (params) => {
+    try {
+      const len = (vm.candles.value || []).length;
+        if (!len) return;
+
+        let idx = -1;
+        const sd = Array.isArray(params?.seriesData)
+          ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
+          : null;
+        if (sd && Number.isFinite(sd.dataIndex)) {
+          idx = sd.dataIndex;
+        } else {
+          const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
+          const v = axisInfo?.value;
+          if (Number.isFinite(v)) {
+            idx = Math.max(0, Math.min(len - 1, Number(v)));
+          } else if (typeof v === "string" && v) {
+            const dates = (vm.candles.value || []).map((d) => d.t);
+            idx = dates.indexOf(v);
+          }
+        }
+        if (idx < 0 || idx >= len) return;
+
+        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
+        if (Number.isFinite(tsVal)) {
+          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+      }
+    } catch {}
   });
 
-  // NEW: 指标窗也可作为交互源
+  // 已有：指标窗作为交互源
   chart.on("dataZoom", onDataZoom);
 
-  // NEW: 绑定 ResizeObserver，保证窗口/容器尺寸变化时自动 chart.resize
+    // ResizeObserver 与首帧 safeResize（此前已补齐）
   try {
     ro = new ResizeObserver(() => {
       safeResize();
     });
     ro.observe(el);
   } catch {}
-
-  // NEW: 首帧安全 resize，避免初始尺寸边界值遗留
   requestAnimationFrame(() => {
     safeResize();
   });
-
-  // 仍保留订阅：响应“非鼠标触发”的统一广播（如键盘左右）
-  window.addEventListener("chan:hover-index", onGlobalHoverIndex);
 
   updateHeaderFromCurrent();
 });

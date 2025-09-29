@@ -662,24 +662,51 @@ onMounted(async () => {
     el.addEventListener("mouseleave", onHostLeave);
     } catch {}
 
-  // 组内/本窗联动（无需自建广播）
-  chart.getZr().on("mousemove", (_e) => {
-    // 交由 ECharts 内建处理悬浮即可，无需显式 showTip
-  });
-  chart.on("updateAxisPointer", (_params) => {
-    // 交由组联动对齐，无需转发
-  });
-  chart.on("dataZoom", onDataZoom); // 新增：副窗支持作为交互源
+    chart.getZr().on("mousemove", (_e) => {});
 
+    // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
+  chart.on("updateAxisPointer", (params) => {
+    try {
+        const len = (vm.candles.value || []).length;
+        if (!len) return;
+
+        let idx = -1;
+        const sd = Array.isArray(params?.seriesData)
+          ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
+          : null;
+        if (sd && Number.isFinite(sd.dataIndex)) {
+          idx = sd.dataIndex;
+        } else {
+      const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
+          const v = axisInfo?.value;
+          if (Number.isFinite(v)) {
+            idx = Math.max(0, Math.min(len - 1, Number(v)));
+          } else if (typeof v === "string" && v) {
+      const dates = (vm.candles.value || []).map((d) => d.t);
+            idx = dates.indexOf(v);
+          }
+        }
+        if (idx < 0 || idx >= len) return;
+
+        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
+        if (Number.isFinite(tsVal)) {
+          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+      }
+    } catch {}
+  });
+
+  chart.on("dataZoom", onDataZoom); // 已新增副窗交互源（之前片段）
+
+  // 绑定 observer 与首帧 resize（保持）
   try {
-    ro = new ResizeObserver(() => {
-      safeResize();
-    });
+      ro = new ResizeObserver(() => {
+        safeResize();
+      });
     ro.observe(el);
   } catch {}
-  requestAnimationFrame(() => {
-    safeResize();
-  });
+    requestAnimationFrame(() => {
+      safeResize();
+    });
 
   updateHeaderFromCurrent();
 });
