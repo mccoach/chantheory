@@ -113,7 +113,22 @@ const emit = defineEmits(["update:kind", "close"]);
 const wrap = ref(null);
 const host = ref(null);
 let chart = null;
-let ro = null;
+let ro = null; // 已存在的 ResizeObserver 句柄（之前未使用）
+
+// NEW: 指标窗缺少自适应，此处补充与量窗一致的安全 resize 实现
+function safeResize() {
+  if (!chart || !host.value) return;
+  const seq = renderSeq;
+  requestAnimationFrame(() => {
+    if (isStale(seq)) return;
+    try {
+      chart.resize({
+        width: host.value.clientWidth,
+        height: host.value.clientHeight,
+      });
+    } catch {}
+  });
+}
 
 const kindLocal = ref(props.kind);
 watch(
@@ -167,9 +182,56 @@ function onKindChange() {
   // 渲染由 renderHub 快照驱动，无需主动 render
 }
 
-// —— 副窗不作为交互源（保持原逻辑）：仅 inside 联动，绝不更改 bars/rightTs —— //
-function onDataZoom(_params) {
-  return;
+let dzIdleTimer = null;
+const dzIdleDelayMs = 180;
+
+/** 指标窗作为交互源：ECharts-first + idle-commit 会后承接 */
+function onDataZoom(params) {
+  try {
+    const info = (params && params.batch && params.batch[0]) || params || {};
+    const arr = vm.candles.value || [];
+    const len = arr.length;
+    if (!len) return;
+
+    let sIdx, eIdx;
+    if (typeof info.startValue !== "undefined" && typeof info.endValue !== "undefined") {
+      sIdx = Number(info.startValue);
+      eIdx = Number(info.endValue);
+    } else if (typeof info.start === "number" && typeof info.end === "number") {
+      const maxIdx = len - 1;
+      sIdx = Math.round((info.start / 100) * maxIdx);
+      eIdx = Math.round((info.end / 100) * maxIdx);
+    } else return;
+    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
+    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
+    sIdx = Math.max(0, sIdx);
+    eIdx = Math.min(len - 1, eIdx);
+
+    renderHub.beginInteraction("indicator");
+    if (dzIdleTimer) { clearTimeout(dzIdleTimer); dzIdleTimer = null; }
+    dzIdleTimer = setTimeout(() => {
+      try {
+        const bars_new = Math.max(1, eIdx - sIdx + 1);
+        const tsArr = arr.map((d) => Date.parse(d.t));
+        const anchorTs = Number.isFinite(tsArr[eIdx]) ? tsArr[eIdx] : hub.getState().rightTs;
+        const st = hub.getState();
+        const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
+        const changedEIdx = Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
+
+        if (changedBars || changedEIdx) {
+          if (changedBars && changedEIdx) {
+            hub.execute("ScrollZoom", { nextBars: bars_new, nextRightTs: anchorTs });
+          } else if (changedBars) {
+            hub.execute("SetBarsManual", { nextBars: bars_new });
+          } else if (changedEIdx) {
+            hub.execute("Pan", { nextRightTs: anchorTs });
+          }
+        }
+      } finally {
+        renderHub.endInteraction("indicator");
+      }
+    }, dzIdleDelayMs);
+  } catch {}
 }
 
   // 订阅全局 hover，在本窗显示 tooltip/竖线
@@ -202,13 +264,29 @@ onMounted(async () => {
   chart.on("updateAxisPointer", (params) => {
   });
 
+  // NEW: 指标窗也可作为交互源
+  chart.on("dataZoom", onDataZoom);
+
+  // NEW: 绑定 ResizeObserver，保证窗口/容器尺寸变化时自动 chart.resize
+  try {
+    ro = new ResizeObserver(() => {
+      safeResize();
+    });
+    ro.observe(el);
+  } catch {}
+
+  // NEW: 首帧安全 resize，避免初始尺寸边界值遗留
+  requestAnimationFrame(() => {
+    safeResize();
+  });
+
   // 仍保留订阅：响应“非鼠标触发”的统一广播（如键盘左右）
-    window.addEventListener("chan:hover-index", onGlobalHoverIndex);
+  window.addEventListener("chan:hover-index", onGlobalHoverIndex);
 
   updateHeaderFromCurrent();
 });
 
-// 订阅上游渲染快照：一次性渲染（按当前 kind 构建）
+// 订阅上游渲染：交互期间避免 notMerge 重绘
 const unsubId = renderHub.onRender((snapshot) => {
   try {
     if (!chart) return;
@@ -219,7 +297,8 @@ const unsubId = renderHub.onRender((snapshot) => {
     }
     const option = renderHub.getIndicatorOption(kindLocal.value);
     if (!option) return;
-    chart.setOption(option, true);
+    const notMerge = !renderHub.isInteracting();
+    chart.setOption(option, notMerge);
   } catch (e) {
     console.error("Indicator renderHub onRender error:", e);
   }
@@ -228,12 +307,14 @@ const unsubId = renderHub.onRender((snapshot) => {
 onBeforeUnmount(() => {
   renderHub.offRender(unsubId);
 
+  // NEW: 断开 ResizeObserver（一致性与防泄漏）
   if (ro) {
     try {
       ro.disconnect();
     } catch {}
     ro = null;
   }
+
   if (chart) {
     try {
       chart.dispose();

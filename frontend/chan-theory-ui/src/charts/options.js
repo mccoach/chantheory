@@ -277,67 +277,51 @@ function applyUi(option, ui, { dates, freq }) {
     return fmtTimeByFreq(freq, val);
   };
 
-  // --- 初始范围（仅在需要时注入；交互会话期间禁止我们回写范围） ---
-  const wantInitialRange =
+  // --- 关键修复：从 ui 参数读取初始视窗范围，避免默认全量 ---
+  const hasInitialRange =
     ui?.initialRange &&
     Number.isFinite(ui.initialRange.startValue) &&
     Number.isFinite(ui.initialRange.endValue);
-  // 新增：是否作为“交互源”（主窗=可交互；副窗=仅联动）
-  const isInteractionSource = !!ui?.isInteractionSource;
 
-  const initialRange = wantInitialRange
+  const initialRange = hasInitialRange
     ? {
         startValue: ui.initialRange.startValue,
         endValue: ui.initialRange.endValue,
       }
+    : len
+    ? { startValue: 0, endValue: len - 1 }
     : {};
 
-  // dataZoom 角色配置
-  // 主窗：inside + slider，启用鼠标滚轮缩放与拖动；realtime=true（会话交由 ECharts 内建）
-  // 副窗：inside 仅联动，禁用用户缩放/拖动，但接收组内联动事件
-  if (isMain && isInteractionSource) {
-    const dzInside = Object.assign(
-      {
-        type: "inside",
-        // 允许鼠标实时缩放与拖动（会话由 ECharts 内建）
-        zoomOnMouseWheel: true,
-        moveOnMouseMove: true,
-        moveOnMouseWheel: true,
-        // 与主窗数据口径：不裁剪数据
-        filterMode: "none",
-        // 实时反馈给 UI；我们不在会话中落地范围，仅做会后承接
-        realtime: true,
-      },
-      wantInitialRange ? initialRange : {}
-    );
-    const dzSlider = Object.assign(
+  // 合并 dataZoom：主窗含 slider，其它窗只 inside
+  option.dataZoom = isMain
+    ? [
+        // 内置滚轮/拖动联动（注入初始范围）
+        Object.assign(
+          { type: "inside" },
+          initialRange,
+          option.dataZoom && option.dataZoom[0] ? option.dataZoom[0] : {}
+        ),
+        // slider：显示两端时间（注入初始范围）
+        Object.assign(
           {
             type: "slider",
             height: ui?.sliderHeightPx ?? LAYOUT.SLIDER_HEIGHT_PX,
             bottom: 0,
             showDetail: true,
             labelFormatter: labelFmt,
-        filterMode: "none",
-        realtime: true,
-      },
-      wantInitialRange ? initialRange : {}
-    );
-    option.dataZoom = [dzInside, dzSlider];
-  } else {
-    // 副窗：仅联动 inside；禁止本窗用户交互，仍可接收组内同步
-    const dzFollower = Object.assign(
-      {
-        type: "inside",
-        zoomOnMouseWheel: false,
-        moveOnMouseMove: false,
-        moveOnMouseWheel: false,
-        filterMode: "none",
-        realtime: true,
-      },
-      wantInitialRange ? initialRange : {}
-    );
-    option.dataZoom = [dzFollower];
-  }
+          },
+          initialRange,
+          option.dataZoom && option.dataZoom[1] ? option.dataZoom[1] : {}
+        ),
+      ]
+    : [
+        // 子窗只需要 inside 联动（注入初始范围）
+        Object.assign(
+          { type: "inside" },
+          initialRange,
+          option.dataZoom && option.dataZoom[0] ? option.dataZoom[0] : {}
+        ),
+      ];
 
   // 返回合并后的 option
   return option;

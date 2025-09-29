@@ -543,9 +543,56 @@ function openSettingsDialog() {
   });
 }
 
-function onDataZoom(_params) {
-  // 副窗不作为交互源；仅主图触发 setBars，副窗跟随 meta（避免循环）
-  return;
+let dzIdleTimer = null;
+const dzIdleDelayMs = 180;
+
+/** 副窗作为交互源：ECharts-first + idle-commit 会后承接 */
+function onDataZoom(params) {
+  try {
+    const info = (params && params.batch && params.batch[0]) || params || {};
+    const arr = vm.candles.value || [];
+    const len = arr.length;
+    if (!len) return;
+
+    let sIdx, eIdx;
+    if (typeof info.startValue !== "undefined" && typeof info.endValue !== "undefined") {
+      sIdx = Number(info.startValue);
+      eIdx = Number(info.endValue);
+    } else if (typeof info.start === "number" && typeof info.end === "number") {
+      const maxIdx = len - 1;
+      sIdx = Math.round((info.start / 100) * maxIdx);
+      eIdx = Math.round((info.end / 100) * maxIdx);
+    } else return;
+    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
+    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
+    sIdx = Math.max(0, sIdx);
+    eIdx = Math.min(len - 1, eIdx);
+
+    renderHub.beginInteraction("volume");
+    if (dzIdleTimer) { clearTimeout(dzIdleTimer); dzIdleTimer = null; }
+    dzIdleTimer = setTimeout(() => {
+      try {
+        const bars_new = Math.max(1, eIdx - sIdx + 1);
+        const tsArr = arr.map((d) => Date.parse(d.t));
+        const anchorTs = Number.isFinite(tsArr[eIdx]) ? tsArr[eIdx] : hub.getState().rightTs;
+        const st = hub.getState();
+        const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
+        const changedEIdx = Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
+
+        if (changedBars || changedEIdx) {
+          if (changedBars && changedEIdx) {
+            hub.execute("ScrollZoom", { nextBars: bars_new, nextRightTs: anchorTs });
+          } else if (changedBars) {
+            hub.execute("SetBarsManual", { nextBars: bars_new });
+          } else if (changedEIdx) {
+            hub.execute("Pan", { nextRightTs: anchorTs });
+          }
+        }
+      } finally {
+        renderHub.endInteraction("volume");
+      }
+    }, dzIdleDelayMs);
+  } catch {}
 }
 
 function safeResize() {
@@ -622,6 +669,7 @@ onMounted(async () => {
   chart.on("updateAxisPointer", (_params) => {
     // 交由组联动对齐，无需转发
   });
+  chart.on("dataZoom", onDataZoom); // 新增：副窗支持作为交互源
 
   try {
     ro = new ResizeObserver(() => {
@@ -636,16 +684,13 @@ onMounted(async () => {
   updateHeaderFromCurrent();
 });
 
-// 保存最近一次渲染快照
-const lastSnapshot = ref(null);
-
 // 订阅上游渲染快照：一次性渲染
 const unsubId = renderHub.onRender((snapshot) => {
   try {
     if (!chart) return;
-    lastSnapshot.value = snapshot;                         // 保存快照供统计使用
     const mySeq = ++renderSeq;
-    chart.setOption(snapshot.volume.option, true);
+    const notMerge = !renderHub.isInteracting(); // ECharts-first：交互期禁止 notMerge 重绘
+    chart.setOption(snapshot.volume.option, notMerge);
     recomputeVisibleStats(mySeq);
   } catch (e) {
     console.error("Volume renderHub onRender error:", e);
@@ -669,40 +714,80 @@ onBeforeUnmount(() => {
   chart = null;
 });
 
+function getCurrentZoomIndexRange() {
+  try {
+    if (!chart) return null;
+    const opt = chart.getOption?.();
+    const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
+    if (!dz.length) return null;
+    const z = dz.find(
+      (x) =>
+        typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
+    );
+    const len = (vm.candles.value || []).length;
+    if (z && len > 0) {
+      const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
+      const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
+      return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
+    }
+  } catch {}
+  return null;
+}
 function recomputeVisibleStats(seq) {
   if (isStale(seq)) return;
   try {
-    const snap = lastSnapshot.value;
-    const arr = vm.candles.value || [];
-    const len = arr.length;
-    if (!len || !snap?.main?.range) {
-      stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
+    const range = getCurrentZoomIndexRange();
+    const len = (vm.candles.value || []).length;
+    if (!len || !range) {
+      stat.value = {
+        total: "-",
+        mean: "-",
+        max: "-",
+        pumpDays: 0,
+        maxConsecDump: 0,
+      };
       return;
     }
-    const sIdx = Number(snap.main.range.startValue);
-    const eIdx = Number(snap.main.range.endValue);
-    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) {
-      stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
-      return;
-    }
+    const { sIdx, eIdx } = range;
     const isAmount = (settings.volSettings.value?.mode || "vol") === "amount";
     const baseSeries = isAmount
-      ? arr.map((d) => (typeof d.a === "number" ? d.a : null))
-      : vm.indicators.value?.VOLUME || arr.map((d) => (typeof d.v === "number" ? d.v : null));
-    let sum = 0, cnt = 0, mx = 0;
+      ? (vm.candles.value || []).map((d) =>
+          typeof d.a === "number" ? d.a : null
+        )
+      : vm.indicators.value?.VOLUME ||
+        (vm.candles.value || []).map((d) =>
+          typeof d.v === "number" ? d.v : null
+        );
+    let sum = 0,
+      cnt = 0,
+      mx = 0;
     for (let i = sIdx; i <= eIdx; i++) {
       const v = Number(baseSeries[i]);
       if (Number.isFinite(v)) {
-        sum += v; cnt += 1; if (v > mx) mx = v;
+        sum += v;
+        cnt += 1;
+        if (v > mx) mx = v;
       }
     }
     const mean = cnt > 0 ? sum / cnt : 0;
     const fmt0 = (x) => (Number.isFinite(+x) ? (+x).toFixed(0) : "-");
     if (isStale(seq)) return;
-    stat.value = { total: fmt0(sum), mean: fmt0(mean), max: fmt0(mx), pumpDays: 0, maxConsecDump: 0 };
+    stat.value = {
+      total: fmt0(sum),
+      mean: fmt0(mean),
+      max: fmt0(mx),
+      pumpDays: 0,
+      maxConsecDump: 0,
+    };
   } catch {
     if (isStale(seq)) return;
-    stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
+    stat.value = {
+      total: "-",
+      mean: "-",
+      max: "-",
+      pumpDays: 0,
+      maxConsecDump: 0,
+    };
   }
 }
 

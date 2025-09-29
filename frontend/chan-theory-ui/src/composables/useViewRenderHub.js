@@ -53,6 +53,26 @@ export function useViewRenderHub() {
     return undefined; // 不设 position 即默认跟随鼠标
   }
 
+  // ==============================
+  // NEW: 交互会话锁（ECharts-first 禁止抢权）
+  // ==============================
+  const _interacting = ref(false);
+  let _interactionSource = null;
+
+  function beginInteraction(source) {
+    // 交互开始：各窗 dataZoom 会话内调用
+    _interacting.value = true;
+    _interactionSource = source || _interactionSource;
+  }
+  function endInteraction(source) {
+    // 交互结束：idle-commit 后调用
+    _interacting.value = false;
+    _interactionSource = null;
+  }
+  function isInteracting() {
+    return !!_interacting.value;
+  }
+
   function setMarketView(vm) {
     _vmRef.vm = vm;
     // 订阅数据变更以触发统一计算
@@ -141,15 +161,13 @@ export function useViewRenderHub() {
         freq,
         klineStyle: settings.klineStyle.value,
         adjust: vm.adjust.value || "none",
-      // CHAN 数据由主窗内现有 computeInclude/computeFractals 继续处理（后续可迁至渲染中枢）
+        // CHAN 数据由主窗内现有 computeInclude/computeFractals 继续处理，保持最小改动
         reducedBars: [],
         mapOrigToReduced: [],
       },
       {
         initialRange,
-      tooltipPositioner: tipPositioner,
-      // 主窗作为“交互源”
-      isInteractionSource: true,
+        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
       }
     );
 
@@ -168,11 +186,9 @@ export function useViewRenderHub() {
       },
       {
         initialRange,
-      tooltipPositioner: tipPositioner,
-      // 副窗仅联动，不作为交互源
-      isInteractionSource: false,
-    }
-  );
+        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
+      }
+    );
 
     // 构建默认指标窗（提供工具方法获取具体 kind 的 option；此处留空由 IndicatorPanel 请求）
     const dataForIndicators = { candles, indicators, freq, initialRange };
@@ -193,7 +209,7 @@ export function useViewRenderHub() {
       },
       main: { option: mainOption, range: initialRange },
       volume: { option: volumeOption, range: initialRange },
-      indicatorsBase: dataForIndicators,
+      indicatorsBase: { candles, indicators, freq, initialRange },
       metaLink: {
         generated_at: vm.meta.value?.generated_at || "",
         source: vm.meta.value?.source || "",
@@ -244,6 +260,10 @@ export function useViewRenderHub() {
     offRender,
     getIndicatorOption,
     getTipPositioner,
+    // NEW: 交互会话锁导出（供各窗体使用）
+    beginInteraction,
+    endInteraction,
+    isInteracting,
   };
   return _singleton;
 }
