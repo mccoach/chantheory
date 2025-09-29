@@ -73,6 +73,44 @@ export function useViewRenderHub() {
     return !!_interacting.value;
   }
 
+  // ==============================
+  // NEW: 图表实例注册与“激活窗体”管理
+  // 用途：键盘动作/程序化驱动应作用于当前激活窗体的 chart 实例
+  // ==============================
+  const _charts = new Map();           // panelKey -> chartInstance
+  const _activePanelKey = ref("main"); // 默认主窗激活
+
+  function registerChart(panelKey, chartInstance) {
+    try {
+      if (!panelKey || !chartInstance) return;
+      _charts.set(String(panelKey), chartInstance);
+    } catch {}
+  }
+  function unregisterChart(panelKey) {
+    try {
+      if (!panelKey) return;
+      _charts.delete(String(panelKey));
+    } catch {}
+  }
+  function setActivePanel(panelKey) {
+    try {
+      if (!panelKey) return;
+      _activePanelKey.value = String(panelKey);
+    } catch {}
+  }
+  function getActivePanel() {
+    return String(_activePanelKey.value || "main");
+  }
+  function getChart(panelKey) {
+    try {
+      return _charts.get(String(panelKey)) || null;
+    } catch { return null; }
+  }
+  function getActiveChart() {
+    try {
+      return _charts.get(String(_activePanelKey.value)) || null;
+    } catch { return null; }
+  }
   function setMarketView(vm) {
     _vmRef.vm = vm;
     // 订阅数据变更以触发统一计算
@@ -264,6 +302,13 @@ export function useViewRenderHub() {
     beginInteraction,
     endInteraction,
     isInteracting,
+    // NEW: 图表注册与激活面板管理
+    registerChart,
+    unregisterChart,
+    setActivePanel,
+    getActivePanel,
+    getChart,
+    getActiveChart,
   };
   return _singleton;
 }

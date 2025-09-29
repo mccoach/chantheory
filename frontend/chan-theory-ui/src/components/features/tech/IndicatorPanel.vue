@@ -266,37 +266,49 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-    try { echarts.connect("ct-sync"); } catch {}
+  try {
+    echarts.connect("ct-sync");
+  } catch {}
 
-    chart.getZr().on("mousemove", (e) => {});
+  // NEW: 注册指标窗 chart，并在鼠标进入指标窗时设置为激活面板
+  try {
+    renderHub.registerChart("indicator", chart);
+    el.addEventListener("mouseenter", () => {
+      renderHub.setActivePanel("indicator");
+    });
+  } catch {}
 
-    // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
+  chart.getZr().on("mousemove", (e) => {});
+
+  // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
   chart.on("updateAxisPointer", (params) => {
     try {
       const len = (vm.candles.value || []).length;
-        if (!len) return;
+      if (!len) return;
 
-        let idx = -1;
-        const sd = Array.isArray(params?.seriesData)
-          ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
-          : null;
-        if (sd && Number.isFinite(sd.dataIndex)) {
-          idx = sd.dataIndex;
-        } else {
-          const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-          const v = axisInfo?.value;
-          if (Number.isFinite(v)) {
-            idx = Math.max(0, Math.min(len - 1, Number(v)));
-          } else if (typeof v === "string" && v) {
-            const dates = (vm.candles.value || []).map((d) => d.t);
-            idx = dates.indexOf(v);
-          }
+      let idx = -1;
+      const sd = Array.isArray(params?.seriesData)
+        ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
+        : null;
+      if (sd && Number.isFinite(sd.dataIndex)) {
+        idx = sd.dataIndex;
+      } else {
+        const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
+        const v = axisInfo?.value;
+        if (Number.isFinite(v)) {
+          idx = Math.max(0, Math.min(len - 1, Number(v)));
+        } else if (typeof v === "string" && v) {
+          const dates = (vm.candles.value || []).map((d) => d.t);
+          idx = dates.indexOf(v);
         }
-        if (idx < 0 || idx >= len) return;
+      }
+      if (idx < 0 || idx >= len) return;
 
-        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
-        if (Number.isFinite(tsVal)) {
-          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
+      const tsVal = vm.candles.value[idx]?.t
+        ? Date.parse(vm.candles.value[idx].t)
+        : null;
+      if (Number.isFinite(tsVal)) {
+        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
       }
     } catch {}
   });
@@ -304,7 +316,7 @@ onMounted(async () => {
   // 已有：指标窗作为交互源
   chart.on("dataZoom", onDataZoom);
 
-    // ResizeObserver 与首帧 safeResize（此前已补齐）
+  // ResizeObserver 与首帧 safeResize（此前已补齐）
   try {
     ro = new ResizeObserver(() => {
       safeResize();
@@ -353,6 +365,9 @@ onBeforeUnmount(() => {
     } catch {}
     chart = null;
   }
+  try {
+    renderHub.unregisterChart("indicator");
+  } catch {}
 });
 
 watch(

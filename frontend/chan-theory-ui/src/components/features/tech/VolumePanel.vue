@@ -178,277 +178,271 @@ const VolumeSettingsContent = defineComponent({
       ]);
 
     // 行：量额柱基础样式
-      const rows = [];
-      rows.push(
-        h("div", { class: "std-row", key: `volbar-${draftRev.value}` }, [
-          nameCell("量额柱"),
-          itemCell(
-            "柱宽%",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 10,
-              max: 100,
-              step: 1,
+    const rows = [];
+    rows.push(
+      h("div", { class: "std-row", key: `volbar-${draftRev.value}` }, [
+        nameCell("量额柱"),
+        itemCell(
+          "柱宽%",
+          h("input", {
+            class: "input num",
+            type: "number",
+            min: 10,
+            max: 100,
+            step: 1,
             value: Number(settingsDraftVol.volBar.barPercent ?? 100),
-              onInput: (e) =>
-                (settingsDraftVol.volBar.barPercent = Math.max(
-                  10,
-                  Math.min(100, Math.round(+e.target.value || 100))
-                )),
-            })
-          ),
-          itemCell(
-            "阳线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
+            onInput: (e) =>
+              (settingsDraftVol.volBar.barPercent = Math.max(
+                10,
+                Math.min(100, Math.round(+e.target.value || 100))
+              )),
+          })
+        ),
+        itemCell(
+          "阳线颜色",
+          h("input", {
+            class: "input color",
+            type: "color",
             value:
               settingsDraftVol.volBar.upColor ||
               DEFAULT_VOL_SETTINGS.volBar.upColor,
-              onInput: (e) =>
-                (settingsDraftVol.volBar.upColor = String(
+            onInput: (e) =>
+              (settingsDraftVol.volBar.upColor = String(
                 e.target.value || DEFAULT_VOL_SETTINGS.volBar.upColor
-                )),
-            })
-          ),
-          itemCell(
-            "阴线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
+              )),
+          })
+        ),
+        itemCell(
+          "阴线颜色",
+          h("input", {
+            class: "input color",
+            type: "color",
             value:
               settingsDraftVol.volBar.downColor ||
               DEFAULT_VOL_SETTINGS.volBar.downColor,
-              onInput: (e) =>
-                (settingsDraftVol.volBar.downColor = String(
+            onInput: (e) =>
+              (settingsDraftVol.volBar.downColor = String(
                 e.target.value || DEFAULT_VOL_SETTINGS.volBar.downColor
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          h("div", { class: "std-check" }),
-          resetBtn(() => {
-            Object.assign(settingsDraftVol.volBar, DEFAULT_VOL_SETTINGS.volBar);
-            draftRev.value++;
-          }),
-        ])
-      );
+              )),
+          })
+        ),
+        h("div"),
+        h("div"),
+        h("div", { class: "std-check" }),
+        resetBtn(() => {
+          Object.assign(settingsDraftVol.volBar, DEFAULT_VOL_SETTINGS.volBar);
+          draftRev.value++;
+        }),
+      ])
+    );
 
     // 行：MAVOL 三条线参数
-      Object.entries(settingsDraftVol.mavolForm).forEach(([k, conf]) => {
-        rows.push(
-          h("div", { class: "std-row", key: `mrow-${k}-${draftRev.value}` }, [
-            nameCell(`MAVOL${conf.period}`),
-            itemCell(
-              "线宽",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 0.5,
-                max: 4,
-                step: 0.5,
-                value: Number(conf.width ?? 1),
-                onInput: (e) => (conf.width = Number(e.target.value || 1)),
-              })
-            ),
-            itemCell(
-              "颜色",
-              h("input", {
-                class: "input color",
-                type: "color",
-                value: conf.color || "#ee6666",
-                onInput: (e) =>
-                  (conf.color = String(e.target.value || "#ee6666")),
-              })
-            ),
-            itemCell(
-              "线型",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.style || "solid",
-                  onChange: (e) => (conf.style = String(e.target.value)),
-                },
-                [
-                  h("option", "solid"),
-                  h("option", "dashed"),
-                  h("option", "dotted"),
-                ]
-              )
-            ),
-            itemCell(
-              "周期",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 1,
-                step: 1,
-                value: Number(conf.period ?? 5),
-                onInput: (e) =>
-                  (conf.period = Math.max(
-                    1,
-                    parseInt(e.target.value || 5, 10)
-                  )),
-              })
-            ),
-            h("div"),
-            checkCell(
-              !!conf.enabled,
-              (e) => (conf.enabled = !!e.target.checked)
-            ),
-            resetBtn(() => {
-              const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
-              if (def) {
-                settingsDraftVol.mavolForm[k] = { ...def };
-                draftRev.value++;
-              }
-            }),
-          ])
-        );
-      });
+    Object.entries(settingsDraftVol.mavolForm).forEach(([k, conf]) => {
+      rows.push(
+        h("div", { class: "std-row", key: `mrow-${k}-${draftRev.value}` }, [
+          nameCell(`MAVOL${conf.period}`),
+          itemCell(
+            "线宽",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.5,
+              max: 4,
+              step: 0.5,
+              value: Number(conf.width ?? 1),
+              onInput: (e) => (conf.width = Number(e.target.value || 1)),
+            })
+          ),
+          itemCell(
+            "颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value: conf.color || "#ee6666",
+              onInput: (e) =>
+                (conf.color = String(e.target.value || "#ee6666")),
+            })
+          ),
+          itemCell(
+            "线型",
+            h(
+              "select",
+              {
+                class: "input",
+                value: conf.style || "solid",
+                onChange: (e) => (conf.style = String(e.target.value)),
+              },
+              [
+                h("option", "solid"),
+                h("option", "dashed"),
+                h("option", "dotted"),
+              ]
+            )
+          ),
+          itemCell(
+            "周期",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 1,
+              step: 1,
+              value: Number(conf.period ?? 5),
+              onInput: (e) =>
+                (conf.period = Math.max(1, parseInt(e.target.value || 5, 10))),
+            })
+          ),
+          h("div"),
+          checkCell(!!conf.enabled, (e) => (conf.enabled = !!e.target.checked)),
+          resetBtn(() => {
+            const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
+            if (def) {
+              settingsDraftVol.mavolForm[k] = { ...def };
+              draftRev.value++;
+            }
+          }),
+        ])
+      );
+    });
 
     // 行：放量标记
-      rows.push(
-        h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
-          nameCell("放量标记"),
-          itemCell(
-            "形状",
-            h(
-              "select",
-              {
-                class: "input",
-                value:
-                  settingsDraftVol.markerPump.shape ||
-                  DEFAULT_VOL_SETTINGS.markerPump.shape,
-                onChange: (e) =>
-                  (settingsDraftVol.markerPump.shape = String(e.target.value)),
-              },
-              [
-                h("option", "triangle"),
-                h("option", "diamond"),
-                h("option", "circle"),
-                h("option", "rect"),
-              ]
-            )
-          ),
-          itemCell(
-            "颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
+    rows.push(
+      h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
+        nameCell("放量标记"),
+        itemCell(
+          "形状",
+          h(
+            "select",
+            {
+              class: "input",
               value:
-                settingsDraftVol.markerPump.color ||
-                DEFAULT_VOL_SETTINGS.markerPump.color,
-              onInput: (e) =>
-                (settingsDraftVol.markerPump.color = String(e.target.value)),
-            })
-          ),
-          itemCell(
-            "阈值",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0.1,
-              step: 0.1,
-              value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
-                ? +settingsDraftVol.markerPump.threshold
-                : DEFAULT_VOL_SETTINGS.markerPump.threshold,
-              onInput: (e) =>
-                (settingsDraftVol.markerPump.threshold = Math.max(
-                  0.1,
-                  Number(
-                    e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold
-                  )
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          checkCell(
-            !!settingsDraftVol.markerPump.enabled,
-            (e) => (settingsDraftVol.markerPump.enabled = !!e.target.checked)
-          ),
-          resetBtn(() => {
-            settingsDraftVol.markerPump = {
-              ...DEFAULT_VOL_SETTINGS.markerPump,
-            };
-            draftRev.value++;
-          }),
-        ])
-      );
+                settingsDraftVol.markerPump.shape ||
+                DEFAULT_VOL_SETTINGS.markerPump.shape,
+              onChange: (e) =>
+                (settingsDraftVol.markerPump.shape = String(e.target.value)),
+            },
+            [
+              h("option", "triangle"),
+              h("option", "diamond"),
+              h("option", "circle"),
+              h("option", "rect"),
+            ]
+          )
+        ),
+        itemCell(
+          "颜色",
+          h("input", {
+            class: "input color",
+            type: "color",
+            value:
+              settingsDraftVol.markerPump.color ||
+              DEFAULT_VOL_SETTINGS.markerPump.color,
+            onInput: (e) =>
+              (settingsDraftVol.markerPump.color = String(e.target.value)),
+          })
+        ),
+        itemCell(
+          "阈值",
+          h("input", {
+            class: "input num",
+            type: "number",
+            min: 0.1,
+            step: 0.1,
+            value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
+              ? +settingsDraftVol.markerPump.threshold
+              : DEFAULT_VOL_SETTINGS.markerPump.threshold,
+            onInput: (e) =>
+              (settingsDraftVol.markerPump.threshold = Math.max(
+                0.1,
+                Number(
+                  e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold
+                )
+              )),
+          })
+        ),
+        h("div"),
+        h("div"),
+        checkCell(
+          !!settingsDraftVol.markerPump.enabled,
+          (e) => (settingsDraftVol.markerPump.enabled = !!e.target.checked)
+        ),
+        resetBtn(() => {
+          settingsDraftVol.markerPump = {
+            ...DEFAULT_VOL_SETTINGS.markerPump,
+          };
+          draftRev.value++;
+        }),
+      ])
+    );
 
     // 行：缩量标记
-      rows.push(
-        h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
-          nameCell("缩量标记"),
-          itemCell(
-            "形状",
-            h(
-              "select",
-              {
-                class: "input",
-                value:
-                  settingsDraftVol.markerDump.shape ||
-                  DEFAULT_VOL_SETTINGS.markerDump.shape,
-                onChange: (e) =>
-                  (settingsDraftVol.markerDump.shape = String(e.target.value)),
-              },
-              [
-                h("option", "triangle"),
-                h("option", "diamond"),
-                h("option", "circle"),
-                h("option", "rect"),
-              ]
-            )
-          ),
-          itemCell(
-            "颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
+    rows.push(
+      h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
+        nameCell("缩量标记"),
+        itemCell(
+          "形状",
+          h(
+            "select",
+            {
+              class: "input",
               value:
-                settingsDraftVol.markerDump.color ||
-                DEFAULT_VOL_SETTINGS.markerDump.color,
-              onInput: (e) =>
-                (settingsDraftVol.markerDump.color = String(e.target.value)),
-            })
-          ),
-          itemCell(
-            "阈值",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0.1,
-              step: 0.1,
-              value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
-                ? +settingsDraftVol.markerDump.threshold
-                : DEFAULT_VOL_SETTINGS.markerDump.threshold,
-              onInput: (e) =>
-                (settingsDraftVol.markerDump.threshold = Math.max(
-                  0.1,
-                  Number(
-                    e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold
-                  )
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          checkCell(
-            !!settingsDraftVol.markerDump.enabled,
-            (e) => (settingsDraftVol.markerDump.enabled = !!e.target.checked)
-          ),
-          resetBtn(() => {
-            settingsDraftVol.markerDump = {
-              ...DEFAULT_VOL_SETTINGS.markerDump,
-            };
-            draftRev.value++;
-          }),
-        ])
-      );
+                settingsDraftVol.markerDump.shape ||
+                DEFAULT_VOL_SETTINGS.markerDump.shape,
+              onChange: (e) =>
+                (settingsDraftVol.markerDump.shape = String(e.target.value)),
+            },
+            [
+              h("option", "triangle"),
+              h("option", "diamond"),
+              h("option", "circle"),
+              h("option", "rect"),
+            ]
+          )
+        ),
+        itemCell(
+          "颜色",
+          h("input", {
+            class: "input color",
+            type: "color",
+            value:
+              settingsDraftVol.markerDump.color ||
+              DEFAULT_VOL_SETTINGS.markerDump.color,
+            onInput: (e) =>
+              (settingsDraftVol.markerDump.color = String(e.target.value)),
+          })
+        ),
+        itemCell(
+          "阈值",
+          h("input", {
+            class: "input num",
+            type: "number",
+            min: 0.1,
+            step: 0.1,
+            value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
+              ? +settingsDraftVol.markerDump.threshold
+              : DEFAULT_VOL_SETTINGS.markerDump.threshold,
+            onInput: (e) =>
+              (settingsDraftVol.markerDump.threshold = Math.max(
+                0.1,
+                Number(
+                  e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold
+                )
+              )),
+          })
+        ),
+        h("div"),
+        h("div"),
+        checkCell(
+          !!settingsDraftVol.markerDump.enabled,
+          (e) => (settingsDraftVol.markerDump.enabled = !!e.target.checked)
+        ),
+        resetBtn(() => {
+          settingsDraftVol.markerDump = {
+            ...DEFAULT_VOL_SETTINGS.markerDump,
+          };
+          draftRev.value++;
+        }),
+      ])
+    );
 
     return () => h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
   },
@@ -555,7 +549,10 @@ function onDataZoom(params) {
     if (!len) return;
 
     let sIdx, eIdx;
-    if (typeof info.startValue !== "undefined" && typeof info.endValue !== "undefined") {
+    if (
+      typeof info.startValue !== "undefined" &&
+      typeof info.endValue !== "undefined"
+    ) {
       sIdx = Number(info.startValue);
       eIdx = Number(info.endValue);
     } else if (typeof info.start === "number" && typeof info.end === "number") {
@@ -569,19 +566,28 @@ function onDataZoom(params) {
     eIdx = Math.min(len - 1, eIdx);
 
     renderHub.beginInteraction("volume");
-    if (dzIdleTimer) { clearTimeout(dzIdleTimer); dzIdleTimer = null; }
+    if (dzIdleTimer) {
+      clearTimeout(dzIdleTimer);
+      dzIdleTimer = null;
+    }
     dzIdleTimer = setTimeout(() => {
       try {
         const bars_new = Math.max(1, eIdx - sIdx + 1);
         const tsArr = arr.map((d) => Date.parse(d.t));
-        const anchorTs = Number.isFinite(tsArr[eIdx]) ? tsArr[eIdx] : hub.getState().rightTs;
+        const anchorTs = Number.isFinite(tsArr[eIdx])
+          ? tsArr[eIdx]
+          : hub.getState().rightTs;
         const st = hub.getState();
         const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
-        const changedEIdx = Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
+        const changedEIdx =
+          Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
 
         if (changedBars || changedEIdx) {
           if (changedBars && changedEIdx) {
-            hub.execute("ScrollZoom", { nextBars: bars_new, nextRightTs: anchorTs });
+            hub.execute("ScrollZoom", {
+              nextBars: bars_new,
+              nextRightTs: anchorTs,
+            });
           } else if (changedBars) {
             hub.execute("SetBarsManual", { nextBars: bars_new });
           } else if (changedEIdx) {
@@ -630,7 +636,12 @@ function setAxisPointerMode(mode) {
   };
   schedule(() => {
     try {
-      chart && chart.setOption(optPatch, { notMerge: false, lazyUpdate: true, silent: true });
+      chart &&
+        chart.setOption(optPatch, {
+          notMerge: false,
+          lazyUpdate: true,
+          silent: true,
+        });
     } catch {}
   });
 }
@@ -651,7 +662,17 @@ onMounted(async () => {
     height: el.clientHeight,
   });
   chart.group = "ct-sync";
-  try { echarts.connect("ct-sync"); } catch {}
+  try {
+    echarts.connect("ct-sync");
+  } catch {}
+
+  // NEW: 注册副窗 chart，并在鼠标进入副窗时设置为激活面板
+  try {
+    renderHub.registerChart("volume", chart);
+    el.addEventListener("mouseenter", () => {
+      renderHub.setActivePanel("volume");
+    });
+  } catch {}
 
   // 初始：非本窗时仅纵线（与 options.js 初始一致）
   setAxisPointerMode("line");
@@ -660,53 +681,26 @@ onMounted(async () => {
   try {
     el.addEventListener("mouseenter", onHostEnter);
     el.addEventListener("mouseleave", onHostLeave);
-    } catch {}
-
-    chart.getZr().on("mousemove", (_e) => {});
-
-    // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
-  chart.on("updateAxisPointer", (params) => {
-    try {
-        const len = (vm.candles.value || []).length;
-        if (!len) return;
-
-        let idx = -1;
-        const sd = Array.isArray(params?.seriesData)
-          ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
-          : null;
-        if (sd && Number.isFinite(sd.dataIndex)) {
-          idx = sd.dataIndex;
-        } else {
-      const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-          const v = axisInfo?.value;
-          if (Number.isFinite(v)) {
-            idx = Math.max(0, Math.min(len - 1, Number(v)));
-          } else if (typeof v === "string" && v) {
-      const dates = (vm.candles.value || []).map((d) => d.t);
-            idx = dates.indexOf(v);
-          }
-        }
-        if (idx < 0 || idx >= len) return;
-
-        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
-        if (Number.isFinite(tsVal)) {
-          settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
-      }
-    } catch {}
-  });
-
-  chart.on("dataZoom", onDataZoom); // 已新增副窗交互源（之前片段）
-
-  // 绑定 observer 与首帧 resize（保持）
-  try {
-      ro = new ResizeObserver(() => {
-        safeResize();
-      });
-    ro.observe(el);
   } catch {}
-    requestAnimationFrame(() => {
+
+  // 组内/本窗联动（无需自建广播）
+  chart.getZr().on("mousemove", (_e) => {
+    // 交由 ECharts 内建处理悬浮即可，无需显式 showTip
+  });
+  chart.on("updateAxisPointer", (_params) => {
+    // 交由组联动对齐，无需转发
+  });
+  chart.on("dataZoom", onDataZoom); // 新增：副窗支持作为交互源
+
+  try {
+    ro = new ResizeObserver(() => {
       safeResize();
     });
+    ro.observe(el);
+  } catch {}
+  requestAnimationFrame(() => {
+    safeResize();
+  });
 
   updateHeaderFromCurrent();
 });

@@ -1340,9 +1340,11 @@ function onKeydown(e) {
   const len = arr.length;
   if (!len) return;
 
-  // REPLACED: 原先使用 vm.meta.view_start_idx / view_end_idx 判定 inView，这在联动后可能滞后。
-  // NEW: 优先从 ECharts dataZoom 读取实时范围，回退到后端 meta。
-  const zoomRange = getCurrentZoomIndexRange();
+  // NEW: 取“当前激活窗体”的 chart，回退主窗
+  const activeChart = renderHub.getActiveChart() || chart;
+
+  // 优先从“激活 chart”读取实时范围，回退后端 meta
+  const zoomRange = getCurrentZoomIndexRange(activeChart);
   const sIdxNow =
     zoomRange && Number.isFinite(zoomRange.sIdx)
       ? zoomRange.sIdx
@@ -1354,7 +1356,7 @@ function onKeydown(e) {
 
   const tsArr = arr.map((d) => Date.parse(d.t));
 
-  // NEW: 起点优先 lastFocusTs；仅当 lastFocusTs 不可用时再退回 currentIndex
+  // 起点优先 lastFocusTs；不可用时退回 currentIndex，再兜底右端
   let startIdx = -1;
   try {
     const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
@@ -1378,18 +1380,17 @@ function onKeydown(e) {
   // NEW: 视界内判定：使用“当前 ECharts 范围”
   const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
 
-  // 更新当前索引与十字线（ECharts-first）
-  currentIndex = nextIdx;
+  // 仅移动十字线（激活 chart）
   try {
-    // 仅用 showTip 即可驱动十字线与 tooltip；updateAxisPointer 可选
-    chart.dispatchAction({
+      activeChart.dispatchAction({
       type: "showTip",
       seriesIndex: 0,
       dataIndex: nextIdx,
     });
   } catch {}
+  currentIndex = nextIdx;
 
-  // 持久化最新聚焦 ts（跨窗统一起点）
+  // 持久化（键盘/鼠标一致）
   try {
     const tsv = tsArr[nextIdx];
     if (Number.isFinite(tsv)) {
@@ -1399,7 +1400,7 @@ function onKeydown(e) {
 
   if (inView) return; // 视界内仅移动指针，视窗不动
 
-  // —— 出界：通过 ECharts dataZoom 轻推视窗一格，使十字线停在视界边缘 —— //
+  // 越界：在激活 chart 上轻推视窗一格，并把十字线停在边缘
   const viewWidth = Math.max(1, eIdxNow - sIdxNow + 1);
   let newS = sIdxNow;
   let newE = eIdxNow;
@@ -1416,7 +1417,7 @@ function onKeydown(e) {
 
   // ECharts-first：通过 dataZoom 程序化移动范围（组联动实时跟随）
   try {
-    chart.dispatchAction({
+    activeChart.dispatchAction({
       type: "dataZoom",
       // 注意：不指定 dataZoomIndex，默认作用于当前图的所有 dataZoom
       startValue: newS,
@@ -1424,7 +1425,7 @@ function onKeydown(e) {
     });
     // 推窗后再次 showTip 到当前边缘，保持十字线可见且处在视界边缘
     const edgeIdx = nextIdx < sIdxNow ? newS : newE;
-    chart.dispatchAction({
+    activeChart.dispatchAction({
       type: "showTip",
       seriesIndex: 0,
       dataIndex: edgeIdx,
@@ -1787,6 +1788,14 @@ onMounted(() => {
     echarts.connect("ct-sync");
   } catch {}
 
+  // NEW: 注册主窗 chart，并在鼠标进入主窗时设置为“激活面板”
+  try {
+    renderHub.registerChart("main", chart);
+    el.addEventListener("mouseenter", () => {
+      renderHub.setActivePanel("main");
+    });
+  } catch {}
+
   chart.on("updateAxisPointer", (params) => {
     try {
       const len = (vm.candles.value || []).length;
@@ -1849,6 +1858,11 @@ onBeforeUnmount(() => {
     renderHub.offRender(unsubId);
     unsubId = null;
   }
+  // NEW: 注销主窗 chart
+  try {
+    renderHub.unregisterChart("main");
+  } catch {}
+
   renderHub.endInteraction("main");
   try {
     ro && ro.disconnect();
