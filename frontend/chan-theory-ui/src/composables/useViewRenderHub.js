@@ -141,13 +141,15 @@ export function useViewRenderHub() {
         freq,
         klineStyle: settings.klineStyle.value,
         adjust: vm.adjust.value || "none",
-        // CHAN 数据由主窗内现有 computeInclude/computeFractals 继续处理，保持最小改动
+      // CHAN 数据由主窗内现有 computeInclude/computeFractals 继续处理（后续可迁至渲染中枢）
         reducedBars: [],
         mapOrigToReduced: [],
       },
       {
         initialRange,
-        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
+      tooltipPositioner: tipPositioner,
+      // 主窗作为“交互源”
+      isInteractionSource: true,
       }
     );
 
@@ -166,9 +168,11 @@ export function useViewRenderHub() {
       },
       {
         initialRange,
-        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
-      }
-    );
+      tooltipPositioner: tipPositioner,
+      // 副窗仅联动，不作为交互源
+      isInteractionSource: false,
+    }
+  );
 
     // 构建默认指标窗（提供工具方法获取具体 kind 的 option；此处留空由 IndicatorPanel 请求）
     const dataForIndicators = { candles, indicators, freq, initialRange };

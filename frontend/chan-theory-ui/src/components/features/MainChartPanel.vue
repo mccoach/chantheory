@@ -201,7 +201,6 @@
     @keydown="onKeydown"
     @mouseenter="focusWrap"
     @dblclick="openSettingsDialog"
-    @wheel.prevent="onWheelZoom"
   >
     <div class="top-info">
       <div class="title">{{ displayTitle }}</div>
@@ -1340,7 +1339,7 @@ function onKeydown(e) {
   // 若在当前视窗内 → 仅更新十字线/tooltip，对齐交给 ECharts 组联动（唯一机制）
   const inView = nextIdx >= sIdx && nextIdx <= eIdx;
 
-    currentIndex = nextIdx;
+  currentIndex = nextIdx;
 
   try {
     // 使用 ECharts 内建：先更新轴指示（会通过 group 联动同步其它窗体）
@@ -1357,20 +1356,20 @@ function onKeydown(e) {
       });
     }
     // 源窗显式 showTip，保证本窗 tooltip 可见（其他窗体会随 group 联动对齐）
-        chart.dispatchAction({
+    chart.dispatchAction({
       type: "showTip",
-          seriesIndex: 0,
-          dataIndex: currentIndex,
-        });
-    } catch {}
+      seriesIndex: 0,
+      dataIndex: currentIndex,
+    });
+  } catch {}
 
   // 持久化最新聚焦 ts（保留）
-    try {
-      const tsv = tsArr[nextIdx];
-      if (Number.isFinite(tsv)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
-      }
-    } catch {}
+  try {
+    const tsv = tsArr[nextIdx];
+    if (Number.isFinite(tsv)) {
+      settings.setLastFocusTs(vm.code.value, vm.freq.value, tsv);
+    }
+  } catch {}
 
   if (inView) return;
 
@@ -1511,14 +1510,19 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
   return out;
 }
 
-/* onDataZoom：程序化事件早退 + 门卫判定（执行延后到主流程外） */
+// 交互会话标记与 idle-commit 提交
+let userZoomActive = false;
+let _dzIdleTimer = null;
+let _pendingRange = null;
+
+// dataZoom 期间：不回写范围；仅在短 idle/松手后一次性承接
 function onDataZoom(params) {
   try {
     const info = (params && params.batch && params.batch[0]) || params || {};
     const len = (vm.candles.value || []).length;
     if (!len) return;
 
-    // 2) 提取索引区间（优先索引，其次百分比）
+    // 提取索引区间（优先索引，其次百分比）
     let sIdx, eIdx;
     if (
       typeof info.startValue !== "undefined" &&
@@ -1535,60 +1539,43 @@ function onDataZoom(params) {
     if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
- 
-    // —— 程序化阻断（签名匹配）：仅当守护 active 且签名一致时早退；否则视为用户交互并关闭守护 —— //
-    const sigEvent = `${sIdx}:${eIdx}`;
-    if (progZoomGuard.active && sigEvent === progZoomGuard.sig) {
-      return;
-    }
-    if (progZoomGuard.active && sigEvent !== progZoomGuard.sig) {
-      progZoomGuard.active = false;
-    }
 
-    // —— 若这次 dataZoom 跟“最后一次已应用范围”完全相同，直接返回，打断循环 —— //
-    if (lastAppliedRange.s === sIdx && lastAppliedRange.e === eIdx) {
-      return;
-    }
+    // 标记：进入交互会话；仅缓存最终范围
+    userZoomActive = true;
+    _pendingRange = { sIdx, eIdx };
 
-    // 3) 有效变化判定（仅关键三项）
-    const currBars = Math.max(
-      1,
-      Number(hub.getState().barsCount || vm.meta.value?.view_rows || 1)
-    );
-    const bars_new = Math.max(1, eIdx - sIdx + 1);
+    // idle-commit：短空闲后一次性承接到中枢
+    if (_dzIdleTimer) clearTimeout(_dzIdleTimer);
+    _dzIdleTimer = setTimeout(() => {
+      try {
+        if (!_pendingRange) {
+          userZoomActive = false;
+          return;
+        }
+        const { sIdx: s, eIdx: e } = _pendingRange;
+        const bars_new = Math.max(1, e - s + 1);
+        const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
+        const anchorTs = Number.isFinite(tsArr[e])
+          ? tsArr[e]
+          : hub.getState().rightTs;
 
-    // 注意：用 vm.viewEndIdx 可能与当前图上的范围不同步，容易误判。
-    // 改成用 lastAppliedRange.e（若已初始化），更贴近当前图的真实范围。
-    const currEIdx = Number.isFinite(lastAppliedRange.e)
-      ? lastAppliedRange.e
-      : Number(vm.meta.value?.view_end_idx ?? eIdx);
-    const changedBars = bars_new !== currBars;
-    const changedEIdx = eIdx !== currEIdx;
-    if (!changedBars && !changedEIdx) return;
+        const currBars = Math.max(1, Number(hub.getState().barsCount || 1));
+        const currRt = hub.getState().rightTs;
+        const needBars = bars_new !== currBars;
+        const needRt = Number.isFinite(anchorTs) && anchorTs !== currRt;
 
-    const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
-    const anchorTs = Number.isFinite(tsArr[eIdx])
-      ? tsArr[eIdx]
-      : hub.getState().rightTs;
-
-    if (!changedBars && changedEIdx) {
-      // 仅右端变化 → Pan（延迟到主流程外）
-      if (anchorTs !== hub.getState().rightTs) {
-        setTimeout(() => hub.execute("Pan", { nextRightTs: anchorTs }), 0);
+        if (needBars || needRt) {
+          const action = needBars ? "ScrollZoom" : "Pan";
+          const payload = needBars
+            ? { nextBars: bars_new, nextRightTs: anchorTs }
+            : { nextRightTs: anchorTs };
+          hub.execute(action, payload);
+        }
+      } finally {
+        _pendingRange = null;
+        userZoomActive = false;
       }
-    } else {
-      // 视为缩放：bars 或 bars+右端双变（延迟到主流程外）
-      if (bars_new !== currBars || anchorTs !== hub.getState().rightTs) {
-        setTimeout(
-          () =>
-            hub.execute("ScrollZoom", {
-              nextBars: bars_new,
-              nextRightTs: anchorTs,
-            }),
-          0
-        );
-      }
-    }
+    }, 120); // 短 idle（120ms）后承接一次
   } catch {}
 }
 
@@ -1605,10 +1592,14 @@ function doSinglePassRender(snapshot) {
     const reduced = chanCache.value.reduced || [];
     const mapReduced = chanCache.value.map || [];
 
-    const initialRange = {
-      startValue: snapshot.main.range.startValue,
-      endValue: snapshot.main.range.endValue,
-    };
+    // 若处于交互会话（用户拖拽/缩放进行中），禁止我们注入 initialRange，避免抢权；
+    // 会后承接由 onDataZoom idle-commit 完成。
+    const initialRange = userZoomActive
+      ? undefined
+      : {
+          startValue: snapshot.main.range.startValue,
+          endValue: snapshot.main.range.endValue,
+        };
 
     // —— tooltip 位置从上游统一源头订阅（renderHub），确保与副窗一致 —— //
     const tipPositioner = renderHub.getTipPositioner();
@@ -1620,13 +1611,18 @@ function doSinglePassRender(snapshot) {
 
     // 标签带与标签文本的“基础”间距（恒定）：
     const DEFAULT_MAIN_AXIS_LABEL_SPACE_PX = 28; // 标签带总高度（标签与 slider 的相对间距恒定）
-    const BASE_XAXIS_LABEL_MARGIN = 12;          // 标签文本到轴线的基础内距（恒定）
+    const BASE_XAXIS_LABEL_MARGIN = 12; // 标签文本到轴线的基础内距（恒定）
 
     // MOD: 仅通过“主图有效区底部补位”来为符号挤出空间（关闭符号则回收为 0）
     // 建议用统一宽度源近似为符号的垂直尺寸，并加一侧安全边距
-    const MARKER_HEIGHT_PX = Math.max(2, Math.round(snapshot.core?.markerWidthPx || 4));
+    const MARKER_HEIGHT_PX = Math.max(
+      2,
+      Math.round(snapshot.core?.markerWidthPx || 4)
+    );
     const SAFE_PADDING_PX = 12;
-    const mainBottomExtraPx = anyMarkers ? MARKER_HEIGHT_PX + SAFE_PADDING_PX-8 : 0;
+    const mainBottomExtraPx = anyMarkers
+      ? MARKER_HEIGHT_PX + SAFE_PADDING_PX - 8
+      : 0;
 
     // 关键补偿：标签文本相对轴线的内距等量增加 mainBottomExtraPx，
     // 这样轴线上移多少（挤出符号空间），标签就向下补偿多少，保证“标签相对 slider/画布底边的位置恒定不变”
@@ -1646,11 +1642,12 @@ function doSinglePassRender(snapshot) {
         mapOrigToReduced: mapReduced, // 原始索引→合并索引映射
       },
       {
-        initialRange,                                    // 统一可视范围
-        tooltipPositioner: tipPositioner,                 // ← 新增：统一注入定位器
+        initialRange, // 统一可视范围
+        tooltipPositioner: tipPositioner, // ← 新增：统一注入定位器
         mainAxisLabelSpacePx: DEFAULT_MAIN_AXIS_LABEL_SPACE_PX, // 不变：标签带高度（标签与 slider 间距恒定）
-        xAxisLabelMargin,                                // 补偿：标签文本到轴线的内距 = 基础值 + 主图内部补位
-        mainBottomExtraPx,                               // 仅此项随标记开关调整“主图有效区高度”
+        xAxisLabelMargin, // 补偿：标签文本到轴线的内距 = 基础值 + 主图内部补位
+        mainBottomExtraPx, // 仅此项随标记开关调整“主图有效区高度”
+        isInteractionSource: true,
       }
     );
 
@@ -1679,9 +1676,11 @@ function doSinglePassRender(snapshot) {
     progZoomGuard.active = true;
     progZoomGuard.sig = guardSig;
     progZoomGuard.ts = Date.now();
+
+    // 交互期间与日常渲染：均使用 notMerge=false 的轻量合并，避免重置 ECharts 内建会话状态
     scheduleSetOption(finalOption, {
-      notMerge: true,
-      lazyUpdate: false,
+      notMerge: false,
+      lazyUpdate: true,
       silent: true,
     });
 
@@ -1754,66 +1753,6 @@ function onClickPreset(preset) {
   } catch {}
 }
 
-// 滚轮缩放：双改；以“当前鼠标悬浮位置”为中心（convertFromPixel），不可用时回退 currentIndex
-function onWheelZoom(e) {
-  const arr = vm.candles.value || [];
-  const n = arr.length;
-  if (!n || !chart) return;
-
-  // 就绪判断：必须有 series
-  const opt = chart.getOption?.() || {};
-  const readyCoord = Array.isArray(opt.series) && opt.series.length > 0;
-  if (!readyCoord) return;
-
-  // 中心索引
-  let centerIdx = -1;
-  try {
-    const result = chart.convertFromPixel({ seriesIndex: 0 }, [
-      e.offsetX,
-      e.offsetY,
-    ]);
-    if (Array.isArray(result)) {
-      centerIdx = Math.round(result[0]);
-    }
-  } catch {}
-  if (!Number.isFinite(centerIdx) || centerIdx < 0 || centerIdx >= n) {
-    centerIdx =
-      Number.isFinite(currentIndex) && currentIndex >= 0
-        ? Math.max(0, Math.min(n - 1, currentIndex))
-        : Math.floor((vm.viewStartIdx + vm.viewEndIdx) / 2);
-  }
-
-  // 目标 bars
-  const currBars = Math.max(
-    1,
-    Number(hub.getState().barsCount || vm.meta.value?.view_rows || 1)
-  );
-  const deltaBars =
-    e.deltaY < 0
-      ? -Math.max(1, Math.floor(currBars * 0.12))
-      : Math.max(1, Math.floor(currBars * 0.12));
-  let nextBars = Math.max(1, currBars + deltaBars);
-
-  // 以 centerIdx 为中心确定窗口，并计算 anchorTs
-  const half = Math.floor(nextBars / 2);
-  let sIdx = Math.max(0, centerIdx - half);
-  let eIdx = sIdx + nextBars - 1;
-  if (eIdx > n - 1) {
-    eIdx = n - 1;
-    sIdx = Math.max(0, eIdx - nextBars + 1);
-  }
-  const anchorTs = Date.parse(arr[eIdx]?.t);
-
-  // 有效变化判定：bars 或 rightTs 任一变化
-  const st = hub.getState();
-  const changedBars = nextBars !== st.barsCount;
-  const changedRt = Number.isFinite(anchorTs) && anchorTs !== st.rightTs;
-
-  if (!changedBars && !changedRt) return;
-
-  hub.execute("ScrollZoom", { nextBars, nextRightTs: anchorTs });
-}
-
 /* 生命周期（订阅时机调整到 chart.init 后） */
 onMounted(() => {
   const el = host.value;
@@ -1835,7 +1774,9 @@ onMounted(() => {
       if (idx >= 0 && idx < len) {
         currentIndex = idx;
         // 将“最后聚焦 ts”持久化，供键盘左右键作为起跳点
-        const tsVal = vm.candles.value[idx]?.t ? Date.parse(vm.candles.value[idx].t) : null;
+        const tsVal = vm.candles.value[idx]?.t
+          ? Date.parse(vm.candles.value[idx].t)
+          : null;
         if (Number.isFinite(tsVal)) {
           settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
         }
@@ -1861,8 +1802,6 @@ onMounted(() => {
   unsubId = renderHub.onRender((snapshot) => {
     doSinglePassRender(snapshot);
   });
-
-
 });
 
 onBeforeUnmount(() => {

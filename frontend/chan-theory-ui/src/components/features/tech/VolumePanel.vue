@@ -636,10 +636,14 @@ onMounted(async () => {
   updateHeaderFromCurrent();
 });
 
+// 保存最近一次渲染快照
+const lastSnapshot = ref(null);
+
 // 订阅上游渲染快照：一次性渲染
 const unsubId = renderHub.onRender((snapshot) => {
   try {
     if (!chart) return;
+    lastSnapshot.value = snapshot;                         // 保存快照供统计使用
     const mySeq = ++renderSeq;
     chart.setOption(snapshot.volume.option, true);
     recomputeVisibleStats(mySeq);
@@ -665,80 +669,40 @@ onBeforeUnmount(() => {
   chart = null;
 });
 
-function getCurrentZoomIndexRange() {
-  try {
-    if (!chart) return null;
-    const opt = chart.getOption?.();
-    const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
-    if (!dz.length) return null;
-    const z = dz.find(
-      (x) =>
-        typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
-    );
-    const len = (vm.candles.value || []).length;
-    if (z && len > 0) {
-      const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
-      const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
-      return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
-    }
-  } catch {}
-  return null;
-}
 function recomputeVisibleStats(seq) {
   if (isStale(seq)) return;
   try {
-    const range = getCurrentZoomIndexRange();
-    const len = (vm.candles.value || []).length;
-    if (!len || !range) {
-      stat.value = {
-        total: "-",
-        mean: "-",
-        max: "-",
-        pumpDays: 0,
-        maxConsecDump: 0,
-      };
+    const snap = lastSnapshot.value;
+    const arr = vm.candles.value || [];
+    const len = arr.length;
+    if (!len || !snap?.main?.range) {
+      stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
       return;
     }
-    const { sIdx, eIdx } = range;
+    const sIdx = Number(snap.main.range.startValue);
+    const eIdx = Number(snap.main.range.endValue);
+    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) {
+      stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
+      return;
+    }
     const isAmount = (settings.volSettings.value?.mode || "vol") === "amount";
     const baseSeries = isAmount
-      ? (vm.candles.value || []).map((d) =>
-          typeof d.a === "number" ? d.a : null
-        )
-      : vm.indicators.value?.VOLUME ||
-        (vm.candles.value || []).map((d) =>
-          typeof d.v === "number" ? d.v : null
-        );
-    let sum = 0,
-      cnt = 0,
-      mx = 0;
+      ? arr.map((d) => (typeof d.a === "number" ? d.a : null))
+      : vm.indicators.value?.VOLUME || arr.map((d) => (typeof d.v === "number" ? d.v : null));
+    let sum = 0, cnt = 0, mx = 0;
     for (let i = sIdx; i <= eIdx; i++) {
       const v = Number(baseSeries[i]);
       if (Number.isFinite(v)) {
-        sum += v;
-        cnt += 1;
-        if (v > mx) mx = v;
+        sum += v; cnt += 1; if (v > mx) mx = v;
       }
     }
     const mean = cnt > 0 ? sum / cnt : 0;
     const fmt0 = (x) => (Number.isFinite(+x) ? (+x).toFixed(0) : "-");
     if (isStale(seq)) return;
-    stat.value = {
-      total: fmt0(sum),
-      mean: fmt0(mean),
-      max: fmt0(mx),
-      pumpDays: 0,
-      maxConsecDump: 0,
-    };
+    stat.value = { total: fmt0(sum), mean: fmt0(mean), max: fmt0(mx), pumpDays: 0, maxConsecDump: 0 };
   } catch {
     if (isStale(seq)) return;
-    stat.value = {
-      total: "-",
-      mean: "-",
-      max: "-",
-      pumpDays: 0,
-      maxConsecDump: 0,
-    };
+    stat.value = { total: "-", mean: "-", max: "-", pumpDays: 0, maxConsecDump: 0 };
   }
 }
 
