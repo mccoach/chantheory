@@ -2,10 +2,10 @@
 # ==============================
 # 本版要点（相对原实现的根因重构）：
 # - 继续保障“近端达标 + 缓存 + 复权/重采样”的数据完整性（ALL 序列）
-# - 新增：服务端统一计算“终端可见切片”的索引窗口（右端锚定），并在 meta 返回：
+# - 新增：写入 close_time（YYYY-MM-DD HH:MM，Asia/Shanghai）到 candles_cache
+# - 服务端统一计算“终端可见切片”的索引窗口（右端锚定），并在 meta 返回：
 #   * all_rows, view_rows, view_start_idx, view_end_idx, window_preset_effective
 #   * start/end（可见切片左右端时间）
-# - 前端仅渲染“ALL 序列”并按 meta.view_* 设置 dataZoom；不再参与切片计算
 from __future__ import annotations  # 允许前置注解（兼容 3.8+）
 
 from typing import Optional, Dict, Any, List, Tuple, Set  # 类型注解
@@ -33,6 +33,7 @@ from backend.utils.time import (  # 时间工具
     TZ_SHANGHAI,
     ms_from_yyyymmdd,
     yyyymmdd_from_ms,
+    format_close_time_str,  # 新增：自然可读收盘时间
 )
 from backend.services.indicators import ma, macd, kdj, rsi, boll  # 指标
 from backend.datasource.fetchers import fetch_period_ms  # 抓取入口
@@ -335,16 +336,26 @@ def _fallback_resample_from_1m(symbol: str, target_freq: str, sec_type: str, pre
         return (None, None)
     rows = []
     for _, r in df_rs.iterrows():
-        rows.append((
-            symbol, target_freq, "none", int(r["ts"]),
-            float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
-            float(r["volume"] if pd.notna(r["volume"]) else 0.0),
-            float(r["amount"]) if pd.notna(r.get("amount", np.nan)) else None,
-            None,
-            "resample",
-            datetime.now().isoformat(),
-            f"resample_1m_to_{target_freq}",
-        ))
+        ts_val = int(r["ts"])
+        rows.append({
+            "symbol": symbol,
+            "freq": target_freq,
+            "adjust": "none",
+            "close_time": format_close_time_str(ts_val, target_freq),
+            "ts": ts_val,
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
+            "amount": float(r["amount"]) if pd.notna(r.get("amount", np.nan)) else None,
+            "turnover_rate": None,
+            "source": "resample",
+            "fetched_at": datetime.now().isoformat(),
+            "revision": f"resample_1m_to_{target_freq}",
+        })
+    # 写库
+    upsert_cache_candles(rows)
     if rows:
         upsert_cache_candles(rows)
         rebuild_cache_meta(symbol, target_freq, "none")
@@ -414,16 +425,25 @@ def _fallback_resample_from_1d(symbol: str, target_freq: str) -> Tuple[Optional[
         return (None, None)
     rows = []
     for _, r in df_rs.iterrows():
-        rows.append((
-            symbol, target_freq, "none", int(r["ts"]),
-            float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
-            float(r["volume"] if pd.notna(r["volume"]) else 0.0),
-            float(r["amount"]) if pd.notna(r.get("amount", np.nan)) else None,
-            None,
-            "resample",
-            datetime.now().isoformat(),
-            f"resample_1d_to_{target_freq}",
-        ))
+        ts_val = int(r["ts"])
+        rows.append({
+            "symbol": symbol,
+            "freq": target_freq,
+            "adjust": "none",
+            "close_time": format_close_time_str(ts_val, target_freq),
+            "ts": ts_val,
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
+            "amount": float(r["amount"]) if pd.notna(r.get("amount", np.nan)) else None,
+            "turnover_rate": None,
+            "source": "resample",
+            "fetched_at": datetime.now().isoformat(),
+            "revision": f"resample_1d_to_{target_freq}",
+        })
+    upsert_cache_candles(rows)
     if rows:
         upsert_cache_candles(rows)
         rebuild_cache_meta(symbol, target_freq, "none")
@@ -464,16 +484,24 @@ def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_i
         has_tvr = "turnover_rate" in x.columns
         rows = []
         for _, r in x.iterrows():
-            rows.append((
-                symbol, freq, "none", int(r["ts"]),
-                float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
-                float(r["volume"] if pd.notna(r["volume"]) else 0.0),
-                float(r["amount"]) if has_amt and pd.notna(r["amount"]) else None,
-                float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
-                provider or "",
-                datetime.now().isoformat(),
-                src_key or None,
-            ))
+            ts_val = int(r["ts"])
+            rows.append({
+                "symbol": symbol,
+                "freq": freq,
+                "adjust": "none",
+                "close_time": format_close_time_str(ts_val, freq),
+                "ts": ts_val,
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
+                "amount": float(r["amount"]) if has_amt and pd.notna(r["amount"]) else None,
+                "turnover_rate": float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
+                "source": provider or "",
+                "fetched_at": datetime.now().isoformat(),
+                "revision": src_key or None,
+            })
         if rows:
             upsert_cache_candles(rows)
             rebuild_cache_meta(symbol, freq, "none")

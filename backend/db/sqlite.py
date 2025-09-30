@@ -1,10 +1,11 @@
 # backend/db/sqlite.py  # SQLite 连接/DDL/UPSERT/缓存LRU清理/迁移/健康检查（全量）
 # ==============================
 # 说明：
-# - candles（长期 1d）与 candles_cache（非 1d）结构完全一致，均含 amount/turnover_rate/revision
-# - 提供在线迁移，缺列则 ALTER TABLE 增加
-# - upsert_candles/upsert_cache_candles 按 14 列写入
-# - 新增：select_factors 函数，用于高效查询复权因子
+# - candles/candles_cache 表新增 close_time TEXT，并在列顺序上将 close_time 放在 ts 之前（紧前）。
+# - 启动迁移：
+#   * 若缺列 → ALTER TABLE 增加 close_time；
+#   * 若列顺序不满足“close_time 在 ts 前”，则重建新表并回填（close_time 为空时按 ts 计算）。
+# - upsert_candles/upsert_cache_candles 改为“命名占位符 + 字典绑定”（更稳健），并在写库前自动补齐 close_time。
 # ==============================
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import threading
 import json
 
 from backend.settings import settings
+from backend.utils.time import format_close_time_str  # 计算人读友好收盘时间
 
 _LOCAL = threading.local()
 _GEN: int = 0
@@ -56,6 +58,29 @@ def _create_candles_schema(cur: sqlite3.Cursor) -> None:
       symbol TEXT NOT NULL,
       freq   TEXT NOT NULL,
       adjust TEXT NOT NULL,
+      close_time TEXT,            -- 人读友好的收盘时间（YYYY-MM-DD HH:MM，Asia/Shanghai）
+      ts     INTEGER NOT NULL,
+      open   REAL NOT NULL,
+      high   REAL NOT NULL,
+      low    REAL NOT NULL,
+      close  REAL NOT NULL,
+      volume REAL NOT NULL,
+      amount REAL,
+      turnover_rate REAL,
+      source TEXT NOT NULL,
+      fetched_at TEXT NOT NULL,
+      revision TEXT,
+      PRIMARY KEY (symbol, freq, adjust, ts)
+    );
+    """)
+
+def _ensure_candles_cache_schema(cur: sqlite3.Cursor) -> None:
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS candles_cache (
+      symbol TEXT NOT NULL,
+      freq   TEXT NOT NULL,
+      adjust TEXT NOT NULL,
+      close_time TEXT,            -- 人读友好的收盘时间（YYYY-MM-DD HH:MM，Asia/Shanghai）
       ts     INTEGER NOT NULL,
       open   REAL NOT NULL,
       high   REAL NOT NULL,
@@ -78,10 +103,11 @@ def _migrate_drop_trading_status_if_needed(conn: sqlite3.Connection) -> None:
     if "trading_status" not in cols:
         return
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS candles_new (
+    CREATE TABLE IF NOT EXISTS candles_new_tmp (
       symbol TEXT NOT NULL,
       freq   TEXT NOT NULL,
       adjust TEXT NOT NULL,
+      close_time TEXT,
       ts     INTEGER NOT NULL,
       open   REAL NOT NULL,
       high   REAL NOT NULL,
@@ -96,35 +122,38 @@ def _migrate_drop_trading_status_if_needed(conn: sqlite3.Connection) -> None:
       PRIMARY KEY (symbol, freq, adjust, ts)
     );
     """)
-    cur.execute("""
-    INSERT INTO candles_new (symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
-    SELECT symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision FROM candles;
-    """)
+    # 回填时计算 close_time（若旧表无该列，按 ts 生成）
+    cur.execute("SELECT symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision FROM candles;")
+    rows = cur.fetchall()
+    to_insert = []
+    for r in rows:
+        ts_val = int(r["ts"])
+        to_insert.append({
+            "symbol": r["symbol"],
+            "freq": r["freq"],
+            "adjust": r["adjust"],
+            "close_time": format_close_time_str(ts_val, r["freq"]),
+            "ts": ts_val,
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"]),
+            "amount": r["amount"],
+            "turnover_rate": r["turnover_rate"],
+            "source": r["source"],
+            "fetched_at": r["fetched_at"],
+            "revision": r["revision"],
+        })
+    if to_insert:
+        cur.executemany("""
+        INSERT INTO candles_new_tmp (symbol,freq,adjust,close_time,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
+        VALUES (:symbol,:freq,:adjust,:close_time,:ts,:open,:high,:low,:close,:volume,:amount,:turnover_rate,:source,:fetched_at,:revision);
+        """, to_insert)
     cur.execute("DROP TABLE candles;")
-    cur.execute("ALTER TABLE candles_new RENAME TO candles;")
+    cur.execute("ALTER TABLE candles_new_tmp RENAME TO candles;")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_symfreq ON candles(symbol,freq,adjust,ts);")
     conn.commit()
-
-def _ensure_candles_cache_schema(cur: sqlite3.Cursor) -> None:
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS candles_cache (
-      symbol TEXT NOT NULL,
-      freq   TEXT NOT NULL,
-      adjust TEXT NOT NULL,
-      ts     INTEGER NOT NULL,
-      open   REAL NOT NULL,
-      high   REAL NOT NULL,
-      low    REAL NOT NULL,
-      close  REAL NOT NULL,
-      volume REAL NOT NULL,
-      amount REAL,
-      turnover_rate REAL,
-      source TEXT NOT NULL,
-      fetched_at TEXT NOT NULL,
-      revision TEXT,
-      PRIMARY KEY (symbol, freq, adjust, ts)
-    );
-    """)
 
 def _migrate_candles_cache_add_missing_cols(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
@@ -136,16 +165,140 @@ def _migrate_candles_cache_add_missing_cols(conn: sqlite3.Connection) -> None:
     if "revision" not in cols:
         try: cur.execute("ALTER TABLE candles_cache ADD COLUMN revision TEXT;")
         except Exception: pass
+    if "close_time" not in cols:
+        try: cur.execute("ALTER TABLE candles_cache ADD COLUMN close_time TEXT;")
+        except Exception: pass
+    conn.commit()
+
+def _migrate_add_close_time_if_needed(conn: sqlite3.Connection) -> None:
+    """为 candles 表补充 close_time 列（不存在则新增）。"""
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(candles);")
+    cols = {r["name"] for r in cur.fetchall()}
+    if "close_time" not in cols:
+        try:
+            cur.execute("ALTER TABLE candles ADD COLUMN close_time TEXT;")
+        except Exception:
+            pass
+    conn.commit()
+
+def _reorder_and_backfill_close_time(conn: sqlite3.Connection, table: str) -> None:
+    """
+    若目标表的列顺序不满足“close_time 在 ts 前”，则重建该表并回填；
+    对已有 close_time 为 NULL 的记录，按 ts 计算并填充。
+    """
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table});")
+    info = cur.fetchall()
+    cols = [dict(r) for r in info]
+    names = [c["name"] for c in cols]
+    # 若不存在 close_time，则先补列，再继续处理
+    if "close_time" not in names:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN close_time TEXT;")
+            conn.commit()
+        except Exception:
+            pass
+        cur.execute(f"PRAGMA table_info({table});")
+        info = cur.fetchall()
+        cols = [dict(r) for r in info]
+        names = [c["name"] for c in cols]
+    # 检查顺序：close_time 索引必须小于 ts 索引；否则重建
+    try:
+        idx_close = names.index("close_time")
+        idx_ts = names.index("ts")
+    except ValueError:
+        return
+    if idx_close < idx_ts:
+        # 顺序已满足，无需重建；同时做一次回填 NULL
+        cur.execute(f"SELECT symbol,freq,adjust,ts,close_time FROM {table} WHERE close_time IS NULL;")
+        rows = cur.fetchall()
+        for r in rows:
+            ct = format_close_time_str(int(r["ts"]), r["freq"])
+            cur.execute(f"UPDATE {table} SET close_time=? WHERE symbol=? AND freq=? AND adjust=? AND ts=?;",
+                        (ct, r["symbol"], r["freq"], r["adjust"], int(r["ts"])))
+        conn.commit()
+        return
+
+    # 重建表，列顺序：symbol,freq,adjust,close_time,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision
+    new_name = f"{table}_new_reordered"
+    cur.execute(f"DROP TABLE IF EXISTS {new_name};")
+    cur.execute(f"""
+    CREATE TABLE {new_name} (
+      symbol TEXT NOT NULL,
+      freq   TEXT NOT NULL,
+      adjust TEXT NOT NULL,
+      close_time TEXT,
+      ts     INTEGER NOT NULL,
+      open   REAL NOT NULL,
+      high   REAL NOT NULL,
+      low    REAL NOT NULL,
+      close  REAL NOT NULL,
+      volume REAL NOT NULL,
+      amount REAL,
+      turnover_rate REAL,
+      source TEXT NOT NULL,
+      fetched_at TEXT NOT NULL,
+      revision TEXT,
+      PRIMARY KEY (symbol, freq, adjust, ts)
+    );
+    """)
+    cur.execute(f"SELECT symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision,close_time FROM {table};")
+    rows = cur.fetchall()
+    to_insert = []
+    for r in rows:
+        ts_val = int(r["ts"])
+        ct = r["close_time"] if r["close_time"] else format_close_time_str(ts_val, r["freq"])
+        to_insert.append({
+            "symbol": r["symbol"],
+            "freq": r["freq"],
+            "adjust": r["adjust"],
+            "close_time": ct,
+            "ts": ts_val,
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"]),
+            "amount": r["amount"],
+            "turnover_rate": r["turnover_rate"],
+            "source": r["source"],
+            "fetched_at": r["fetched_at"],
+            "revision": r["revision"],
+        })
+    if to_insert:
+        cur.executemany(f"""
+        INSERT INTO {new_name} (symbol,freq,adjust,close_time,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
+        VALUES (:symbol,:freq,:adjust,:close_time,:ts,:open,:high,:low,:close,:volume,:amount,:turnover_rate,:source,:fetched_at,:revision);
+        """, to_insert)
+    cur.execute(f"DROP TABLE {table};")
+    cur.execute(f"ALTER TABLE {new_name} RENAME TO {table};")
+    # 重建常用索引
+    if table == "candles":
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_symfreq ON candles(symbol,freq,adjust,ts);")
+    elif table == "candles_cache":
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_cache_symfreq ON candles_cache(symbol,freq,adjust,ts);")
     conn.commit()
 
 def init_schema() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
+    # 创建基础表（close_time 在 ts 前）
     _create_candles_schema(cur)
+    _ensure_candles_cache_schema(cur)
     conn.commit()
-    _migrate_drop_trading_status_if_needed(conn)
 
+    # 兼容旧表：交易状态迁移与补列
+    _migrate_drop_trading_status_if_needed(conn)
+    _migrate_add_close_time_if_needed(conn)
+    _migrate_candles_cache_add_missing_cols(conn)
+
+    # 列顺序校正与回填（确保 close_time 在 ts 前，并回填 NULL）
+    _reorder_and_backfill_close_time(conn, "candles")
+    _reorder_and_backfill_close_time(conn, "candles_cache")
+
+    # 其余表保持不变
     cur.execute("""
     CREATE TABLE IF NOT EXISTS adj_factors (
       symbol TEXT NOT NULL,
@@ -173,10 +326,6 @@ def init_schema() -> None:
       updated_at TEXT NOT NULL
     );
     """)
-
-    _ensure_candles_cache_schema(cur)
-    conn.commit()
-    _migrate_candles_cache_add_missing_cols(conn)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS cache_meta (
@@ -207,6 +356,7 @@ def init_schema() -> None:
     except Exception:
         pass
 
+    # 索引
     cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_symfreq ON candles(symbol,freq,adjust,ts);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_cache_symfreq ON candles_cache(symbol,freq,adjust,ts);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cache_meta_last_access ON cache_meta(last_access);")
@@ -214,13 +364,14 @@ def init_schema() -> None:
     conn.commit()
 
 # ---- 长期表（1d） -------------------------------------------------------------
-def upsert_candles(rows: Iterable[Tuple]) -> int:
+def upsert_candles(rows: Iterable[Dict[str, Any]]) -> int:
     conn = get_conn()
     cur = conn.cursor()
     sql = """
-    INSERT INTO candles (symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    INSERT INTO candles (symbol,freq,adjust,close_time,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
+    VALUES (:symbol,:freq,:adjust,:close_time,:ts,:open,:high,:low,:close,:volume,:amount,:turnover_rate,:source,:fetched_at,:revision)
     ON CONFLICT(symbol,freq,adjust,ts) DO UPDATE SET
+      close_time=excluded.close_time,
       open=excluded.open,
       high=excluded.high,
       low=excluded.low,
@@ -232,7 +383,12 @@ def upsert_candles(rows: Iterable[Tuple]) -> int:
       fetched_at=excluded.fetched_at,
       revision=excluded.revision;
     """
-    cur.executemany(sql, list(rows))
+    def _prep(r: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(r or {})
+        if not d.get("close_time") and d.get("ts") is not None:
+            d["close_time"] = format_close_time_str(int(d["ts"]), d.get("freq"))
+        return d
+    cur.executemany(sql, [ _prep(r) for r in list(rows) ])
     conn.commit()
     return cur.rowcount
 
@@ -280,18 +436,24 @@ def select_factors(symbol: str, start_ymd: int, end_ymd: int) -> List[Dict[str, 
     return [dict(r) for r in rows]
 
 # ---- 缓存表/元信息 ------------------------------------------------------------
-def upsert_cache_candles(rows: Iterable[Tuple]) -> int:
+def upsert_cache_candles(rows: Iterable[Dict[str, Any]]) -> int:
     conn = get_conn()
     cur = conn.cursor()
     sql = """
-    INSERT INTO candles_cache (symbol,freq,adjust,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    INSERT INTO candles_cache (symbol,freq,adjust,close_time,ts,open,high,low,close,volume,amount,turnover_rate,source,fetched_at,revision)
+    VALUES (:symbol,:freq,:adjust,:close_time,:ts,:open,:high,:low,:close,:volume,:amount,:turnover_rate,:source,:fetched_at,:revision)
     ON CONFLICT(symbol,freq,adjust,ts) DO UPDATE SET
+      close_time=excluded.close_time,
       open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
       volume=excluded.volume, amount=excluded.amount, turnover_rate=excluded.turnover_rate,
       source=excluded.source, fetched_at=excluded.fetched_at, revision=excluded.revision;
     """
-    cur.executemany(sql, list(rows))
+    def _prep(r: Dict[str, Any]) -> Dict[str, Any]:
+        d = dict(r or {})
+        if not d.get("close_time") and d.get("ts") is not None:
+            d["close_time"] = format_close_time_str(int(d["ts"]), d.get("freq"))
+        return d
+    cur.executemany(sql, [ _prep(r) for r in list(rows) ])
     conn.commit()
     return cur.rowcount
 
@@ -330,6 +492,7 @@ def touch_cache_meta(symbol: str, freq: str, adjust: str="none") -> None:
     conn.commit()
 
 def rebuild_cache_meta(symbol: str, freq: str, adjust: str="none") -> None:
+    """修复变量名，统计并写入 cache_meta。"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(1) AS r, MIN(ts) AS mn, MAX(ts) AS mx FROM candles_cache WHERE symbol=? AND freq=? AND adjust=?;", (symbol,freq,adjust))
@@ -390,7 +553,7 @@ def evict_cache_by_lru(max_rows: int, ttl_days: int = 0) -> Dict[str, Any]:
         conn.commit()
     return {"removed_partitions":removed_partitions, "removed_rows":removed_rows, "total_rows":total}
 
-# ---- 符号索引与快照 -----------------------------------------------------------
+# ---- 符号索引与快照/健康/迁移（保持不变） ----
 def upsert_symbol_index(rows: Iterable[Tuple[str, str, str, str, str]]) -> int:
     conn = get_conn()
     cur = conn.cursor()

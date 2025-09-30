@@ -413,14 +413,22 @@ export function presetToBars(freq, preset, totalBars) {
 } // 函数结束
 
 export function pickPresetByBarsCountDown(freq, barsCount, totalBars) {
-  // 向下就近高亮
-  const candidates = WINDOW_PRESETS.filter((p) => p !== "ALL") // 从预设生成候选表 // 去掉 ALL（避免无平移空间默认 ALL）
-    .map((p) => ({ p, v: presetToBars(freq, p, totalBars) })) // 计算每项 bars（内部已向上取整）
-    .filter((x) => x.v > 0) // 过滤无效条目
-    .sort((a, b) => a.v - b.v); // 按 bars 升序
-  if (!candidates.length) return "ALL"; // 无候选则回退 ALL
-  const target = Math.max(1, Math.ceil(Number(barsCount || 0))); // 目标 barsCount（向上取整）
-  let chosen = candidates[0]; // 缺省取最小
+  // —— 修复：全覆盖时高亮 ALL —— //
+  const n = Math.max(0, Math.floor(Number(totalBars || 0)));
+  const target = Math.max(1, Math.ceil(Number(barsCount || 0)));
+  if (n > 0 && target >= n) {
+    return "ALL";
+  }
+
+  const candidates = WINDOW_PRESETS
+    .filter((p) => p !== "ALL")
+    .map((p) => ({ p, v: presetToBars(freq, p, totalBars) }))
+    .filter((x) => x.v > 0)
+    .sort((a, b) => a.v - b.v);
+
+  if (!candidates.length) return "ALL";
+
+  let chosen = candidates[0];
   for (const c of candidates) {
     // 遍历找 <= target 的最大项
     if (c.v <= target) chosen = c;

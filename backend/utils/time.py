@@ -1,40 +1,45 @@
 # backend/utils/time.py
 # ==============================
 # 说明：时间与时区工具（统一 Asia/Shanghai）
-# 提供能力：
-# - 时区对象获取与 ISO8601 格式化（get_tz/now_iso/to_iso）
-# - 日期与毫秒互转（YYYYMMDD <-> date <-> ms）
-# - 自然日的起止毫秒（day_bounds_ms）
-# - 范围裁剪与日偏移（clamp_range_ms/shift_days_yyyymmdd）
-# - 同日判断/分钟对齐/日起对齐（is_same_day/align_to_minute/align_to_day_start）
-# - 今天的 YYYYMMDD（today_yyyymmdd）
-# - 解析“多种日期表现”为 YYYMMDD（_parse_yyyymmdd_like）
-# - 统一归一化窗口（normalize_yyyymmdd_range），默认最早 1990-01-01
-# 约定：
-# - 全链路统一时区为 Asia/Shanghai，避免跨时区误差
-# - 对外推荐使用 YYYY-MM-DD 可读格式；内部换算为 YYYMMDD 与毫秒
+# 重构要点（仅内部结构整合，接口契约保持不变）：
+# - 统一内部时区获取与 datetime 构造（_get_tz/_to_dt_ms），避免重复拼装时区/格式逻辑。
+# - 所有公开函数签名与返回语义保持不变（get_tz/now_iso/to_iso/.../normalize_yyyymmdd_range）。
+# - format_close_time_str：统一使用内部构造，输出“YYYY-MM-DD HH:MM”（Asia/Shanghai，无时区后缀）。
 # ==============================
 
 from __future__ import annotations  # 兼容前置注解（Python 3.8+ 友好）
 
-# 从 datetime 导入所需类型；将 time 类重命名为 dt_time，避免与标准库 time 模块冲突
-from datetime import datetime, date, time as dt_time, timedelta
+from datetime import datetime, date, time as dt_time, timedelta  # 标准时间
+from zoneinfo import ZoneInfo  # 标准时区库（Python 3.9+）
+from typing import Optional, Tuple, Union  # 类型注解
 
-# 标准时区库（Python 3.9+）
-from zoneinfo import ZoneInfo
-
-# 类型注解
-from typing import Optional, Tuple, Union
-
-# 本模块统一使用此常量表示上海时区
+# 统一时区常量
 TZ_SHANGHAI = "Asia/Shanghai"
+
+# 内部：时区缓存，减少重复创建
+_TZ_CACHE: dict[str, ZoneInfo] = {}
+
+
+def _get_tz(tz_name: str = TZ_SHANGHAI) -> ZoneInfo:
+    """内部获取并缓存 ZoneInfo 实例。"""
+    t = tz_name or TZ_SHANGHAI
+    if t not in _TZ_CACHE:
+        _TZ_CACHE[t] = ZoneInfo(t)
+    return _TZ_CACHE[t]
+
+
+def _to_dt_ms(ms: int, tz_name: str = TZ_SHANGHAI) -> datetime:
+    """内部：毫秒 → datetime（指定时区）。"""
+    tz = _get_tz(tz_name)
+    return datetime.fromtimestamp(int(ms) / 1000.0, tz=tz)
 
 
 def get_tz(sh_tz: str = TZ_SHANGHAI) -> ZoneInfo:
     """
     返回给定名称的时区对象；默认 Asia/Shanghai。
+    （公开接口保持不变）
     """
-    return ZoneInfo(sh_tz)
+    return _get_tz(sh_tz)
 
 
 def now_iso(tz_name: str = TZ_SHANGHAI) -> str:
@@ -42,7 +47,7 @@ def now_iso(tz_name: str = TZ_SHANGHAI) -> str:
     返回当前时间的 ISO8601 字符串（含时区信息）。
     例如：'2025-08-25T21:03:45.123456+08:00'
     """
-    tz = get_tz(tz_name)
+    tz = _get_tz(tz_name)
     return datetime.now(tz).isoformat()
 
 
@@ -51,7 +56,7 @@ def to_iso(dt: datetime, tz_name: str = TZ_SHANGHAI) -> str:
     将 datetime 对象转换为指定时区的 ISO8601 字符串。
     - 若 dt 无 tzinfo，则先按 tz_name 赋予时区，再输出。
     """
-    tz = get_tz(tz_name)
+    tz = _get_tz(tz_name)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
     return dt.astimezone(tz).isoformat()
@@ -102,8 +107,7 @@ def day_bounds_ms(d: date, tz_name: str = TZ_SHANGHAI) -> Tuple[int, int]:
     - 起始：当日 00:00:00.000
     - 结束：当日 23:59:59.999（使用 datetime.time.max 表达）
     """
-    tz = get_tz(tz_name)
-    # 使用 dt_time.min / dt_time.max（datetime.time 类），避免与标准库 time 模块冲突
+    tz = _get_tz(tz_name)
     begin_dt = datetime.combine(d, dt_time.min).replace(tzinfo=tz)
     end_dt = datetime.combine(d, dt_time.max).replace(tzinfo=tz)
     return int(begin_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
@@ -122,8 +126,7 @@ def yyyymmdd_from_ms(ms: int, tz_name: str = TZ_SHANGHAI) -> int:
     """
     将 epoch 毫秒（本地时区）转换为整型 YYYMMDD。
     """
-    tz = get_tz(tz_name)
-    dt = datetime.fromtimestamp(ms / 1000.0, tz=tz)
+    dt = _to_dt_ms(ms, tz_name)
     return yyyymmdd_from_date(dt.date())
 
 
@@ -159,7 +162,7 @@ def align_to_minute(ms: int) -> int:
     """
     将毫秒对齐到分钟起点（向下取整至 00 秒）。
     """
-    return (ms // 60000) * 60000
+    return (int(ms) // 60000) * 60000
 
 
 def align_to_day_start(ms: int, tz_name: str = TZ_SHANGHAI) -> int:
@@ -174,7 +177,7 @@ def today_yyyymmdd(tz_name: str = TZ_SHANGHAI) -> int:
     """
     返回“今天”的整型 YYYMMDD（本地时区）。
     """
-    tz = get_tz(tz_name)
+    tz = _get_tz(tz_name)
     d = datetime.now(tz).date()
     return yyyymmdd_from_date(d)
 
@@ -228,3 +231,13 @@ def normalize_yyyymmdd_range(
         s, e = e, s
     # 工具层保持静默（不打印），观测应由调用方按需记录
     return int(s), int(e)
+
+
+# 新增：将毫秒时间戳格式化为“自然可读收盘时间”字符串（YYYY-MM-DD HH:MM），统一 Asia/Shanghai，无时区后缀
+def format_close_time_str(ms: int, freq: Optional[str] = None, tz_name: str = TZ_SHANGHAI) -> str:
+    """
+    将毫秒时间戳格式化为“YYYY-MM-DD HH:MM”短文本（统一 Asia/Shanghai，无时区后缀）。
+    - freq 参数目前仅为兼容占位；由于 ts 已为真正收盘时刻（分钟族右端、日/周/月为 15:00），统一按 HH:MM 输出。
+    """
+    dt = _to_dt_ms(ms, tz_name)
+    return dt.strftime("%Y-%m-%d %H:%M")

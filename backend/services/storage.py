@@ -1,11 +1,8 @@
-# backend/services/storage.py  # 存储服务（修复：1d 取数��路兼容 iface_key + 新版 fetch_period_ms）
+# backend/services/storage.py  # 存储服务（修复：1d 取数路径兼容 iface_key + 新版 fetch_period_ms）
 # ==============================
 # 说明：
-# - ensure_daily_recent(symbol, iface_key=None)：支持“方法键”选择具体数据源方法；
-#   使用新版 fetch_period_ms 返回 (df, provider, source_key)，写入永久表 candles：
-#     * source  = provider（em/sina/ak/tx）
-#     * revision= source_key（如 'A_1d_a'）
-# - 其余接口（cleanup_cache 等）保持不变。
+# - ensure_daily_recent：改为构造“字典行”，与 upsert_candles 的命名占位符一致。
+# - 其它行为与外部契约不变。
 # ==============================
 
 from __future__ import annotations  # 允许前置注解
@@ -21,7 +18,7 @@ from backend.settings import settings  # 全局设置
 from backend.db.sqlite import upsert_candles, upsert_factors, get_conn, evict_cache_by_lru  # DB 接口
 from backend.datasource.akshare import fetch_daily_none_and_factors  # A 股因子获取
 from backend.datasource.fetchers import fetch_period_ms  # 新版抓取入口（返回 df, provider, source_key）
-from backend.utils.time import yyyymmdd_from_ms, ms_from_yyyymmdd  # 时间工具
+from backend.utils.time import yyyymmdd_from_ms, ms_from_yyyymmdd, format_close_time_str  # 时间工具
 from zoneinfo import ZoneInfo  # 时区
 
 def _retry(fn, attempts: int = None, base_ms: int = None):
@@ -110,21 +107,29 @@ def ensure_daily_recent(symbol: str, iface_key: Optional[str] = None) -> Dict[st
         return fetch_period_ms(symbol, "1d", start_ms, end_ms, sec_type=sec_type, iface_key=iface_key)
     df_price, provider, source_key = _retry(_fetch_price) or (pd.DataFrame(), "", None)
 
-    rows = []  # 待写入
+    rows: list[Dict[str, Any]] = []
     if df_price is not None and not df_price.empty:
         x = df_price.sort_values("ts").drop_duplicates(subset=["ts"])  # 时间升序 + 去重
         has_tvr = "turnover_rate" in x.columns  # 是否包含换手率
         for _, r in x.iterrows():
-            rows.append((
-                symbol, "1d", "none", int(r["ts"]),              # 维度键
-                float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),  # OHLC
-                float(r["volume"] if pd.notna(r["volume"]) else 0.0),                    # volume
-                float(r["amount"]) if "amount" in x.columns and pd.notna(r["amount"]) else None,  # amount
-                float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,  # turnover_rate
-                (provider or "ak"),                    # source ← 提供方（默认回退 ak）
-                datetime.now().isoformat(),            # fetched_at
-                (source_key or None)                   # revision ← 方法键（如 'A_1d_a'）
-            ))
+            ts_val = int(r["ts"])
+            rows.append({
+                "symbol": symbol,
+                "freq": "1d",
+                "adjust": "none",
+                "close_time": format_close_time_str(ts_val, "1d"),
+                "ts": ts_val,
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
+                "amount": float(r["amount"]) if "amount" in x.columns and pd.notna(r["amount"]) else None,
+                "turnover_rate": float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
+                "source": (provider or "ak"),
+                "fetched_at": datetime.now().isoformat(),
+                "revision": (source_key or None),
+            })
         if rows:
             upsert_candles(rows)  # 批量 UPSERT
 

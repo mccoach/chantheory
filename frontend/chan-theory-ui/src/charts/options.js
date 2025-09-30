@@ -362,38 +362,64 @@ function makeMainTooltipFormatter({
     ];
     // 当前数据索引
     const idx = params[0].dataIndex ?? 0;
-    // 当前 K 数据
+    // 当前原始 K 数据
     const k = list[idx] || {};
+
+    // —— 计算合并K线对应的颜色（新需求） —— //
+    const KS = klineStyle || DEFAULT_KLINE_STYLE || {};
+    const MK = KS.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
+    let mergedDotColor = null;
+    let rbForIdx = null;
+    try {
+      const entry = mapOrigToReduced && mapOrigToReduced[idx];
+      rbForIdx =
+        entry && typeof entry.reducedIndex === "number"
+          ? reducedBars[entry.reducedIndex]
+          : null;
+      const dir = Number(rbForIdx?.dir || 0);
+      if (dir !== 0) {
+        mergedDotColor = dir > 0 ? MK.upColor || "#FF0000" : MK.downColor || "#00ff00";
+      }
+    } catch {
+      mergedDotColor = null;
+    }
+    const mergedDotStyle =
+      mergedDotColor
+        ? `background:${mergedDotColor};border-radius:50%;`
+        : ""; // 无匹配则保持空心占位
 
     // —— 统一：所有 bar 显示 G/D（优先取对应合并K线 hi/lo；失败兜底当前 bar H/L） —— //
     let G = k.h,
       D = k.l;
     try {
-      const entry = mapOrigToReduced && mapOrigToReduced[idx];
-      const rb =
-        entry && typeof entry.reducedIndex === "number"
-          ? reducedBars[entry.reducedIndex]
-          : null;
-      if (rb && Number.isFinite(rb.hi) && Number.isFinite(rb.lo)) {
-        G = rb.hi;
-        D = rb.lo;
+      if (rbForIdx && Number.isFinite(rbForIdx.hi) && Number.isFinite(rbForIdx.lo)) {
+        G = rbForIdx.hi;
+        D = rbForIdx.lo;
       }
     } catch {}
     rows.push(
-      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>G: ${fmt3(
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>G: ${fmt3(
         G
       )}</div>`
     );
     rows.push(
-      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>D: ${fmt3(
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>D: ${fmt3(
         D
       )}</div>`
     );
 
     // 原始 K 的 O/H/L/C 或折线 Close
     if (chartType === "kline") {
+      // 原始K线涨跌颜色（圆点）：c≥o → upColor，否则 downColor
+      const origUp = Number(k.c) >= Number(k.o);
+      const origDotColor = origUp
+        ? KS.upColor || DEFAULT_KLINE_STYLE.upColor
+        : KS.downColor || DEFAULT_KLINE_STYLE.downColor;
+      const origDotStyle = `background:${origDotColor};border-radius:50%;`;
+
+      // O 行（有颜色圆点）
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>O: ${fmt3(
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>O: ${fmt3(
           k.o
         )}</div>`
       );
@@ -408,7 +434,7 @@ function makeMainTooltipFormatter({
         )}</div>`
       );
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>C: ${fmt3(
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>C: ${fmt3(
           k.c
         )}</div>`
       );
