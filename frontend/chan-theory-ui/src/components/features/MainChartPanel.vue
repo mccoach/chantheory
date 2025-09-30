@@ -1,21 +1,21 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
 <!-- 主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     改动目标（一次性 setOption，杜绝竞态）：
-     1) 保留原有参数准备与模块职责（buildMainChartOption、CHAN 覆盖层/分型标记等）；
-     2) 将原本“基础主图 setOption + 覆盖层 series patch 的多次 setOption”合并为“单次 setOption 装配到位”，
-        即在 onRender 回调中一次性准备好主图 option + 覆盖层 series，并一次 setOption(notMerge)；
-     3) 避免在 ECharts 主流程期间调用 setOption/resize：所有 setOption/resize 经“双跳脱”调度（rAF+setTimeout(0)）；
-     4) 订阅时机调整：renderHub.onRender 在 chart.init 之后注册（避免首帧快照被丢弃）。
-     注：除上述必要调整外，其他交互、模块、计算流程保持原样；对原代码块顺序不调整，订阅时机移动处注明理由。
+     本轮改动目标（第一轮：仅改布局 + 原位输入；删除原高级面板）：
+     1) 顶栏布局改为“两行两列”：
+        - 第一行：左列为改频按钮（靠左），右列为窗宽预设按钮（靠右）；
+        - 第二行：左列为起止时间“原位输入”（按频率显示日/分钟族），右列为 Bars 数“原位输入”（失焦应用）。
+     2) 原“高级面板”删除，手输日期/N 根功能迁移为“原位输入”，其余行为与现状保持一致（严格守护）。
+     3) 原交互与渲染机制（onDataZoom 会后承接、中枢两帧合并、程序化阻断、idle-commit、一次性 setOption）保持不变。
+     4) 顺序说明：保留原文件主体函数/变量前后顺序；仅删除“高级面板相关变量与模板块”，并在相应处注明移除原因。
 -->
 <!-- ====================================================================== -->
 
 <template>
-  <!-- 顶部控制区（三列布局） -->
-  <div class="controls controls-grid">
-    <!-- 左列：频率按钮（切频会触发后端 reload） -->
-    <div class="ctrl-col left">
+  <!-- 顶部控制区（两行两列） -->
+  <div class="controls controls-grid-2x2">
+    <!-- 第一行左：频率按钮（切频会触发后端 reload） -->
+    <div class="row1 col-left">
       <div class="seg">
         <button
           class="seg-btn"
@@ -84,22 +84,8 @@
       </div>
     </div>
 
-    <!-- 中列：起止短文本与 Bars 数（显示层） -->
-    <div class="ctrl-col middle">
-      <div class="kv">
-        <span class="k">起止：</span>
-        <span class="v">{{ formattedStart }}</span>
-        <span> → </span>
-        <span class="v">{{ formattedEnd }}</span>
-      </div>
-      <div class="kv">
-        <span class="k">Bars：</span>
-        <span class="v">{{ topBarsCount }}</span>
-      </div>
-    </div>
-
-    <!-- 右列：窗宽预设按钮 + 高级开关（预设仅本地处理） -->
-    <div class="ctrl-col right">
+    <!-- 第一行右：窗宽预设按钮（靠右） -->
+    <div class="row1 col-right">
       <div class="seg">
         <button
           v-for="p in presets"
@@ -111,84 +97,236 @@
         >
           {{ p }}
         </button>
-        <button
-          class="seg-btn adv-btn"
-          :title="'自定义'"
-          @click="toggleAdvanced"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M4 7h10M4 17h10"
-              stroke="#ddd"
-              stroke-width="1.8"
-              stroke-linecap="round"
-            />
-            <circle cx="18" cy="7" r="2.2" fill="#ddd" />
-            <circle cx="18" cy="17" r="2.2" fill="#ddd" />
-          </svg>
-        </button>
       </div>
     </div>
-  </div>
 
-  <!-- 高级面板（手输日期/N 根/可见窗口） -->
-  <div v-if="advancedOpen" class="advanced-panel">
-    <div class="adv-row">
-      <div class="label">手动日期</div>
-      <input
-        type="date"
-        class="date-input"
-        v-model="advStart"
-        v-select-all
-        :title="'开始日期（YYYY-MM-DD）'"
-      />
-      <span class="sep">至</span>
-      <input
-        type="date"
-        class="date-input"
-        v-model="advEnd"
-        v-select-all
-        :title="'结束日期（YYYY-MM-DD）'"
-      />
-      <button
-        class="btn small"
-        @click="applyManualRange"
-        :disabled="!canApplyManual"
-      >
-        应用
-      </button>
+    <!-- 第二行左：起止“原位输入”（按频率显示日/分钟族） -->
+    <div class="row2 col-left time-inline">
+      <!-- 日族：YYYY-MM-DD × 起/止（共 6 个数字输入框） -->
+      <template v-if="!isMinuteFreq">
+        <div class="inline-group">
+          <span class="label">起：</span>
+          <!-- 年：四位；滚轮仅改值并阻止页面滚动 -->
+          <input
+            class="date-cell year"
+            type="number"
+            v-select-all
+            v-model="startFields.Y"
+            min="1900"
+            max="2100"
+            @wheel.prevent="onWheelAdjust('start', 'Y', $event, 1900, 2100)"
+          />
+          <span class="sep">-</span>
+          <!-- 月：两位；滚轮阻拦；输入保持两位 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.M"
+            min="1"
+            max="12"
+            @wheel.prevent="onWheelAdjust('start', 'M', $event, 1, 12)"
+            @input="onTwoDigitInput('start', 'M', $event, 1, 12)"
+          />
+          <span class="sep">-</span>
+          <!-- 日：两位；滚轮阻拦；输入保持两位 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.D"
+            min="1"
+            max="31"
+            @wheel.prevent="onWheelAdjust('start', 'D', $event, 1, 31)"
+            @input="onTwoDigitInput('start', 'D', $event, 1, 31)"
+          />
+        </div>
+        <div class="inline-group">
+          <span class="label">止：</span>
+          <!-- 年：四位；滚轮仅改值并阻止页面滚动 -->
+          <input
+            class="date-cell year"
+            type="number"
+            v-select-all
+            v-model="endFields.Y"
+            min="1900"
+            max="2100"
+            @wheel.prevent="onWheelAdjust('end', 'Y', $event, 1900, 2100)"
+          />
+          <span class="sep">-</span>
+          <!-- 月：两位数字宽度 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.M"
+            min="1"
+            max="12"
+            @wheel.prevent="onWheelAdjust('end', 'M', $event, 1, 12)"
+            @input="onTwoDigitInput('end', 'M', $event, 1, 12)"
+          />
+          <span class="sep">-</span>
+          <!-- 日：两位数字宽度（失焦应用） -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.D"
+            min="1"
+            max="31"
+            @wheel.prevent="onWheelAdjust('end', 'D', $event, 1, 31)"
+            @input="onTwoDigitInput('end', 'D', $event, 1, 31)"
+            @blur="applyInlineRangeDaily"
+            title="日期失焦立即应用"
+          />
+        </div>
+      </template>
+
+      <!-- 分钟族：YYYY-MM-DD HH:MM × 起/止（共 10 个数字输入框） -->
+      <template v-else>
+        <div class="inline-group">
+          <span class="label">起：</span>
+          <!-- 年：四位数字宽度 -->
+          <input
+            class="date-cell year"
+            type="number"
+            v-select-all
+            v-model="startFields.Y"
+            min="1900"
+            max="2100"
+            @wheel.prevent="onWheelAdjust('start', 'Y', $event, 1900, 2100)"
+          />
+          <span class="sep">-</span>
+          <!-- 月：两位数字宽度 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.M"
+            min="1"
+            max="12"
+            @wheel.prevent="onWheelAdjust('start', 'M', $event, 1, 12)"
+            @input="onTwoDigitInput('start', 'M', $event, 1, 12)"
+          />
+          <span class="sep">-</span>
+          <!-- 日：两位数字宽度 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.D"
+            min="1"
+            max="31"
+            @wheel.prevent="onWheelAdjust('start', 'D', $event, 1, 31)"
+            @input="onTwoDigitInput('start', 'D', $event, 1, 31)"
+          />
+          <span class="sep space"> </span>
+          <!-- 时：两位数字宽度 -->
+          <input
+            class="time-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.h"
+            min="0"
+            max="23"
+            @wheel.prevent="onWheelAdjust('start', 'h', $event, 0, 23)"
+            @input="onTwoDigitInput('start', 'h', $event, 0, 23)"
+          />
+          <span class="sep">:</span>
+          <!-- 分：两位数字宽度 -->
+          <input
+            class="time-cell short"
+            type="number"
+            v-select-all
+            v-model="startFields.m"
+            min="0"
+            max="59"
+            @wheel.prevent="onWheelAdjust('start', 'm', $event, 0, 59)"
+            @input="onTwoDigitInput('start', 'm', $event, 0, 59)"
+          />
+        </div>
+        <div class="inline-group">
+          <span class="label">止：</span>
+          <!-- 年：四位数字宽度 -->
+          <input
+            class="date-cell year"
+            type="number"
+            v-select-all
+            v-model="endFields.Y"
+            min="1900"
+            max="2100"
+            @wheel.prevent="onWheelAdjust('end', 'Y', $event, 1900, 2100)"
+          />
+          <span class="sep">-</span>
+          <!-- 月：两位数字宽度 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.M"
+            min="1"
+            max="12"
+            @wheel.prevent="onWheelAdjust('end', 'M', $event, 1, 12)"
+            @input="onTwoDigitInput('end', 'M', $event, 1, 12)"
+          />
+          <span class="sep">-</span>
+          <!-- 日：两位数字宽度 -->
+          <input
+            class="date-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.D"
+            min="1"
+            max="31"
+            @wheel.prevent="onWheelAdjust('end', 'D', $event, 1, 31)"
+            @input="onTwoDigitInput('end', 'D', $event, 1, 31)"
+          />
+          <span class="sep space"> </span>
+          <!-- 时：两位数字宽度 -->
+          <input
+            class="time-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.h"
+            min="0"
+            max="23"
+            @wheel.prevent="onWheelAdjust('end', 'h', $event, 0, 23)"
+            @input="onTwoDigitInput('end', 'h', $event, 0, 23)"
+          />
+          <span class="sep">:</span>
+          <!-- 分：两位数字宽度（失焦应用） -->
+          <input
+            class="time-cell short"
+            type="number"
+            v-select-all
+            v-model="endFields.m"
+            min="0"
+            max="59"
+            @wheel.prevent="onWheelAdjust('end', 'm', $event, 0, 59)"
+            @input="onTwoDigitInput('end', 'm', $event, 0, 59)"
+            @blur="applyInlineRangeMinute"
+            title="分钟失焦立即应用"
+          />
+        </div>
+      </template>
     </div>
-    <div class="adv-row">
-      <div class="label">最近 N 根</div>
-      <input class="bars-input" v-model="barsStr" placeholder="如 300" />
-      <button
-        class="btn small"
-        @click="applyBarsRange"
-        :disabled="!canApplyBars"
-      >
-        应用
-      </button>
-      <div class="hint">
-        说明：N 根缩放仅通过中枢改变 bars（右端不变），按向下就近规则高亮预设。
-      </div>
-    </div>
-    <div class="adv-row">
-      <div class="label">可见窗口</div>
-      <div class="visible">
-        <span class="date">{{
-          fmtShort(vm.visibleRange.value.startStr) || "-"
-        }}</span>
-        →
-        <span class="date">{{
-          fmtShort(vm.visibleRange.value.endStr) || "-"
-        }}</span>
-        <button
-          class="btn small"
-          @click="applyVisible"
-          :disabled="!vm.visibleRange.value.startStr"
-        >
-          应用为数据窗口
-        </button>
+
+    <!-- 第二行右：Bars 原位输入（失焦应用；滚轮阻拦且仅改数值） -->
+    <div class="row2 col-right">
+      <div class="bars-inline">
+        <span class="label">Bars：</span>
+        <input
+          class="bars-input"
+          type="number"
+          v-select-all
+          v-model="barsStr"
+          min="1"
+          :max="Math.max(1, vm.meta.value?.all_rows || 1)"
+          @blur="applyBarsInline"
+          @wheel.prevent="onBarsWheel"
+          :placeholder="String(topBarsCount)"
+          title="失焦应用，可见根数"
+        />
       </div>
     </div>
   </div>
@@ -299,10 +437,8 @@ let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
-// 程序化 dataZoom 阻断：范围签名守护（active + sig + ts）
-// 说明：
-// - 渲染前记录本次程序化应用范围签名（startValue:endValue），onDataZoom 中若签名匹配则早退。
-// - 若签名不匹配，视为真实用户交互，关闭守护继续处理；并设置兜底超时自动关闭。
+
+/* 程序化 dataZoom 守护（保持原变量与逻辑） */
 let progZoomGuard = { active: false, sig: null, ts: 0 };
 // 最近一次已应用范围（双保险早退，防回环）
 let lastAppliedRange = { s: null, e: null };
@@ -315,79 +451,7 @@ function activateK(f) {
   vm.setFreq(f);
 }
 
-// 高级面板输入与状态
-const advancedOpen = ref(false);
-const advStart = ref(vm.visibleRange.value.startStr || "");
-const advEnd = ref(vm.visibleRange.value.endStr || "");
-const barsStr = ref("");
-const canApplyManual = computed(() => true);
-const canApplyBars = computed(() => /^\d+$/.test((barsStr.value || "").trim()));
-function toggleAdvanced() {
-  advancedOpen.value = !advancedOpen.value;
-}
-
-// 手输“起止日期”应用：根据 ALL candles 查索引 → hub.execute(SetDatesManual)
-function applyManualRange() {
-  const a = String(advStart.value || "").trim();
-  const b = String(advEnd.value || "").trim();
-  if (!a || !b) return;
-  const arr = vm.candles.value || [];
-  if (!arr.length) return;
-  const toYMD = (s) => String(s).slice(0, 10);
-  const sY = toYMD(a);
-  const eY = toYMD(b);
-  let sIdx = -1,
-    eIdx = -1;
-  for (let i = 0; i < arr.length; i++) {
-    const ymd = toYMD(arr[i].t || "");
-    if (sIdx < 0 && ymd >= sY) sIdx = i;
-    if (ymd <= eY) eIdx = i;
-  }
-  if (sIdx < 0) sIdx = 0;
-  if (eIdx < 0) eIdx = arr.length - 1;
-  if (sIdx > eIdx) {
-    const t = sIdx;
-    sIdx = eIdx;
-    eIdx = t;
-  }
-  const nextBars = Math.max(1, eIdx - sIdx + 1);
-  const anchorTs = Date.parse(arr[eIdx]?.t || "");
-  if (!isFinite(anchorTs)) return;
-  hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
-}
-
-// 手输“N 根”应用：仅改变 bars（右端不变）
-function applyBarsRange() {
-  const n = Math.max(1, parseInt(String(barsStr.value || "1"), 10));
-  hub.execute("SetBarsManual", { nextBars: n });
-}
-
-// 将“当前可见窗口”（vm.visibleRange）应用为数据窗口：SetDatesManual
-function applyVisible() {
-  const start = String(vm.visibleRange.value.startStr || "").trim();
-  const end = String(vm.visibleRange.value.endStr || "").trim();
-  if (!start || !end) return;
-  const arr = vm.candles.value || [];
-  if (!arr.length) return;
-  const getIdxOfIso = (iso) => {
-    const ms = Date.parse(iso);
-    if (!isFinite(ms)) return -1;
-    let best = -1;
-    for (let i = 0; i < arr.length; i++) {
-      const t = Date.parse(arr[i].t || "");
-      if (isFinite(t) && t <= ms) best = i;
-      if (t > ms) break;
-    }
-    return best;
-  };
-  const sIdx = Math.max(0, getIdxOfIso(start));
-  let eIdx = Math.max(0, getIdxOfIso(end));
-  if (eIdx < sIdx) eIdx = sIdx;
-  const nextBars = Math.max(1, eIdx - sIdx + 1);
-  const anchorTs = Date.parse(arr[eIdx]?.t || "");
-  if (!isFinite(anchorTs)) return;
-  hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
-}
+/* —— 移除高级面板相关状态/模板（迁移为“原位输入”，其余逻辑保持不变） —— */
 
 /* 画布/实例与 Resize */
 const wrap = ref(null);
@@ -445,10 +509,7 @@ function safeResize() {
   });
 }
 
-/**
- * NEW: 读取当前图的 dataZoom 范围（startValue/endValue），优先用于“十字线是否在视界内”的判定。
- * 说明：使用 ECharts 实时范围，避免用后端 meta 的滞后值导致误判和切片抢权。
- */
+/* 读取当前 dataZoom 范围（保持原逻辑） */
 function getCurrentZoomIndexRange() {
   try {
     if (!chart) return null;
@@ -1275,7 +1336,6 @@ function openSettingsDialog() {
 
           // MOD: 立即触发中枢刷新，发布新快照 -> 即时应用新设置
           hub.execute("Refresh", {});
-
           dialogManager.close();
         } catch (e) {
           dialogManager.close();
@@ -1708,6 +1768,8 @@ function onPreviewRange(ev) {
     previewStartStr.value = arr[s]?.t || "";
     previewEndStr.value = arr[e]?.t || "";
     previewBarsCount.value = Math.max(1, e - s + 1);
+    // 更新“原位输入框”的显示（基于预览值）
+    fillInlineFieldsFromEffective();
   } catch {}
 }
 
@@ -1756,11 +1818,6 @@ onMounted(() => {
         }
       }
       if (idx < 0 || idx >= len) return;
-
-      // 保持当前索引（供本窗 UI 使用）
-      currentIndex = idx;
-
-      // 持久化“最后聚焦 ts”，作为全局起点（任何窗触发都算数）
       const tsVal = vm.candles.value[idx]?.t
         ? Date.parse(vm.candles.value[idx].t)
         : null;
@@ -1793,6 +1850,9 @@ onMounted(() => {
   unsubId = renderHub.onRender((snapshot) => {
     doSinglePassRender(snapshot);
   });
+
+  // 初始化“原位输入”的显示
+  fillInlineFieldsFromEffective();
 });
 
 onBeforeUnmount(() => {
@@ -1814,6 +1874,10 @@ onBeforeUnmount(() => {
     chart && chart.dispose();
   } catch {}
   chart = null;
+  // ADD-BEGIN [组件卸载时取消权威订阅]
+  try {
+    hub.offChange(hubSubForInline);
+  } catch {}
 });
 
 /* 标题/刷新徽标更新（保持原逻辑） */
@@ -1826,6 +1890,8 @@ watch(
     setTimeout(() => {
       showRefreshed.value = false;
     }, 2000);
+    // 元信息更新后，同步一次“原位输入”的显示
+    fillInlineFieldsFromEffective();
   },
   { deep: true }
 );
@@ -1839,34 +1905,297 @@ function updateHeaderFromCurrent() {
   } catch {}
   displayHeader.value = { name, code: sym, freq: frq };
 }
+
+/* ============================= */
+/* 原位输入：起止日期/时间与 Bars */
+/* ============================= */
+
+const isMinuteFreq = computed(() => /m$/.test(String(vm.freq.value || "")));
+
+// 原位输入的字段（起/止）
+const startFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
+const endFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
+
+// Bars 原位输入
+const barsStr = ref("");
+
+// ADD-BEGIN [权威订阅：任何渠道变更 bars/rightTs 后，起止与 Bars 立即刷新显示]
+// 说明：此前信息源头主要依赖 previewStartStr/previewEndStr 与 vm.visibleRange（来自 vm.meta.view_*），
+// 某些“纯本地交互路径”（未触发后端）在极端情况下可能出现轻微滞后。现在改为 hub.onChange 权威订阅，
+// 用 hub.barsCount/rightTs + ALL candles 计算 sIdx/eIdx → 回填 preview* 与输入框，保证实时一致。
+const hubSubForInline = hub.onChange((st) => {
+  syncFromHub(st);
+});
+
+function syncFromHub(st) {
+  try {
+    const arr = vm.candles.value || [];
+    const len = arr.length;
+    if (!len) return;
+    // 以 hub.rightTs 定位 eIdx；若为空退到最右
+    let eIdx = len - 1;
+    if (Number.isFinite(+st.rightTs)) {
+      const rt = +st.rightTs;
+      for (let i = len - 1; i >= 0; i--) {
+        const t = Date.parse(arr[i].t);
+        if (Number.isFinite(t) && t <= rt) {
+          eIdx = i;
+          break;
+        }
+      }
+    }
+    // 以 hub.barsCount 推 sIdx（左端触底补齐）
+    const bars = Math.max(1, Number(st.barsCount || 1));
+    let sIdx = Math.max(0, eIdx - bars + 1);
+    if (sIdx === 0 && eIdx - sIdx + 1 < bars) {
+      eIdx = Math.min(len - 1, bars - 1);
+    }
+    // 更新预览（驱动现有显示链路）
+    previewStartStr.value = arr[sIdx]?.t || "";
+    previewEndStr.value = arr[eIdx]?.t || "";
+    previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
+    // 同步输入框与 Bars 文案
+    fillInlineFieldsFromEffective();
+    barsStr.value = String(Math.max(1, Number(st.barsCount || 1)));
+  } catch {}
+}
+
+// 从“当前有效显示（预览优先，其次 vm.visibleRange）”填充各输入框
+function fillInlineFieldsFromEffective() {
+  try {
+    const startIso =
+      (previewStartStr.value && previewStartStr.value) ||
+      vm.visibleRange.value.startStr ||
+      "";
+    const endIso =
+      (previewEndStr.value && previewEndStr.value) ||
+      vm.visibleRange.value.endStr ||
+      "";
+    if (!startIso || !endIso) return;
+    const ds = new Date(startIso);
+    const de = new Date(endIso);
+    if (Number.isNaN(ds.getTime()) || Number.isNaN(de.getTime())) return;
+
+    // 日族：仅年月日
+    startFields.Y = String(ds.getFullYear());
+    startFields.M = pad2(ds.getMonth() + 1);
+    startFields.D = pad2(ds.getDate());
+
+    endFields.Y = String(de.getFullYear());
+    endFields.M = pad2(de.getMonth() + 1);
+    endFields.D = pad2(de.getDate());
+
+    // 分钟族：附加时分
+    if (isMinuteFreq.value) {
+      startFields.h = pad2(ds.getHours());
+      startFields.m = pad2(ds.getMinutes());
+      endFields.h = pad2(de.getHours());
+      endFields.m = pad2(de.getMinutes());
+    } else {
+      startFields.h = "";
+      startFields.m = "";
+      endFields.h = "";
+      endFields.m = "";
+    }
+
+    // Bars 输入框显示（以当前可见 view_rows）
+    barsStr.value = String(
+      Math.max(
+        1,
+        Number(previewBarsCount.value || vm.meta.value?.view_rows || 0)
+      )
+    );
+  } catch {}
+}
+
+// ADD-BEGIN [两位数输入与滚轮仅改值（阻止页面滚动）]
+// 说明：月/日/时/分始终显示两位；滚轮增减值仅改当前输入，不滚动页面。
+function onTwoDigitInput(group, key, ev, min, max) {
+  try {
+    const raw = String(ev?.target?.value ?? "");
+    const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
+    if (Number.isNaN(n)) return;
+    const v = Math.max(min, Math.min(max, n));
+    const pad2v = String(v).padStart(2, "0");
+    if (group === "start") {
+      startFields[key] = pad2v;
+    } else {
+      endFields[key] = pad2v;
+    }
+  } catch {}
+}
+
+function onWheelAdjust(group, key, e, min, max) {
+  try {
+    const tgt = group === "start" ? startFields : endFields;
+    const curr = parseInt(String(tgt[key] || "0"), 10);
+    const delta = e.deltaY < 0 ? +1 : -1;
+    let next = Number.isFinite(curr) ? curr + delta : delta > 0 ? min : max;
+    next = Math.max(min, Math.min(max, next));
+    if (key === "Y") {
+      tgt[key] = String(next);
+    } else {
+      tgt[key] = String(next).padStart(2, "0");
+    }
+  } catch {}
+}
+
+function onBarsWheel(e) {
+  const curr = parseInt(String(barsStr.value || "1"), 10);
+  const delta = e.deltaY < 0 ? +1 : -1;
+  let next = Number.isFinite(curr) ? curr + delta : 1;
+  next = Math.max(1, next);
+  barsStr.value = String(next);
+}
+
+// 将“日族输入”应用为数据窗口（失焦触发）
+function applyInlineRangeDaily() {
+  try {
+    const ys = parseInt(startFields.Y, 10),
+      ms = parseInt(startFields.M, 10),
+      ds = parseInt(startFields.D, 10);
+    const ye = parseInt(endFields.Y, 10),
+      me = parseInt(endFields.M, 10),
+      de = parseInt(endFields.D, 10);
+    if (!Number.isFinite(ys) || !Number.isFinite(ms) || !Number.isFinite(ds))
+      return;
+    if (!Number.isFinite(ye) || !Number.isFinite(me) || !Number.isFinite(de))
+      return;
+
+    // 构造 YYYY-MM-DD 文本
+    const toYMD = (y, m, d) =>
+      `${String(y).padStart(4, "0")}-${pad2(m)}-${pad2(d)}`;
+
+    const sY = toYMD(ys, ms, ds);
+    const eY = toYMD(ye, me, de);
+
+    // 从 ALL candles 查找索引（与原 applyManualRange 的逻辑一致）
+    const arr = vm.candles.value || [];
+    if (!arr.length) return;
+
+    let sIdx = -1,
+      eIdx = -1;
+    for (let i = 0; i < arr.length; i++) {
+      const ymd = String(arr[i].t || "").slice(0, 10);
+      if (sIdx < 0 && ymd >= sY) sIdx = i;
+      if (ymd <= eY) eIdx = i;
+    }
+    if (sIdx < 0) sIdx = 0;
+    if (eIdx < 0) eIdx = arr.length - 1;
+    if (sIdx > eIdx) {
+      const t = sIdx;
+      sIdx = eIdx;
+      eIdx = t;
+    }
+
+    const nextBars = Math.max(1, eIdx - sIdx + 1);
+    const anchorTs = Date.parse(arr[eIdx]?.t || "");
+    if (!Number.isFinite(anchorTs)) return;
+
+    hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
+  } catch {}
+}
+
+// 将“分钟族输入”应用为数据窗口（失焦触发）
+function applyInlineRangeMinute() {
+  try {
+    const ys = parseInt(startFields.Y, 10),
+      ms = parseInt(startFields.M, 10),
+      ds = parseInt(startFields.D, 10),
+      hs = parseInt(startFields.h, 10),
+      mins = parseInt(startFields.m, 10);
+
+    const ye = parseInt(endFields.Y, 10),
+      me = parseInt(endFields.M, 10),
+      de = parseInt(endFields.D, 10),
+      he = parseInt(endFields.h, 10),
+      mine = parseInt(endFields.m, 10);
+
+    // 基本校验
+    if (
+      ![ys, ms, ds, hs, mins].every(Number.isFinite) ||
+      ![ye, me, de, he, mine].every(Number.isFinite)
+    )
+      return;
+
+    // 构造本地时间的 Date（浏览器本地时区）；与 ECharts/前端解析保持一致
+    const startDt = new Date(ys, ms - 1, ds, hs, mins, 0, 0);
+    const endDt = new Date(ye, me - 1, de, he, mine, 0, 0);
+    const msStart = startDt.getTime();
+    const msEnd = endDt.getTime();
+    if (!Number.isFinite(msStart) || !Number.isFinite(msEnd)) return;
+
+    const arr = vm.candles.value || [];
+    if (!arr.length) return;
+
+    const tsArr = arr.map((d) => Date.parse(d.t));
+    let sIdx = -1,
+      eIdx = -1;
+    for (let i = 0; i < tsArr.length; i++) {
+      const t = tsArr[i];
+      if (!Number.isFinite(t)) continue;
+      if (sIdx < 0 && t >= msStart) sIdx = i;
+      if (t <= msEnd) eIdx = i;
+    }
+    if (sIdx < 0) sIdx = 0;
+    if (eIdx < 0) eIdx = tsArr.length - 1;
+    if (sIdx > eIdx) {
+      const t = sIdx;
+      sIdx = eIdx;
+      eIdx = t;
+    }
+
+    const nextBars = Math.max(1, eIdx - sIdx + 1);
+    const anchorTs = tsArr[eIdx];
+    if (!Number.isFinite(anchorTs)) return;
+
+    hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
+  } catch {}
+}
+
+// Bars 原位输入（失焦应用，行为与原高级面板一致）
+function applyBarsInline() {
+  try {
+    const n = Math.max(1, parseInt(String(barsStr.value || "1"), 10));
+    hub.execute("SetBarsManual", { nextBars: n });
+  } catch {}
+}
+
+/* 结束：原位输入实现 */
+
+/* 订阅上游渲染（保持原逻辑） */
 </script>
 
 <style scoped>
-.controls-grid {
+/* 顶部两行两列布局 */
+.controls-grid-2x2 {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  column-gap: 16px;
-  margin: 0 0 8px 0;
+  grid-template-columns: 1fr 1fr; /* 左右两列 */
+  grid-template-rows: auto auto; /* 两行 */
+  gap: 6px 12px;
+  margin: 8px 0 8px 0;
 }
-.ctrl-col.middle {
-  text-align: left;
-  color: #ddd;
-  user-select: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.row1.col-left {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: start;
 }
-.ctrl-col.right {
-  display: inline-flex;
-  align-items: center;
+.row1.col-right {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
 }
-.kv .k {
-  color: #bbb;
+.row2.col-left {
+  grid-column: 1;
+  grid-row: 2;
+  justify-self: start;
 }
-.kv .v {
-  color: #ddd;
+.row2.col-right {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
 }
+
 .seg {
   display: inline-flex;
   align-items: center;
@@ -1885,6 +2214,7 @@ function updateHeaderFromCurrent() {
   user-select: none;
   font-size: 14px;
   line-height: 20px;
+  width: 60px;
   height: 36px;
   border-radius: 0;
 }
@@ -1895,14 +2225,79 @@ function updateHeaderFromCurrent() {
   background: #2b4b7e;
   color: #fff;
 }
-.adv-btn svg {
-  display: block;
+
+.time-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #ddd;
+  user-select: none;
 }
-.adv-btn:hover svg path {
-  stroke: #fff;
+.inline-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
-.adv-btn:hover svg circle {
-  fill: #fff;
+.inline-group .label {
+  color: #bbb;
+  margin-right: 2px;
+}
+.date-cell,
+.time-cell {
+  width: 56px;
+  height: 28px;
+  line-height: 28px;
+  text-align: center;
+  background: #0f0f0f;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 0 4px;
+  outline: none;
+}
+.time-cell {
+  width: 48px;
+}
+/* 年：四位数字宽度；月/日/时/分：两位数字宽度（显示两位由脚本 onTwoDigitInput 保障） */
+.date-cell.year {
+  width: 56px;
+} /* 年：四位数字宽度 */
+.date-cell.short {
+  width: 36px;
+} /* 月/日：两位数字宽度 */
+.time-cell.short {
+  width: 36px;
+} /* 时/分：两位数字宽度 */
+
+.sep {
+  color: #888;
+}
+.sep.space {
+  width: 6px;
+  display: inline-block;
+}
+
+.bars-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ddd;
+  user-select: none;
+}
+.bars-inline .label {
+  color: #bbb;
+}
+.bars-input {
+  width: 64px;
+  height: 28px;
+  line-height: 28px;
+  text-align: center;
+  background: #0f0f0f;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 0 6px;
+  outline: none;
 }
 
 .top-info {

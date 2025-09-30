@@ -104,22 +104,14 @@ export function computeInclude(candles, opts = {}) {
     a.dir = a.dir === 0 ? trend : a.dir;
 
     if (a.dir >= 0) {
+      // 新：先缓存，再决定是否更新索引（避免与已覆盖的 a.hi/a.lo 比较）
+      const prevHi = a.hi, prevLo = a.lo;
       const newHi = Math.max(a.hi, b.hi);
       const newLo = Math.max(a.lo, b.lo);
       a.hi = newHi;
       a.lo = newLo;
-      a.hi_idx =
-        newHi === a.hi && a.idx_end !== i
-          ? a.hi_idx
-          : newHi === b.hi
-          ? i
-          : a.hi_idx;
-      a.lo_idx =
-        newLo === a.lo && a.idx_end !== i
-          ? a.lo_idx
-          : newLo === b.lo
-          ? i
-          : a.lo_idx;
+      if (newHi !== prevHi && newHi === b.hi) a.hi_idx = i;
+      if (newLo !== prevLo && newLo === b.lo) a.lo_idx = i;
       a.idx_end = i;
       a.t_end = b.t_end;
       a.reason = "inclusion-merge-up";
@@ -132,22 +124,13 @@ export function computeInclude(candles, opts = {}) {
           : a.idx_end; // 承载：极值/右端
       fillMapRange(a.idx_start, a.idx_end, reduced.length - 1);
     } else {
+      const prevHi = a.hi, prevLo = a.lo;
       const newHi = Math.min(a.hi, b.hi);
       const newLo = Math.min(a.lo, b.lo);
       a.hi = newHi;
       a.lo = newLo;
-      a.hi_idx =
-        newHi === a.hi && a.idx_end !== i
-          ? a.hi_idx
-          : newHi === b.hi
-          ? i
-          : a.hi_idx;
-      a.lo_idx =
-        newLo === a.lo && a.idx_end !== i
-          ? a.lo_idx
-          : newLo === b.lo
-          ? i
-          : a.lo_idx;
+      if (newHi !== prevHi && newHi === b.hi) a.hi_idx = i;
+      if (newLo !== prevLo && newLo === b.lo) a.lo_idx = i;
       a.idx_end = i;
       a.t_end = b.t_end;
       a.reason = "inclusion-merge-down";
