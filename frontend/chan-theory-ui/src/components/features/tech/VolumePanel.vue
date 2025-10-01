@@ -6,7 +6,13 @@
      - 不再监听 meta 或使用 zoomSync；onDataZoom inside-only 并早退。
 -->
 <template>
-  <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
+  <div
+    ref="wrap"
+    class="chart"
+    @dblclick="openSettingsDialog"
+    @mouseenter="onMouseEnter"
+    @mouseleave="onMouseLeave"
+  >
     <div class="top-info">
       <div class="seg">
         <button
@@ -92,6 +98,14 @@ const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
+
+// NEW: 上报悬浮状态
+function onMouseEnter() {
+  renderHub.setHoveredPanel("volume");
+}
+function onMouseLeave() {
+  renderHub.setHoveredPanel(null);
+}
 
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
@@ -662,8 +676,8 @@ onMounted(async () => {
   chart.getZr().on("mousemove", (_e) => {
     // 交由 ECharts 内建处理悬浮即可，无需显式 showTip
   });
-  chart.on("updateAxisPointer", (_params) => {
-    // 交由组联动对齐，无需转发
+  chart.on("updateAxisPointer", (params) => {
+    // MOD: 移除所有 setOption 逻辑
   });
   chart.on("dataZoom", onDataZoom); // 新增：副窗支持作为交互源
 
@@ -686,7 +700,7 @@ const unsubId = renderHub.onRender((snapshot) => {
     if (!chart) return;
     const mySeq = ++renderSeq;
     const notMerge = !renderHub.isInteracting(); // ECharts-first：交互期禁止 notMerge 重绘
-    chart.setOption(snapshot.volume.option, notMerge);
+    chart.setOption(snapshot.volume.option, { notMerge, silent: true }); // MOD: 增加 silent:true
     recomputeVisibleStats(mySeq);
   } catch (e) {
     console.error("Volume renderHub onRender error:", e);

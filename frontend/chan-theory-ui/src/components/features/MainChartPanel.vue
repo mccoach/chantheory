@@ -7,7 +7,6 @@
         - 第二行：左列为起止时间“原位输入”（按频率显示日/分钟族），右列为 Bars 数“原位输入”（失焦应用）。
      2) 原“高级面板”删除，手输日期/N 根功能迁移为“原位输入”，其余行为与现状保持一致（严格守护）。
      3) 原交互与渲染机制（onDataZoom 会后承接、中枢两帧合并、程序化阻断、idle-commit、一次性 setOption）保持不变。
-     4) 顺序说明：保留原文件主体函数/变量前后顺序；仅删除“高级面板相关变量与模板块”，并在相应处注明移除原因。
 -->
 <!-- ====================================================================== -->
 
@@ -336,7 +335,8 @@
     ref="wrap"
     class="chart"
     tabindex="0"
-    @mouseenter="focusWrap"
+    @mouseenter="onMouseEnter"
+    @mouseleave="onMouseLeave"
     @dblclick="openSettingsDialog"
   >
     <div class="top-info">
@@ -462,6 +462,15 @@ let ro = null;
 // NEW: 订阅 ID 句柄（用于 renderHub.onRender 的取消订阅）
 // 说明：之前未声明导致 mounted 钩子赋值 unsubId 报错，此处补充在模块作用域统一声明。
 let unsubId = null;
+
+// NEW: 上报悬浮状态
+function onMouseEnter() {
+  renderHub.setHoveredPanel("main");
+  focusWrap(); // 原有 focus 逻辑
+}
+function onMouseLeave() {
+  renderHub.setHoveredPanel(null);
+}
 
 // 下沿拖拽高度调整（保留）
 let dragging = false,
@@ -1373,19 +1382,7 @@ const refreshedAtHHMMSS = computed(() => {
 
 /* 键盘左右键（保持原逻辑） */
 let currentIndex = -1;
-function onGlobalHoverIndex(e) {
-  const idx = Number(e?.detail?.idx);
-  if (Number.isFinite(idx) && idx >= 0) {
-    currentIndex = idx;
-    try {
-      const arr = vm.candles.value || [];
-      const tsVal = arr[idx]?.t ? Date.parse(arr[idx].t) : null;
-      if (Number.isFinite(tsVal)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
-      }
-    } catch {}
-  }
-}
+
 function focusWrap() {
   try {
     wrap.value?.focus?.();
@@ -1651,6 +1648,7 @@ function doSinglePassRender(snapshot) {
         mainAxisLabelSpacePx: 28,
         xAxisLabelMargin,
         mainBottomExtraPx,
+        isHovered: snapshot.main.isHovered, // MOD: 传入悬浮状态
       }
     );
 
@@ -1800,7 +1798,7 @@ onMounted(() => {
       const len = (vm.candles.value || []).length;
       if (!len) return;
 
-      // NEW: 更稳的索引提取 —— 优先 seriesData[0].dataIndex，回退 axesInfo.value（数字=下标，字符串=ISO类目）
+      // MOD: 移除所有 setOption 逻辑，仅保留 lastFocusTs 更新
       let idx = -1;
       const sd = Array.isArray(params?.seriesData)
         ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
@@ -2370,7 +2368,10 @@ function applyBarsInline() {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 18px;
+  height: 8px;
   background: transparent;
+}
+.bottom-strip:hover {
+  cursor: ns-resize;
 }
 </style>

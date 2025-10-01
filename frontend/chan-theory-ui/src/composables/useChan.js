@@ -313,7 +313,8 @@ export function computeFractals(reducedBars, params = {}) {
           labels: ["fractal", "top"],
           note: "",
         });
-        i += 3;
+        // MOD: 允许分型共用 K 线 —— 步进改为 1（原为 i += 3）
+        i += 1;
         continue;
       }
     }
@@ -354,7 +355,8 @@ export function computeFractals(reducedBars, params = {}) {
           labels: ["fractal", "bottom"],
           note: "",
         });
-        i += 3;
+        // MOD: 允许分型共用 K 线 —— 步进改为 1（原为 i += 3）
+        i += 1;
         continue;
       }
     }

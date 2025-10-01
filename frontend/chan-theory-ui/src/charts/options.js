@@ -245,26 +245,29 @@ function applyUi(option, ui, { dates, freq }) {
     }),
   });
 
-  // 合并 yAxis（保留业务字段，如量窗的 min:0）
-  option.yAxis = Object.assign({}, option.yAxis || {}, {
-    scale: option.yAxis?.scale !== undefined ? option.yAxis.scale : true, // 默认启用 scale
-    axisLabel: Object.assign({}, option.yAxis?.axisLabel || {}, {
+  // MOD: 重构 yAxis 应用，使其能处理数组
+  const yAxes = Array.isArray(option.yAxis) ? option.yAxis : [option.yAxis];
+  option.yAxis = yAxes.map((y) =>
+    Object.assign({}, y || {}, {
+      scale: y?.scale !== undefined ? y.scale : true, // 默认启用 scale
+      axisLabel: Object.assign({}, y?.axisLabel || {}, {
       color: theme.axisLabelColor,
-      margin: (option.yAxis?.axisLabel && option.yAxis.axisLabel.margin) || 6,
+        margin: (y?.axisLabel && y.axisLabel.margin) || 6,
     }),
-    axisLine: Object.assign({}, option.yAxis?.axisLine || {}, {
+      axisLine: Object.assign({}, y?.axisLine || {}, {
       lineStyle: Object.assign(
         { color: theme.axisLineColor },
-        option.yAxis?.axisLine?.lineStyle || {}
+          y?.axisLine?.lineStyle || {}
       ),
     }),
-    splitLine: Object.assign({}, option.yAxis?.splitLine || {}, {
+      splitLine: Object.assign({}, y?.splitLine || {}, {
       lineStyle: Object.assign(
         { color: theme.gridLineColor },
-        option.yAxis?.splitLine?.lineStyle || {}
+          y?.splitLine?.lineStyle || {}
       ),
     }),
-  });
+    })
+  );
 
   // slider 两端的 label 格式化（显示“无时区短文本”）
   const labelFmt = (val) => {
@@ -378,21 +381,27 @@ function makeMainTooltipFormatter({
           : null;
       const dir = Number(rbForIdx?.dir || 0);
       if (dir !== 0) {
-        mergedDotColor = dir > 0 ? MK.upColor || "#FF0000" : MK.downColor || "#00ff00";
+        mergedDotColor =
+          dir > 0
+            ? MK.upColor || DEFAULT_KLINE_STYLE.mergedK.upColor
+            : MK.downColor || DEFAULT_KLINE_STYLE.mergedK.downColor;
       }
     } catch {
       mergedDotColor = null;
     }
-    const mergedDotStyle =
-      mergedDotColor
-        ? `background:${mergedDotColor};border-radius:50%;`
-        : ""; // 无匹配则保持空心占位
+    const mergedDotStyle = mergedDotColor
+      ? `background:${mergedDotColor};border-radius:50%;`
+      : ""; // 无匹配则保持空心占位
 
     // —— 统一：所有 bar 显示 G/D（优先取对应合并K线 hi/lo；失败兜底当前 bar H/L） —— //
     let G = k.h,
       D = k.l;
     try {
-      if (rbForIdx && Number.isFinite(rbForIdx.hi) && Number.isFinite(rbForIdx.lo)) {
+      if (
+        rbForIdx &&
+        Number.isFinite(rbForIdx.hi) &&
+        Number.isFinite(rbForIdx.lo)
+      ) {
         G = rbForIdx.hi;
         D = rbForIdx.lo;
       }
@@ -597,6 +606,7 @@ export function buildMainChartOption(
   },
   ui
 ) {
+
   // 主题
   const theme = getChartTheme();
   // 蜡烛数组与指标
@@ -656,9 +666,9 @@ export function buildMainChartOption(
     // 合并K线（HL 柱）
     if (showMerged && Array.isArray(reducedBars) && reducedBars.length) {
       const outlineW = Math.max(0.1, Number(MK.outlineWidth || 1.2));
-      // 根因修复：默认颜色回退到 DEFAULT_KLINE_STYLE.mergedK.*，不再回退主题色
-      const fallbackUp = DEFAULT_KLINE_STYLE.mergedK?.upColor || "#FF0000";
-      const fallbackDn = DEFAULT_KLINE_STYLE.mergedK?.downColor || "#00ff00";
+      // 根因修复：默认颜色回退到 DEFAULT_KLINE_STYLE.mergedK.*（集中收口 index.js）
+      const fallbackUp = DEFAULT_KLINE_STYLE.mergedK.upColor;
+      const fallbackDn = DEFAULT_KLINE_STYLE.mergedK.downColor;
       const upC = MK.upColor || fallbackUp;
       const dnC = MK.downColor || fallbackDn;
 
@@ -763,22 +773,60 @@ export function buildMainChartOption(
     });
   } else {
     // 折线模式（主图只画收盘价）
+    const closeLineColor =
+      (STYLE_PALETTE.lines[5] && STYLE_PALETTE.lines[5].color) ||
+      STYLE_PALETTE.lines[0].color;
     series.push({
       type: "line",
       name: "Close",
       data: list.map((d) => d.c),
       showSymbol: false,
       smooth: true,
-      lineStyle: { color: "#03a9f4", width: 1.0 },
-      itemStyle: { color: "#03a9f4" },
-      color: "#03a9f4",
+      lineStyle: { color: closeLineColor, width: 1.0 },
+      itemStyle: { color: closeLineColor },
+      color: closeLineColor,
     });
   }
 
-  // 生成基础 option（先走 applyUi，后追加隐藏 overlay Y 轴）
+  // MOD: 根因修复 - 先定义好 yAxis 数组，再传给 applyUi
+  const mainYAxis = {
+    scale: true,
+    axisPointer: {
+      show: !!ui?.isHovered,
+      label: {
+        show: !!ui?.isHovered, // 标签（气泡）的显示也与悬浮状态绑定
+        formatter: function (params) {
+          // 确保价格显示为两位小数
+          const val =
+            typeof params.value === "object" && params.value !== null
+              ? params.value.value
+              : params.value;
+          return Number.isFinite(val) ? Number(val).toFixed(2) : "";
+        },
+      },
+    },
+  };
+  const overlayMarkerYAxis = {
+    type: "value",
+    min: 0,
+    max: 1,
+    show: false,
+    scale: false,
+    axisLine: { show: false },
+    axisTick: { show: false },
+    splitLine: { show: false },
+  };
+
+  // 生成基础 option
   let option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
+    // 统一联动：仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+    // - 保留跨图竖线对齐，避免非悬浮窗体绘制水平线
+    // - 不影响 dataZoom 联动
+    axisPointer: {
+      link: [{ xAxisIndex: "all" }],
+    },
     // 统一 tooltip（恢复“聚焦竖线 + 信息浮窗”）
     tooltip: {
       // 触发：按轴触发（显示竖线和多系列信息）
@@ -808,8 +856,7 @@ export function buildMainChartOption(
     },
     // 基础坐标轴（具体颜色/label 等在 applyUi 中合并）
     xAxis: { type: "category", data: dates },
-    yAxis: { scale: true },
-    // 系列
+    yAxis: [mainYAxis, overlayMarkerYAxis], // MOD: 初始即为数组
     series,
   };
 
@@ -827,25 +874,6 @@ export function buildMainChartOption(
     },
     { dates, freq }
   );
-
-  // 核心新增：为主图添加第二条隐藏的 Y 轴（用于承载涨跌标记，不影响价格轴自适应）
-  // - yAxis[0]：主价格轴（来自 applyUi）
-  // - yAxis[1]：隐藏标记轴，固定范围 [0,1]，不显示，不参与缩放计算
-  const mainYAxisObj =
-    Array.isArray(option.yAxis) && option.yAxis.length
-      ? option.yAxis[0]
-      : option.yAxis; // 兼容对象/数组
-  const overlayMarkerYAxis = {
-    type: "value",
-    min: 0,
-    max: 1,
-    show: false,
-    scale: false,
-    axisLine: { show: false },
-    axisTick: { show: false },
-    splitLine: { show: false },
-  };
-  option.yAxis = [mainYAxisObj, overlayMarkerYAxis];
 
   return option;
 }
@@ -1032,7 +1060,10 @@ export function buildVolumeOption(
       symbol: volCfg?.markerPump?.shape || "triangle",
       symbolSize: () => [markerW, markerH],
       symbolOffset: symbolOffsetBelow,
-      itemStyle: { color: volCfg?.markerPump?.color || "#ffb74d" },
+      itemStyle: {
+        color:
+          volCfg?.markerPump?.color || DEFAULT_VOL_SETTINGS.markerPump.color,
+      },
       z: 4,
     });
   }
@@ -1045,7 +1076,10 @@ export function buildVolumeOption(
       symbol: volCfg?.markerDump?.shape || "diamond",
       symbolSize: () => [markerW, markerH],
       symbolOffset: symbolOffsetBelow,
-      itemStyle: { color: volCfg?.markerDump?.color || "#8d6e63" },
+      itemStyle: {
+        color:
+          volCfg?.markerDump?.color || DEFAULT_VOL_SETTINGS.markerDump.color,
+      },
       z: 4,
     });
   }
@@ -1060,6 +1094,17 @@ export function buildVolumeOption(
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
+    // 仅联动 X 轴（竖线），不联动 Y 轴（水平线）：
+    // - echarts.connect("ct-sync") 会把指示器（axisPointer）事件在组内传播；
+    // - tooltip.axisPointer='cross' 同时画 X+Y 两条线；
+    // - 通过 axisPointer.link 只声明 xAxisIndex 联动，保留竖线联动但不强制绘制横线。
+    // 这不是“写死样式”，而是限定联动维度，保持与其它窗相同的交互路径但避免非悬浮时的水平线。
+    axisPointer: {
+      link: [
+        { xAxisIndex: "all" }, // 组内所有图表仅同步 X 轴指示位置
+      ],
+      // 不声明 yAxisIndex，即不联动 Y 轴
+    },
     // 恢复“聚焦竖线 + 信息浮窗”
     tooltip: {
       trigger: "axis",
@@ -1083,7 +1128,8 @@ export function buildVolumeOption(
       // 量窗保持从 0 起（业务共识）
       min: 0,
       scale: true,
-      axisPointer: { show: true, label: { show: true } },
+      // 关键：根据 isHovered 动态开关 y 轴指示器，且永不显示 label
+      axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
     },
     series,
   };
@@ -1139,9 +1185,9 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       name: "DIF",
       data: inds.MACD_DIF,
       showSymbol: false,
-      lineStyle: { color: "#ee6666", width: 1 },
-      itemStyle: { color: "#ee6666" },
-      color: "#ee6666",
+      lineStyle: { color: STYLE_PALETTE.lines[0].color, width: 1 },
+      itemStyle: { color: STYLE_PALETTE.lines[0].color },
+      color: STYLE_PALETTE.lines[0].color,
     });
     // DEA 线
     series.push({
@@ -1150,9 +1196,9 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       name: "DEA",
       data: inds.MACD_DEA,
       showSymbol: false,
-      lineStyle: { color: "#5470c6", width: 1 },
-      itemStyle: { color: "#5470c6" },
-      color: "#5470c6",
+      lineStyle: { color: STYLE_PALETTE.lines[2].color, width: 1 },
+      itemStyle: { color: STYLE_PALETTE.lines[2].color },
+      color: STYLE_PALETTE.lines[2].color,
     });
   }
 
@@ -1160,6 +1206,12 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
+    // 统一联动：仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+    // - 保留跨图竖线对齐，避免非悬浮窗体绘制水平线
+    // - 不影响 dataZoom 联动
+    axisPointer: {
+      link: [{ xAxisIndex: "all" }],
+    },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "cross" },
@@ -1202,7 +1254,10 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   };
 
   option.xAxis = { type: "category", data: dates };
-  option.yAxis = { scale: true };
+  option.yAxis = {
+    scale: true,
+    axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
+  }; // MOD: 同理
   option.series = series;
   if (ui?.tooltipPositioner) {
     option.tooltip.position = ui.tooltipPositioner;
@@ -1245,9 +1300,9 @@ export function buildKdjOrRsiOption(
         name: "K",
         data: inds.KDJ_K,
         showSymbol: false,
-        lineStyle: { color: "#ee6666", width: 1 },
-        itemStyle: { color: "#ee6666" },
-        color: "#ee6666",
+        lineStyle: { color: STYLE_PALETTE.lines[0].color, width: 1 },
+        itemStyle: { color: STYLE_PALETTE.lines[0].color },
+        color: STYLE_PALETTE.lines[0].color,
       });
       series.push({
         id: "KDJ_D",
@@ -1255,9 +1310,9 @@ export function buildKdjOrRsiOption(
         name: "D",
         data: inds.KDJ_D,
         showSymbol: false,
-        lineStyle: { color: "#fac858", width: 1 },
-        itemStyle: { color: "#fac858" },
-        color: "#fac858",
+        lineStyle: { color: STYLE_PALETTE.lines[1].color, width: 1 },
+        itemStyle: { color: STYLE_PALETTE.lines[1].color },
+        color: STYLE_PALETTE.lines[1].color,
       });
       series.push({
         id: "KDJ_J",
@@ -1265,9 +1320,9 @@ export function buildKdjOrRsiOption(
         name: "J",
         data: inds.KDJ_J,
         showSymbol: false,
-        lineStyle: { color: "#5470c6", width: 1 },
-        itemStyle: { color: "#5470c6" },
-        color: "#5470c6",
+        lineStyle: { color: STYLE_PALETTE.lines[2].color, width: 1 },
+        itemStyle: { color: STYLE_PALETTE.lines[2].color },
+        color: STYLE_PALETTE.lines[2].color,
       });
     }
   } else if (useRSI) {
@@ -1279,9 +1334,9 @@ export function buildKdjOrRsiOption(
         name: "RSI",
         data: inds.RSI,
         showSymbol: false,
-        lineStyle: { color: "#ee6666", width: 1 },
-        itemStyle: { color: "#ee6666" },
-        color: "#ee6666",
+        lineStyle: { color: STYLE_PALETTE.lines[0].color, width: 1 },
+        itemStyle: { color: STYLE_PALETTE.lines[0].color },
+        color: STYLE_PALETTE.lines[0].color,
       });
     }
   }
@@ -1290,6 +1345,12 @@ export function buildKdjOrRsiOption(
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
+    // 统一联动：仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+    // - 保留跨图竖线对齐，避免非悬浮窗体绘制水平线
+    // - 不影响 dataZoom 联动
+    axisPointer: {
+      link: [{ xAxisIndex: "all" }],
+    },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "cross" },
@@ -1320,7 +1381,10 @@ export function buildKdjOrRsiOption(
   };
 
   option.xAxis = { type: "category", data: dates };
-  option.yAxis = { scale: true };
+  option.yAxis = {
+    scale: true,
+    axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
+  }; // MOD: 同理
   option.series = series;
   if (ui?.tooltipPositioner) {
     option.tooltip.position = ui.tooltipPositioner;

@@ -2,7 +2,7 @@
 // ==============================
 // 说明：统一渲染快照中枢（上游唯一源头）
 // - 责任：一次性计算并发布所有窗体所需的渲染参数（统一离散范围 sIdx/eIdx、markerWidthPx、主窗/量窗 option）。
-// - 下游：主窗/量窗/技术窗一次订阅一次渲染（不再分散监听 meta/事件、不再使用 zoomSync �� chan:marker-size）。
+// - 下游：主窗/量窗/技术窗一次订阅一次渲染（不再分散监听 meta/事件、不再使用 zoomSync    chan:marker-size）。
 // - 触发：hub.onChange（两帧合并后的最终态）与 vm 数据落地（candles/indicators/meta）。
 // ==============================
 
@@ -27,6 +27,9 @@ export function useViewRenderHub() {
 
   // 上游数据句柄（由 App 注入）
   const _vmRef = { vm: null };
+
+  // 新增：当前悬浮的面板 key ('main'|'volume'|'indicator'|null)
+  const _hoveredPanelKey = ref(null); // NEW
 
   // 订阅者
   const _subs = new Map();
@@ -72,6 +75,18 @@ export function useViewRenderHub() {
   function isInteracting() {
     return !!_interacting.value;
   }
+
+  // 新增：由各窗体调用，上报悬浮状态
+  function setHoveredPanel(panelKey) {
+    if (_hoveredPanelKey.value !== panelKey) {
+      _hoveredPanelKey.value = panelKey;
+    }
+  }
+
+  // 新增：监听悬浮面板变化，触发一次渲染快照的重新计算与发布
+  watch(_hoveredPanelKey, () => {
+    _computeAndPublish();
+  });
 
   // ==============================
   // NEW: 图表实例注册与“激活窗体”管理
@@ -299,6 +314,9 @@ export function useViewRenderHub() {
     // MOD: 统一生成定位器（fixed or follow）
     const tipPositioner = _getTipPositioner();
 
+    // NEW: 获取当前悬浮面板 key
+    const hoveredKey = _hoveredPanelKey.value;
+
     // 主窗 option（上游统一位置源写入）
     const mainOption = buildMainChartOption(
       {
@@ -315,7 +333,8 @@ export function useViewRenderHub() {
       },
       {
         initialRange,
-        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
+        tooltipPositioner: tipPositioner, // MOD: 统一注入定位器
+        isHovered: hoveredKey === "main", // NEW: 传入悬浮状态
       }
     );
 
@@ -334,7 +353,8 @@ export function useViewRenderHub() {
       },
       {
         initialRange,
-        tooltipPositioner: tipPositioner,       // MOD: 统一注入定位器
+        tooltipPositioner: tipPositioner, // MOD: 统一注入定位器
+        isHovered: hoveredKey === "volume", // NEW: 传入悬浮状态
       }
     );
 
@@ -355,9 +375,24 @@ export function useViewRenderHub() {
         atRightEdge: !!st.atRightEdge,
         markerWidthPx: markerW,
       },
-      main: { option: mainOption, range: initialRange },
-      volume: { option: volumeOption, range: initialRange },
-      indicatorsBase: { candles, indicators, freq, initialRange },
+      // MOD: 根因修复 - 将 isHovered 状态存入快照
+      main: {
+        option: mainOption,
+        range: initialRange,
+        isHovered: hoveredKey === "main",
+      },
+      volume: {
+        option: volumeOption,
+        range: initialRange,
+        isHovered: hoveredKey === "volume",
+      },
+      indicatorsBase: {
+        candles,
+        indicators,
+        freq,
+        initialRange,
+        isHovered: hoveredKey === "indicator",
+      },
       metaLink: {
         generated_at: vm.meta.value?.generated_at || "",
         source: vm.meta.value?.source || "",
@@ -379,7 +414,12 @@ export function useViewRenderHub() {
 
     // MOD: 指标窗也复用同一定位器
     const tipPositioner = _getTipPositioner();
-    const ui = { initialRange: base.initialRange, tooltipPositioner: tipPositioner };
+    // NEW: 指标窗也需要 isHovered 状态
+    const ui = {
+      initialRange: base.initialRange,
+      tooltipPositioner: tipPositioner,
+      isHovered: base.isHovered, // 从快照中读取
+    };
 
     const K = String(kind || "").toUpperCase();
     if (K === "MACD") {
@@ -408,6 +448,7 @@ export function useViewRenderHub() {
     offRender,
     getIndicatorOption,
     getTipPositioner,
+    setHoveredPanel, // NEW: 暴露给各窗体调用
     // NEW: 交互会话锁导出（供各窗体使用）
     beginInteraction,
     endInteraction,

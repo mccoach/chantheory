@@ -7,6 +7,7 @@
 // - 新增：viewAtRightEdge（code|freq → boolean）持久化键，供“窗口切片右端触底状态”持久化与对齐使用。
 // - 保持：viewRightTs/viewBars（右端锚点毫秒/可视根数）持久化；全部 Setter/Getter 与 storage 同步。
 // - 新增：viewLastFocusTs（code|freq → ts）持久化键，用于“最后一次聚焦的 bar 时间戳”记录，供键盘移动起点使用。
+// - 新增：indicatorPanes（数组）持久化，记录指标窗的数量与类型（kind），用于页面刷新后的恢复。
 // ==============================
 
 import { reactive, toRef, watch } from "vue"; // 引入 Vue 响应式与工具 API
@@ -185,6 +186,11 @@ export function useUserSettings() {
       viewAtRightEdge: local.viewAtRightEdge || {}, // code|freq → boolean（新增）
       // —— 新增：最后聚焦 ts 持久化 —— //
       viewLastFocusTs: local.viewLastFocusTs || {}, // code|freq → ts(ms)
+
+      // —— 新增：指标窗持久化（数组；元素形如 {kind: 'MACD'}；顺序保留） —— //
+      indicatorPanes: Array.isArray(local.indicatorPanes)
+        ? local.indicatorPanes.map((x) => ({ kind: String(x?.kind || "MACD") }))
+        : [],
     });
 
     // 防抖保存，减少 LocalStorage 写开销
@@ -227,6 +233,13 @@ export function useUserSettings() {
             state.viewLastFocusTs = {
               ...(incoming.viewLastFocusTs || {}),
             }; // 新增：最后聚焦 ts
+          // 新增：指标窗列表（浅合并）
+          else if (k === "indicatorPanes")
+            state.indicatorPanes = Array.isArray(incoming.indicatorPanes)
+              ? incoming.indicatorPanes.map((x) => ({
+                  kind: String(x?.kind || "MACD"),
+                }))
+              : [];
           else if (k in state) state[k] = incoming[k]; // 其他简单字段直接赋值
         });
       } catch {} // 解析失败忽略
@@ -395,6 +408,18 @@ export function useUserSettings() {
     return Number.isFinite(+val) ? +val : null;
   }
 
+  // 新增：指标窗列表持久化（浅合并，记录 kind 与顺序；id 由页面运行时生成）
+  function setIndicatorPanes(arr) {
+    state.indicatorPanes = Array.isArray(arr)
+      ? arr.map((x) => ({ kind: String(x?.kind || "MACD") }))
+      : [];
+  }
+  function getIndicatorPanes() {
+    return Array.isArray(state.indicatorPanes)
+      ? state.indicatorPanes.map((x) => ({ kind: String(x?.kind || "MACD") }))
+      : [];
+  }
+
   // —— 暴露响应式引用与方法（保持原接口名，便于现有调用对接） —— //
   return {
     // 响应式引用（toRef：保留响应特性）
@@ -420,6 +445,7 @@ export function useUserSettings() {
     viewBars: toRef(state, "viewBars"),
     viewAtRightEdge: toRef(state, "viewAtRightEdge"),
     viewLastFocusTs: toRef(state, "viewLastFocusTs"), // 新增：最后聚焦 ts
+    indicatorPanes: toRef(state, "indicatorPanes"), // 新增：指标窗列表
 
     // Setter/Getter
     setKlineStyle,
@@ -453,5 +479,7 @@ export function useUserSettings() {
     getAtRightEdge, // 触底状态（新增）
     setLastFocusTs, // 新增：最后聚焦 ts
     getLastFocusTs, // 新增：读取最后聚焦 ts
+    setIndicatorPanes, // 新增：设置指标窗列表
+    getIndicatorPanes, // 新增：读取指标窗列表
   };
 }

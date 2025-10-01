@@ -5,7 +5,13 @@
      - 不作为交互源；onDataZoom inside-only 并早退。
 -->
 <template>
-  <div ref="wrap" class="chart" @dblclick="openSettingsDialog">
+  <div
+    ref="wrap"
+    class="chart"
+    @dblclick="openSettingsDialog"
+    @mouseenter="onMouseEnter"
+    @mouseleave="onMouseLeave"
+  >
     <div class="top-info">
       <select
         class="sel-kind"
@@ -84,11 +90,13 @@ import * as echarts from "echarts";
 // NEW: 统一渲染中枢
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
+import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 
 const vm = inject("marketView");
 const hub = useViewCommandHub();
 const renderHub = useViewRenderHub();
+const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
@@ -114,6 +122,14 @@ const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null; // 已存在的 ResizeObserver 句柄（之前未使用）
+
+// NEW: 上报悬浮状态
+function onMouseEnter() {
+  renderHub.setHoveredPanel("indicator"); // 简化：所有指标窗共享一个 key
+}
+function onMouseLeave() {
+  renderHub.setHoveredPanel(null);
+}
 
 // NEW: 指标窗缺少自适应，此处补充与量窗一致的安全 resize 实现
 function safeResize() {
@@ -260,17 +276,6 @@ function onDataZoom(params) {
   } catch {}
 }
 
-// 订阅全局 hover，在本窗显示 tooltip/竖线
-function onGlobalHoverIndex(e) {
-  try {
-    const idx = Number(e?.detail?.idx);
-    const arr = vm.candles.value || [];
-    if (!chart || !arr.length) return;
-    if (!Number.isFinite(idx) || idx < 0 || idx >= arr.length) return;
-    chart.dispatchAction({ type: "showTip", dataIndex: idx, seriesIndex: 0 });
-  } catch {}
-}
-
 onMounted(async () => {
   const el = host.value;
   if (!el) return;
@@ -300,6 +305,7 @@ onMounted(async () => {
       const len = (vm.candles.value || []).length;
       if (!len) return;
 
+      // MOD: 移除所有 setOption 逻辑
       let idx = -1;
       const sd = Array.isArray(params?.seriesData)
         ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
@@ -355,8 +361,8 @@ const unsubId = renderHub.onRender((snapshot) => {
     }
     const option = renderHub.getIndicatorOption(kindLocal.value);
     if (!option) return;
-    const notMerge = !renderHub.isInteracting();
-    chart.setOption(option, notMerge);
+    const notMerge = !renderHub.isInteracting(); // ECharts-first：交互期禁止 notMerge 重绘
+    chart.setOption(option, { notMerge, silent: true }); // MOD: 增加 silent: true
   } catch (e) {
     console.error("Indicator renderHub onRender error:", e);
   }
@@ -399,6 +405,30 @@ watch(
   },
   { deep: true }
 );
+
+// NEW: 底部拖拽实现（与量窗一致）
+let dragging = false,
+  startY = 0,
+  startH = 0;
+function onResizeHandleDown(_pos, e) {
+  dragging = true;
+  startY = e.clientY;
+  startH = wrap.value?.clientHeight || 0;
+  window.addEventListener("mousemove", onResizeHandleMove);
+  window.addEventListener("mouseup", onResizeHandleUp, { once: true });
+}
+function onResizeHandleMove(e) {
+  if (!dragging) return;
+  const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
+  if (wrap.value) {
+    wrap.value.style.height = `${Math.floor(next)}px`;
+    safeResize();
+  }
+}
+function onResizeHandleUp() {
+  dragging = false;
+  window.removeEventListener("mousemove", onResizeHandleMove);
+}
 </script>
 
 <style scoped>
@@ -443,7 +473,7 @@ watch(
   margin-left: auto;
   width: 28px;
   height: 28px;
-  background: 透明;
+  background: transparent;
   border: none;
   padding: 0;
   cursor: pointer;
@@ -453,15 +483,19 @@ watch(
   left: 0;
   right: 0;
   top: 28px;
-  bottom: 18px;
+  bottom: 8px; /* MOD: 统一底部留白为 8px，与量窗一致 */
 }
 .bottom-strip {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 18px;
+  height: 8px; /* MOD: 统一拖拽条高度为 8px，与量窗一致 */
   background: transparent;
+}
+/* MOD: 统一拖拽提示样式（与量窗一致） */
+.bottom-strip:hover {
+  cursor: ns-resize;
 }
 .settings-hint {
   color: #bbb;
