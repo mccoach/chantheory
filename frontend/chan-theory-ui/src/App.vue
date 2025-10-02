@@ -62,6 +62,7 @@ import WatchlistPanel from "@/components/features/WatchlistPanel.vue";
 import StorageManager from "@/components/features/StorageManager.vue";
 import ModalDialog from "@/components/ui/ModalDialog.vue";
 
+import { useUserSettings } from "./composables/useUserSettings";
 import { useMarketView } from "./composables/useMarketView";
 import { useExportController } from "./composables/useExportController";
 import { useDialogManager } from "./composables/useDialogManager";
@@ -70,7 +71,10 @@ import { waitBackendAlive } from "./utils/backendReady";
 import { ensureIndexFresh } from "./composables/useSymbolIndex";
 // NEW: 统一渲染中枢
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
+// NEW: 显示状态中枢（供设置保存/重置后“刷新”）
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
+const settings = useUserSettings();
 const vm = useMarketView({ autoStart: false }); // 关键变更：延迟首刷
 provide("marketView", vm);
 
@@ -78,6 +82,9 @@ provide("marketView", vm);
 const renderHub = useViewRenderHub();
 renderHub.setMarketView(vm);
 provide("renderHub", renderHub);
+
+// NEW: 中枢（供设置保存/重置时调用 Refresh）
+const hub = useViewCommandHub();
 
 const dialogManager = useDialogManager();
 provide("dialogManager", dialogManager);
@@ -168,14 +175,18 @@ function handleModalClose() {
 function handleModalResetAll() {
   const dlg = dialogManager.activeDialog.value;
   try {
+    // 优先：内容组件自带重置回调（内容组件内部负责“写入持久化 + 决定是否需要 reload”）
     if (dlg && typeof dlg.onResetAll === "function") {
-      dlg.onResetAll(); // 优先使用对话框自带重置回调
+      dlg.onResetAll();
+      // —— 仅做前端刷新，不触发后端 —— //
+      try { if (hub && typeof hub.execute === "function") hub.execute("Refresh", {}); } catch {}
       return;
     }
     // 次选：内容组件若暴露 resetAll()
     const body = dialogBodyRef.value;
     if (body && typeof body.resetAll === "function") {
       body.resetAll();
+      try { if (hub && typeof hub.execute === "function") hub.execute("Refresh", {}); } catch {}
       return;
     }
     console.warn("当前设置窗未提供 onResetAll 或 resetAll，忽略重置命令。");
@@ -184,6 +195,8 @@ function handleModalResetAll() {
   }
 }
 
+// —— openSettingsDialog 内对“保存并应用”与“重置”的实现位于 MainChartPanel.vue —— //
+// 这里不再做任何 reload；由内容组件决定“是否需要后端请求”（例如 adjust ���化）并自行调用 vm.reload。
 onMounted(async () => {
   const alive = await waitBackendAlive({ timeoutMs: 10000, intervalMs: 600 });
   backendReady.value = !!alive;

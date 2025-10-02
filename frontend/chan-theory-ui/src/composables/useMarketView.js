@@ -1,9 +1,8 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useMarketView.js
-/* ============================== */
-/* 覆盖式防抖（Abort + reqId）+ 中枢化显示状态订阅（bars/rightTs/presetKey）
- * 本次重构（轻度）：保持原函数/变量顺序，不扩大范围，仅补充注释与确保 anchor_ts = 中枢 rightTs。
- * - 显示状态与后端解耦：任何 UI 交互先汇总到 useViewCommandHub，reload 时以 hub.rightTs 为锚点，服务端一次成型返回 meta.view_*。
- */
+// ==============================
+// 覆盖式防抖（Abort + reqId）+ 中枢化显示状态订阅（bars/rightTs/presetKey）
+// 本次重构（轻度）：保持原函数/变量顺序，不扩大范围，仅补充注释与确保 anchor_ts = 中枢 rightTs。
+// - 显示状态与后端解耦：任何 UI 交互先汇总到 useViewCommandHub，reload 时以 hub.rightTs 为锚点，服务端一次成型返回 meta.view_*。
 
 import { ref, watch, computed } from "vue";
 import { fetchCandles } from "@/services/marketService";
@@ -56,24 +55,19 @@ export function useMarketView(options = {}) {
   const visibleRange = ref({ startStr: "", endStr: "" });
   const displayBars = ref(0);
 
+  // MOD: 统一传递设置中“出现”的所有 MA 周期，无视 enabled（一次性计算，后续只控制显示）
   const maPeriodsMap = computed(() => {
     const configs = settings.maConfigs.value || {};
-    return Object.entries(configs)
-      .filter(([, conf]) => conf && conf.enabled)
-      .reduce((acc, [key, conf]) => {
-        acc[key] = conf.period;
+    return Object.entries(configs).reduce((acc, [key, conf]) => {
+      const n = Number(conf?.period);
+      if (Number.isFinite(n) && n > 0) acc[key] = n;
         return acc;
       }, {});
   });
+
+  // MOD: 始终请求全量指标（ma,macd,kdj,rsi,boll,vol），由前端决定显示与样式；避免切换开关时等待后端
   function buildIncludeParam() {
-    const arr = ["vol"];
-    const mc = Object.keys(maPeriodsMap.value);
-    if (mc.length > 0) arr.push("ma");
-    if (settings.useMACD.value) arr.push("macd");
-    if (settings.useKDJ.value) arr.push("kdj");
-    if (settings.useRSI.value) arr.push("rsi");
-    if (settings.useBOLL.value) arr.push("boll");
-    return arr.join(",");
+    return "ma,macd,kdj,rsi,boll,vol";
   }
 
   // —— 中枢订阅（显示层文案同步）：不改变 bars/rightTs，仅更新展示 —— //
@@ -118,8 +112,8 @@ export function useMarketView(options = {}) {
       code: code.value,
       freq: freq.value,
       adjust: adjust.value,
-      include: buildIncludeParam(),
-      ma_periods: JSON.stringify(maPeriodsMap.value || {}),
+      include: buildIncludeParam(), // MOD
+      ma_periods: JSON.stringify(maPeriodsMap.value || {}), // MOD: 全量 MA 周期
       window_preset: opts.window_preset ?? windowPreset.value,
       bars: Math.max(1, Math.floor(Number(st.barsCount || 1))),
       anchor_ts: anchor, // —— 关键：统一以中枢 rightTs 作为锚点 —— //

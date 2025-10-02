@@ -326,6 +326,17 @@ export const FRACTAL_FILLS = [
   { v: "hollow", label: "空心" }, // 空心
 ]; // 数组结束
 
+// ==============================                                          // 新增：画笔默认方案
+// 画笔默认设置（主窗设置窗 · 缠论标记页引用；渲染层通过该预置方案提供默认值）
+// ==============================
+export const PENS_DEFAULTS = {
+  enabled: true,                  // 是否显示画笔
+  lineWidth: 2,                   // 线宽（px）
+  color: "#ffffff",               // 颜色（白色）
+  confirmedStyle: "solid",        // 确认笔线型：solid|dashed|dotted
+  provisionalStyle: "dashed",     // 预备笔线型：solid|dashed|dotted
+}; // 对象结束
+
 // ======================================================================                                     // 小节：预设映射与高亮
 // 预设 → barsCount 映射工具（以“原始 K 根数”为单位；ALL = totalBars）                                         // 标题说明
 // ======================================================================                                     // 分隔注释

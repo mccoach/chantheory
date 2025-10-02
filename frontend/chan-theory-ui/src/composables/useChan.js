@@ -406,3 +406,187 @@ export function computeFractals(reducedBars, params = {}) {
 
   return out;
 }
+
+// ==============================
+// 新增：画笔（笔）识别 —— computePens
+// - 以分型承载点映射到合并K（reducedIndex）为基础，使用“承载点索引差值 gap = endReducedIdx - startReducedIdx”判定成笔。
+// - 默认 MIN_GAP_REDUCED=4（分型窗口三根，中柱承载点；保证两分型之间至少存在一根不属于两边分型窗口的独立合并K）。
+// - 输出 pens = { confirmed: [...], provisional: {...}|null, all: [...]}，每条笔含起止原/合并索引、方向、幅度与跨度等。
+// ==============================
+export function computePens(
+  reducedBars,
+  fractals,
+  mapOrigToReduced,
+  params = {}
+) {
+  const minGap = Number.isFinite(+params.minGapReduced)
+    ? Math.max(1, Math.floor(+params.minGapReduced))
+    : 4; // 默认 4
+
+  // 强度优先级（用于同位/同值的并列选择）
+  const strengthRank = { strong: 3, standard: 2, weak: 1 };
+
+  // 1) 建立“候选分型承载点”集合：每个 reducedIndex 仅保留更极值者
+  const candidatesByRid = new Map(); // ridx → {ridx, origIdx, type, y, id, strength}
+  for (const f of fractals || []) {
+    const origIdx = Number(f?.xIndex);
+    const mapEnt = (mapOrigToReduced || [])[origIdx];
+    const ridx = Number(mapEnt?.reducedIndex);
+    if (!Number.isFinite(origIdx) || !Number.isFinite(ridx)) continue;
+
+    const type = String(f?.type || "");
+    if (type !== "top" && type !== "bottom") continue;
+
+    const y =
+      type === "top" ? Number(f?.G2) : Number(f?.D2); // 顶用 G2，底用 D2
+    if (!Number.isFinite(y)) continue;
+
+    const prev = candidatesByRid.get(ridx);
+    if (!prev) {
+      candidatesByRid.set(ridx, {
+        ridx,
+        origIdx,
+        type,
+        y,
+        id: String(f?.id || `${type}-${origIdx}`),
+        strength: String(f?.strength || "standard"),
+      });
+      continue;
+    }
+    // 同位择优：顶取更高；底取更低；并用强度做次级比较
+    if (type === prev.type) {
+      const better =
+        type === "top"
+          ? y > prev.y ||
+            (y === prev.y &&
+              (strengthRank[String(f?.strength || "standard")] || 0) >
+                (strengthRank[prev.strength] || 0))
+          : y < prev.y ||
+            (y === prev.y &&
+              (strengthRank[String(f?.strength || "standard")] || 0) >
+                (strengthRank[prev.strength] || 0));
+      if (better) {
+        candidatesByRid.set(ridx, {
+          ridx,
+          origIdx,
+          type,
+          y,
+          id: String(f?.id || `${type}-${origIdx}`),
+          strength: String(f?.strength || "standard"),
+        });
+      }
+      // 若不同类型分型出现在同位（极端情况），优先保留“更极值”的那个，不做复合；此处简单忽略异类覆盖。
+    } else {
+      // 不同类型同位：优先保留“更极值”的那个
+      const preferNew =
+        type === "top"
+          ? y > prev.y
+          : y < prev.y; // 顶更高/底更低者优先
+      if (preferNew) {
+        candidatesByRid.set(ridx, {
+          ridx,
+          origIdx,
+          type,
+          y,
+          id: String(f?.id || `${type}-${origIdx}`),
+          strength: String(f?.strength || "standard"),
+        });
+      }
+    }
+  }
+
+  // 排序为扫描序列（按 reducedIndex 升序）
+  const candidates = Array.from(candidatesByRid.values()).sort(
+    (a, b) => a.ridx - b.ridx
+  );
+
+  // 状态机：currentStart ← 同类更极值更新；遇到反分型且 gap≥minGap → 新预备笔成立，前一预备笔正式确认
+  let currentStart = null; // {ridx,origIdx,type,y,id,strength}
+  let provisionalPen = null; // 上一个预备笔（等待下一笔成立后确认）
+  const confirmedPens = []; // 已确认的笔
+
+  function makePen(start, end) {
+    const dir = start.type === "bottom" ? "UP" : "DOWN";
+    const startReducedIdx = Number(start.ridx);
+    const endReducedIdx = Number(end.ridx);
+    const startOrigIdx = Number(start.origIdx);
+    const endOrigIdx = Number(end.origIdx);
+    const spanReducedBars = endReducedIdx - startReducedIdx;
+    const amplitudeAbs =
+      dir === "UP" ? Number(end.y) - Number(start.y) : Number(start.y) - Number(end.y);
+    return {
+      startReducedIdx,
+      endReducedIdx,
+      startOrigIdx,
+      endOrigIdx,
+      direction: dir,
+      spanReducedBars,
+      amplitudeAbs,
+      startY: Number(start.y),
+      endY: Number(end.y),
+      startFractalId: start.id,
+      endFractalId: end.id,
+      state: "provisional",
+    };
+  }
+
+  for (const pt of candidates) {
+    if (!currentStart) {
+      currentStart = pt;
+      continue;
+    }
+
+    if (pt.type === currentStart.type) {
+      // 同类型更极值更新起点
+      const better =
+        pt.type === "top" ? pt.y > currentStart.y : pt.y < currentStart.y;
+      if (better) {
+        // —— 修复点：在更新形成笔起点的同时，若存在上一条“预备笔”，同步更新其终点为新的 currentStart —— //
+        // 这样保证“相邻两笔首尾相连”：前一笔的 end == 后一笔的 start（currentStart）
+        currentStart = pt;
+        if (provisionalPen) {
+          provisionalPen.endReducedIdx = Number(pt.ridx);
+          provisionalPen.endOrigIdx = Number(pt.origIdx);
+          provisionalPen.endY = Number(pt.y);
+          provisionalPen.endFractalId = String(pt.id);
+
+          // 方向保持不变（由 start.type 决定），重算跨度与幅度
+          provisionalPen.spanReducedBars =
+            provisionalPen.endReducedIdx - provisionalPen.startReducedIdx;
+          provisionalPen.amplitudeAbs =
+            provisionalPen.direction === "UP"
+              ? provisionalPen.endY - Number(provisionalPen.startY)
+              : Number(provisionalPen.startY) - provisionalPen.endY;
+        }
+      }
+      continue;
+    }
+
+    // 遇到反分型：判定承载点距差 gap
+    const gap = Number(pt.ridx) - Number(currentStart.ridx);
+    if (gap >= minGap) {
+      // 新预备笔成立
+      const newPen = makePen(currentStart, pt);
+      // 前一预备笔 → 正式确认
+      if (provisionalPen) {
+        provisionalPen.state = "confirmed";
+        confirmedPens.push(provisionalPen);
+      }
+      provisionalPen = newPen;
+      // 约束：每一笔的起点必然与前一笔的终点一致 —— currentStart 切换为当前反分型
+      currentStart = pt;
+    } else {
+      // 距离不足：忽略，不成笔；允许后续继续更新 currentStart（仅同类更极值）
+      continue;
+    }
+  }
+
+  const allPens = confirmedPens.slice();
+  if (provisionalPen) allPens.push(provisionalPen);
+
+  return {
+    confirmed: confirmedPens,
+    provisional: provisionalPen,
+    all: allPens,
+  };
+}

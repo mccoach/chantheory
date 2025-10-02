@@ -4,6 +4,7 @@
      - 只订阅 useViewRenderHub.onRender(snapshot)，一次性 setOption 渲染（含统一 initialRange 与 overrideMarkWidth）。
      - 设置面板恢复 MAVOL 三条线与放/缩量标记的参数编辑，保存到 settings.volSettings，并由渲染中枢监控 settings 变化重新发布快照。
      - 不再监听 meta 或使用 zoomSync；onDataZoom inside-only 并早退。
+     - 修复：新增 watch(vm.meta.value) 以在标的/频率变化后即时刷新标题信息（与主窗/技术窗一致）。
 -->
 <template>
   <div
@@ -287,9 +288,9 @@ const VolumeSettingsContent = defineComponent({
                 onChange: (e) => (conf.style = String(e.target.value)),
               },
               [
-                h("option", "solid"),
-                h("option", "dashed"),
-                h("option", "dotted"),
+                h("option", { value: "solid" }, "实线"),
+                h("option", { value: "dashed" }, "虚线"),
+                h("option", { value: "dotted" }, "点线"),
               ]
             )
           ),
@@ -718,6 +719,21 @@ onBeforeUnmount(() => {
   } catch {}
   chart = null;
 });
+
+/* ============================= */
+/* 新增：订阅 vm.meta 变化以即时刷新量窗标题信息（与主窗/技术窗一致） */
+/* 说明：只增加 watcher，不改变既有函数的顺序与逻辑；即刻 nextTick 后刷新 header。 */
+/* ============================= */
+watch(
+  () => vm.meta.value,
+  async () => {
+    try {
+      await nextTick();
+      updateHeaderFromCurrent();
+    } catch {}
+  },
+  { deep: true }
+);
 
 function getCurrentZoomIndexRange() {
   try {

@@ -49,7 +49,7 @@ const props = defineProps({
   tabs: { type: Array, default: () => [] },
   activeTab: { type: String, default: "" },
 });
-const emit = defineEmits(["close", "save", "tab-change"]);
+const emit = defineEmits(["close", "save", "tab-change", "reset-all"]); // NEW: 声明 reset-all
 function close() {
   emit("close");
 }

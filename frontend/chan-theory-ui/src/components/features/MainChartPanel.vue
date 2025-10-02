@@ -1,17 +1,15 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
 <!-- 主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     本轮改动目标（第一轮：仅改布局 + 原位输入；删除原高级面板）：
-     1) 顶栏布局改为“两行两列”：
-        - 第一行：左列为改频按钮（靠左），右列为窗宽预设按钮（靠右）；
-        - 第二行：左列为起止时间“原位输入”（按频率显示日/分钟族），右列为 Bars 数“原位输入”（失焦应用）。
-     2) 原“高级面板”删除，手输日期/N 根功能迁移为“原位输入”，其余行为与现状保持一致（严格守护）。
-     3) 原交互与渲染机制（onDataZoom 会后承接、中枢两帧合并、程序化阻断、idle-commit、一次性 setOption）保持不变。
+     本轮改动目标（按你的最新要求）：
+     1) 设置窗的交互改为“仅更新草稿”，保存并关闭时才持久化并应用到图面（hub.Refresh + vm.reload({force:true})）。
+     2) 追加“画笔”计算与渲染（折线），算法集中 useChan.js，渲染集中 charts/chan/layers.js；画笔样式从 useUserSettings + PENS_DEFAULTS 读取。
+     3) 保持既有不变量与一次性装配渲染链路不变，确保分型/涨跌标记与主图/量窗/指标窗回归正常。
 -->
 <!-- ====================================================================== -->
 
 <template>
-  <!-- 顶部控制区（两行两列） -->
+  <!-- 顶部两行两列布局 -->
   <div class="controls controls-grid-2x2">
     <!-- 第一行左：频率按钮（切频会触发后端 reload） -->
     <div class="row1 col-left">
@@ -385,14 +383,23 @@ import {
   FRACTAL_SHAPES,
   FRACTAL_FILLS,
   WINDOW_PRESETS,
+  PENS_DEFAULTS,
 } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
-import { computeInclude, computeFractals } from "@/composables/useChan";
+import {
+  computeInclude,
+  computeFractals,
+  computePens,
+} from "@/composables/useChan";
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
-import { buildUpDownMarkers, buildFractalMarkers } from "@/charts/chan/layers";
+import {
+  buildUpDownMarkers,
+  buildFractalMarkers,
+  buildPenLines,
+} from "@/charts/chan/layers";
 
 /* 双跳脱调度，避免主流程期 setOption/resize */
 function schedule(fn) {
@@ -426,7 +433,7 @@ const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 const hub = useViewCommandHub();
 
-/* MOD: 增加“当前高亮预设键”的响应式变量，并订阅中枢快照 */
+/* 当前高亮预设键 */
 const activePresetKey = ref(hub.getState().presetKey || "ALL");
 hub.onChange((st) => {
   activePresetKey.value = st.presetKey || "ALL";
@@ -438,7 +445,7 @@ function isStale(seq) {
   return seq !== renderSeq;
 }
 
-/* 程序化 dataZoom 守护（保持原变量与逻辑） */
+/* 程序化 dataZoom 守护 */
 let progZoomGuard = { active: false, sig: null, ts: 0 };
 // 最近一次已应用范围（双保险早退，防回环）
 let lastAppliedRange = { s: null, e: null };
@@ -451,16 +458,11 @@ function activateK(f) {
   vm.setFreq(f);
 }
 
-/* —— 移除高级面板相关状态/模板（迁移为“原位输入”，其余逻辑保持不变） —— */
-
 /* 画布/实例与 Resize */
 const wrap = ref(null);
 const host = ref(null);
 let chart = null;
 let ro = null;
-
-// NEW: 订阅 ID 句柄（用于 renderHub.onRender 的取消订阅）
-// 说明：之前未声明导致 mounted 钩子赋值 unsubId 报错，此处补充在模块作用域统一声明。
 let unsubId = null;
 
 // NEW: 上报悬浮状态
@@ -539,7 +541,7 @@ function getCurrentZoomIndexRange() {
   return null;
 }
 
-/* 设置弹窗（保持原逻辑） */
+/* 设置弹窗（改为：交互仅更新草稿；保存后才持久化并应用） */
 const settingsDraft = reactive({
   kForm: { ...DEFAULT_KLINE_STYLE },
   maForm: {},
@@ -550,6 +552,7 @@ const settingsDraft = reactive({
 let prevAdjust = "none";
 function openSettingsDialog() {
   try {
+    // 草稿加载
     settingsDraft.kForm = JSON.parse(
       JSON.stringify({
         ...DEFAULT_KLINE_STYLE,
@@ -559,7 +562,8 @@ function openSettingsDialog() {
     const maDefaults = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
     const maLocal = settings.maConfigs.value || {};
     Object.keys(maDefaults).forEach((k) => {
-      if (maLocal[k]) maDefaults[k] = { ...maDefaults[k], ...maLocal[k] };
+      const src = maLocal[k] || maDefaults[k];
+      maDefaults[k] = { ...maDefaults[k], ...src };
     });
     settingsDraft.maForm = maDefaults;
     settingsDraft.chanForm = JSON.parse(
@@ -579,6 +583,7 @@ function openSettingsDialog() {
     );
     settingsDraft.adjust = prevAdjust;
 
+    // 行情显示与缠论设置内容组件
     const MainChartSettingsContent = defineComponent({
       props: { activeTab: { type: String, default: "display" } },
       setup(props) {
@@ -602,7 +607,7 @@ function openSettingsDialog() {
             }),
           ]);
 
-        // 行情显示（原始K/合并K/MA）
+        // 行情显示页（仅更新草稿）
         const renderDisplay = () => {
           const K = settingsDraft.kForm;
           const rows = [];
@@ -848,8 +853,9 @@ function openSettingsDialog() {
               }),
             ])
           );
-          Object.keys(settingsDraft.maForm || {}).forEach((key) => {
-            const conf = settingsDraft.maForm[key];
+
+          // MA 行（仅更新草稿；保存时统一持久化 + 应用）
+          Object.entries(settingsDraft.maForm || {}).forEach(([key, conf]) => {
             rows.push(
               h("div", { class: "std-row" }, [
                 nameCell(`MA${conf.period}`),
@@ -879,9 +885,7 @@ function openSettingsDialog() {
                       DEFAULT_MA_CONFIGS.MA5.color,
                     onInput: (e) =>
                       (settingsDraft.maForm[key].color = String(
-                        e.target.value ||
-                          DEFAULT_MA_CONFIGS[key]?.color ||
-                          DEFAULT_MA_CONFIGS.MA5.color
+                        e.target.value
                       )),
                   })
                 ),
@@ -892,12 +896,15 @@ function openSettingsDialog() {
                     {
                       class: "input",
                       value: conf.style || "solid",
-                      onChange: (e) => (conf.style = String(e.target.value)),
+                      onChange: (e) =>
+                        (settingsDraft.maForm[key].style = String(
+                          e.target.value
+                        )),
                     },
                     [
-                      h("option", "solid"),
-                      h("option", "dashed"),
-                      h("option", "dotted"),
+                      h("option", { value: "solid" }, "实线"),
+                      h("option", { value: "dashed" }, "虚线"),
+                      h("option", { value: "dotted" }, "点线"),
                     ]
                   )
                 ),
@@ -911,30 +918,32 @@ function openSettingsDialog() {
                     step: 1,
                     value: Number(conf.period ?? 5),
                     onInput: (e) =>
-                      (conf.period = Math.max(
+                      (settingsDraft.maForm[key].period = Math.max(
                         1,
                         parseInt(e.target.value || 5, 10)
                       )),
                   })
                 ),
-                h("div"),
-                checkCell(
-                  !!conf.enabled,
-                  (e) => (conf.enabled = !!e.target.checked)
-                ),
+                h("div", { class: "std-check" }, [
+                  h("input", {
+                    type: "checkbox",
+                    checked: !!conf.enabled,
+                    onChange: (e) =>
+                      (settingsDraft.maForm[key].enabled = !!e.target.checked),
+                  }),
+                ]),
                 resetBtn(() => {
                   const def = DEFAULT_MA_CONFIGS[key];
-                  if (def) {
-                    settingsDraft.maForm[key] = { ...def };
-                  }
+                  if (def) settingsDraft.maForm[key] = { ...def };
                 }),
               ])
             );
           });
+
           return rows;
         };
 
-        // 缠论设置（保留原有“涨跌标记 + 分型判定 + 强/标准/弱 + 确认分型”）
+        // 缠论设置（分型与画笔）——仅更新草稿；保存时持久化
         const renderChan = () => {
           const cf = settingsDraft.chanForm;
           const rows = [];
@@ -1039,7 +1048,7 @@ function openSettingsDialog() {
             ])
           );
 
-          // 分型判定 + 强/标准/弱 + 确认分型（完整回归）
+          // 分型判定 + 强/标准/弱 + 确认分型（路径写回保持已修复）
           const ff = settingsDraft.fractalForm;
           const styleByStrength = (ff.styleByStrength =
             ff.styleByStrength ||
@@ -1122,9 +1131,13 @@ function openSettingsDialog() {
             { k: "weak", label: "弱分型" },
           ];
           function resetStrengthRow(key) {
-            styleByStrength[key] = JSON.parse(
-              JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[key])
-            );
+            const cur = settingsDraft.fractalForm.styleByStrength || {};
+            settingsDraft.fractalForm.styleByStrength = {
+              ...cur,
+              [key]: JSON.parse(
+                JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[key])
+              ),
+            };
           }
           for (const sp of specs) {
             const conf = styleByStrength[sp.k];
@@ -1138,8 +1151,18 @@ function openSettingsDialog() {
                     {
                       class: "input",
                       value: conf.bottomShape,
-                      onChange: (e) =>
-                        (conf.bottomShape = String(e.target.value)),
+                      onChange: (e) => {
+                        const cur =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        const old = cur[sp.k] || {};
+                        settingsDraft.fractalForm.styleByStrength = {
+                          ...cur,
+                          [sp.k]: {
+                            ...old,
+                            bottomShape: String(e.target.value),
+                          },
+                        };
+                      },
                     },
                     (FRACTAL_SHAPES || []).map((opt) =>
                       h("option", { value: opt.v }, opt.label)
@@ -1152,7 +1175,15 @@ function openSettingsDialog() {
                     class: "input color",
                     type: "color",
                     value: conf.bottomColor,
-                    onInput: (e) => (conf.bottomColor = String(e.target.value)),
+                    onInput: (e) => {
+                      const cur =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      const old = cur[sp.k] || {};
+                      settingsDraft.fractalForm.styleByStrength = {
+                        ...cur,
+                        [sp.k]: { ...old, bottomColor: String(e.target.value) },
+                      };
+                    },
                   })
                 ),
                 itemCell(
@@ -1162,7 +1193,15 @@ function openSettingsDialog() {
                     {
                       class: "input",
                       value: conf.topShape,
-                      onChange: (e) => (conf.topShape = String(e.target.value)),
+                      onChange: (e) => {
+                        const cur =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        const old = cur[sp.k] || {};
+                        settingsDraft.fractalForm.styleByStrength = {
+                          ...cur,
+                          [sp.k]: { ...old, topShape: String(e.target.value) },
+                        };
+                      },
                     },
                     (FRACTAL_SHAPES || []).map((opt) =>
                       h("option", { value: opt.v }, opt.label)
@@ -1175,7 +1214,15 @@ function openSettingsDialog() {
                     class: "input color",
                     type: "color",
                     value: conf.topColor,
-                    onInput: (e) => (conf.topColor = String(e.target.value)),
+                    onInput: (e) => {
+                      const cur =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      const old = cur[sp.k] || {};
+                      settingsDraft.fractalForm.styleByStrength = {
+                        ...cur,
+                        [sp.k]: { ...old, topColor: String(e.target.value) },
+                      };
+                    },
                   })
                 ),
                 itemCell(
@@ -1185,7 +1232,15 @@ function openSettingsDialog() {
                     {
                       class: "input",
                       value: conf.fill,
-                      onChange: (e) => (conf.fill = String(e.target.value)),
+                      onChange: (e) => {
+                        const cur =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        const old = cur[sp.k] || {};
+                        settingsDraft.fractalForm.styleByStrength = {
+                          ...cur,
+                          [sp.k]: { ...old, fill: String(e.target.value) },
+                        };
+                      },
                     },
                     (FRACTAL_FILLS || []).map((opt) =>
                       h("option", { value: opt.v }, opt.label)
@@ -1196,7 +1251,15 @@ function openSettingsDialog() {
                   h("input", {
                     type: "checkbox",
                     checked: !!conf.enabled,
-                    onChange: (e) => (conf.enabled = !!e.target.checked),
+                    onChange: (e) => {
+                      const cur =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      const old = cur[sp.k] || {};
+                      settingsDraft.fractalForm.styleByStrength = {
+                        ...cur,
+                        [sp.k]: { ...old, enabled: !!e.target.checked },
+                      };
+                    },
                   }),
                 ]),
                 resetBtn(() => resetStrengthRow(sp.k)),
@@ -1298,6 +1361,123 @@ function openSettingsDialog() {
             ])
           );
 
+          // NEW: 画笔设置（追加到缠论标记页末尾；数据先行持久化）
+          const penCfg =
+            settingsDraft.chanForm.pen &&
+            typeof settingsDraft.chanForm.pen === "object"
+              ? settingsDraft.chanForm.pen
+              : JSON.parse(JSON.stringify(PENS_DEFAULTS));
+
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("简笔"),
+              // 线宽
+              itemCell(
+                "线宽",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0.5,
+                  max: 6,
+                  step: 0.5,
+                  value: Number.isFinite(+penCfg.lineWidth)
+                    ? +penCfg.lineWidth
+                    : PENS_DEFAULTS.lineWidth,
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0.5,
+                      Math.min(
+                        6,
+                        Number(e.target.value || PENS_DEFAULTS.lineWidth)
+                      )
+                    );
+                    settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                      lineWidth: v,
+                    });
+                  },
+                })
+              ),
+              // 颜色
+              itemCell(
+                "颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: penCfg.color || PENS_DEFAULTS.color,
+                  onInput: (e) => {
+                    settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                      color: String(e.target.value || PENS_DEFAULTS.color),
+                    });
+                  },
+                })
+              ),
+              // 确认线型
+              itemCell(
+                "确认线型",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value:
+                      penCfg.confirmedStyle || PENS_DEFAULTS.confirmedStyle,
+                    onChange: (e) => {
+                      settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                        confirmedStyle: String(e.target.value),
+                      });
+                    },
+                  },
+                  [
+                    h("option", { value: "solid" }, "实线"),
+                    h("option", { value: "dashed" }, "虚线"),
+                    h("option", { value: "dotted" }, "点线"),
+                  ]
+                )
+              ),
+              // 预备线型
+              itemCell(
+                "预备线型",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value:
+                      penCfg.provisionalStyle || PENS_DEFAULTS.provisionalStyle,
+                    onChange: (e) => {
+                      settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                        provisionalStyle: String(e.target.value),
+                      });
+                    },
+                  },
+                  [
+                    h("option", { value: "solid" }, "实线"),
+                    h("option", { value: "dashed" }, "虚线"),
+                    h("option", { value: "dotted" }, "点线"),
+                  ]
+                )
+              ),
+              // 占位（空列，保持网格对齐）
+              h("div"),
+              // 勾选（启用）
+              h("div", { class: "std-check" }, [
+                h("input", {
+                  type: "checkbox",
+                  checked: (penCfg.enabled ?? PENS_DEFAULTS.enabled) === true,
+                  onChange: (e) => {
+                    settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                      enabled: !!e.target.checked,
+                    });
+                  },
+                }),
+              ]),
+              // 重置键
+              resetBtn(() => {
+                settingsDraft.chanForm.pen = JSON.parse(
+                  JSON.stringify(PENS_DEFAULTS)
+                );
+              }),
+            ])
+          );
+
           return rows;
         };
 
@@ -1317,34 +1497,40 @@ function openSettingsDialog() {
         { key: "chan", label: "缠论标记" },
       ],
       activeTab: "display",
+      // —— 新增 onResetAll：恢复“所有页”的草稿为默认值（仅草稿，不落地） —— //
       onResetAll: () => {
         try {
-          Object.assign(settingsDraft.kForm, { ...DEFAULT_KLINE_STYLE });
-          settingsDraft.adjust = String(
-            DEFAULT_APP_PREFERENCES.adjust || "none"
-          );
-          const defs = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
-          settingsDraft.maForm = defs;
+          // 深拷贝默认，避免共享引用
+          settingsDraft.kForm = JSON.parse(JSON.stringify(DEFAULT_KLINE_STYLE));
+          settingsDraft.maForm = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
           settingsDraft.chanForm = JSON.parse(JSON.stringify(CHAN_DEFAULTS));
           settingsDraft.fractalForm = JSON.parse(
             JSON.stringify(FRACTAL_DEFAULTS)
           );
-        } catch (e) {}
+          settingsDraft.adjust = String(
+            DEFAULT_APP_PREFERENCES.adjust || "none"
+          );
+        } catch (e) {
+          console.error("resetAll (MainChart) failed:", e);
+        }
       },
+      // 全部恢复默认：仅更新草稿；保存后生效
       onSave: () => {
         try {
+          // 数据持久化
           settings.setKlineStyle(settingsDraft.kForm);
           settings.setMaConfigs(settingsDraft.maForm);
           settings.setChanSettings({ ...settingsDraft.chanForm });
           settings.setFractalSettings({ ...settingsDraft.fractalForm });
           const nextAdjust = String(settingsDraft.adjust || "none");
-          const adjustChanged = nextAdjust !== prevAdjust;
-          if (adjustChanged) {
-            settings.setAdjust(nextAdjust);
-          }
+          settings.setAdjust(nextAdjust);
 
-          // MOD: 立即触发中枢刷新，发布新快照 -> 即时应用新设置
+          // 应用到图面：仅 adjust 改变时才强制 reload；否则仅刷新中枢，立即前端重绘
+          const needReload = nextAdjust !== prevAdjust;
           hub.execute("Refresh", {});
+          if (needReload) {
+            vm.reload({ force: true });
+          }
           dialogManager.close();
         } catch (e) {
           dialogManager.close();
@@ -1380,7 +1566,7 @@ const refreshedAtHHMMSS = computed(() => {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 });
 
-/* 键盘左右键（保持原逻辑） */
+/* 键盘左右键 */
 let currentIndex = -1;
 
 function focusWrap() {
@@ -1390,12 +1576,24 @@ function focusWrap() {
 }
 
 /* 缠论/分型覆盖层 —— 构造覆盖层 series（一次性装配） */
-const chanCache = ref({ reduced: [], map: [], meta: null, fractals: [] });
+const chanCache = ref({
+  reduced: [],
+  map: [],
+  meta: null,
+  fractals: [],
+  pens: { confirmed: [], provisional: null, all: [] },
+});
 function recomputeChan() {
   try {
     const arr = vm.candles.value || [];
     if (!arr.length) {
-      chanCache.value = { reduced: [], map: [], meta: null, fractals: [] };
+      chanCache.value = {
+        reduced: [],
+        map: [],
+        meta: null,
+        fractals: [],
+        pens: { confirmed: [], provisional: null, all: [] },
+      };
       return;
     }
     const policy =
@@ -1406,27 +1604,47 @@ function recomputeChan() {
       minPct: settings.fractalSettings.value.minPct || 0,
       minCond: String(settings.fractalSettings.value.minCond || "or"),
     });
+
+    // NEW: 计算画笔（承载点间距 gap≥4；同步更新上一预备笔终点在同类更极值时由 useChan 实现）
+    const pens = computePens(
+      res.reducedBars || [],
+      fr || [],
+      res.mapOrigToReduced || [],
+      { minGapReduced: 4 }
+    );
+
     chanCache.value = {
       reduced: res.reducedBars || [],
       map: res.mapOrigToReduced || [],
       meta: res.meta || null,
       fractals: fr || [],
+      pens: pens || { confirmed: [], provisional: null, all: [] },
     };
   } catch {
-    chanCache.value = { reduced: [], map: [], meta: null, fractals: [] };
+    chanCache.value = {
+      reduced: [],
+      map: [],
+      meta: null,
+      fractals: [],
+      pens: { confirmed: [], provisional: null, all: [] },
+    };
   }
 }
 
 /**
  * 构造覆盖层 series（一次性装配）
- * - 保持原有 buildUpDownMarkers/buildFractalMarkers 的使用与样式；
- * - 若禁用或无数据，则输出占位系列（CHAN_UP/CHAN_DOWN 空），满足不变量；
- * - 返回数组，供主图 option.series 直接拼接。
+ * - 保持原有 buildUpDownMarkers/buildFractalMarkers；
+ * - 新增画笔折线（confirmed/实线，provisional/虚线）追加 series；样式从 useUserSettings 读取（在 buildPenLines 内部处理）。
  */
 function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
   const out = [];
   const reduced = chanCache.value.reduced || [];
   const fractals = chanCache.value.fractals || [];
+  const pens = chanCache.value.pens || {
+    confirmed: [],
+    provisional: null,
+    all: [],
+  };
 
   // 涨跌标记
   if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
@@ -1504,10 +1722,23 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
     }
   }
 
+  // 画笔折线（样式读取在 buildPenLines 内；不传 env 样式）
+  const penEnabled =
+    (settings.chanSettings.value?.pen?.enabled ?? PENS_DEFAULTS.enabled) ===
+    true;
+  if (
+    penEnabled &&
+    reduced.length &&
+    (pens.confirmed.length || pens.provisional)
+  ) {
+    const penLayer = buildPenLines(pens);
+    out.push(...(penLayer.series || []));
+  }
+
   return out;
 }
 
-// 会话空闲承接（交互结束短 idle 后一次性承接到中枢）
+/* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 let dzIdleTimer = null;
 const dzIdleDelayMs = 100; // 建议 160–200ms，避免频繁承接
 
@@ -1605,7 +1836,7 @@ function doSinglePassRender(snapshot) {
     if (!chart || !snapshot) return;
     const mySeq = ++renderSeq;
 
-    // —— 合并K线修复：先 recomputeChan，再用 reducedBars 重建主图 option —— //
+    // 先计算缠论（含分型与画笔）
     recomputeChan();
     const reduced = chanCache.value.reduced || [];
     const mapReduced = chanCache.value.map || [];
@@ -1904,10 +2135,7 @@ function updateHeaderFromCurrent() {
   displayHeader.value = { name, code: sym, freq: frq };
 }
 
-/* ============================= */
 /* 原位输入：起止日期/时间与 Bars */
-/* ============================= */
-
 const isMinuteFreq = computed(() => /m$/.test(String(vm.freq.value || "")));
 
 // 原位输入的字段（起/止）
@@ -1917,10 +2145,7 @@ const endFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
 // Bars 原位输入
 const barsStr = ref("");
 
-// ADD-BEGIN [权威订阅：任何渠道变更 bars/rightTs 后，起止与 Bars 立即刷新显示]
-// 说明：此前信息源头主要依赖 previewStartStr/previewEndStr 与 vm.visibleRange（来自 vm.meta.view_*），
-// 某些“纯本地交互路径”（未触发后端）在极端情况下可能出现轻微滞后。现在改为 hub.onChange 权威订阅，
-// 用 hub.barsCount/rightTs + ALL candles 计算 sIdx/eIdx → 回填 preview* 与输入框，保证实时一致。
+// 权威订阅：任何渠道变更 bars/rightTs 后，起止与 Bars 立即刷新显示
 const hubSubForInline = hub.onChange((st) => {
   syncFromHub(st);
 });
@@ -2158,10 +2383,6 @@ function applyBarsInline() {
     hub.execute("SetBarsManual", { nextBars: n });
   } catch {}
 }
-
-/* 结束：原位输入实现 */
-
-/* 订阅上游渲染（保持原逻辑） */
 </script>
 
 <style scoped>
