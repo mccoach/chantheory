@@ -327,7 +327,7 @@ onBeforeUnmount(() => {
 }
 .dropdown {
   position: absolute;
-  z-index: 20;
+  z-index: 200;
   top: 38px;
   left: 0;
   right: 0;
