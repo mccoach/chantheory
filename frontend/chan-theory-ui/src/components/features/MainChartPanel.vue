@@ -1,10 +1,14 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ====================================================================== -->
 <!-- 主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     本轮改动目标（按你的最新要求）：
-     1) 设置窗的交互改为“仅更新草稿”，保存并关闭时才持久化并应用到图面（hub.Refresh + vm.reload({force:true})）。
-     2) 追加“画笔”计算与渲染（折线），算法集中 useChan.js，渲染集中 charts/chan/layers.js；画笔样式从 useUserSettings + PENS_DEFAULTS 读取。
-     3) 保持既有不变量与一次性装配渲染链路不变，确保分型/涨跌标记与主图/量窗/指标窗回归正常。
+     本轮改动目标：
+     1) 统一 pen 与其他项的草稿合并表达式（默认 + 用户覆盖）；
+     2) 在“分型判定”行第7列加入无标题的显隐总开关（tri-state checkbox），实现全开/全关/恢复快照三态循环：
+        - 四项分型（强/标/弱/确认）的显隐仅由各自项的勾选决定（styleByStrength[k].enabled 与 confirmStyle.enabled）。
+        - 总开关仅提供快捷操作，不另建决策机制；点击时在“全开、全关、恢复快照”中循环；
+          若快照本身为全开或全关则仅两态循环。
+        - 快照只在四个单项 enabled 勾选发生变化时更新；总控点击不更新快照（用于“恢复快照”）。
+     3) 尽量不改动原有顺序；新增辅助函数仅在局部增加，标注注释说明。
 -->
 <!-- ====================================================================== -->
 
@@ -541,7 +545,7 @@ function getCurrentZoomIndexRange() {
   return null;
 }
 
-/* 设置弹窗（改为：交互仅更新草稿；保存后才持久化并应用） */
+/* 设置弹窗（草稿加载 + pen 合并表达式统一） */
 const settingsDraft = reactive({
   kForm: { ...DEFAULT_KLINE_STYLE },
   maForm: {},
@@ -552,13 +556,15 @@ const settingsDraft = reactive({
 let prevAdjust = "none";
 function openSettingsDialog() {
   try {
-    // 草稿加载
+    // 草稿加载（显示设置）
     settingsDraft.kForm = JSON.parse(
       JSON.stringify({
         ...DEFAULT_KLINE_STYLE,
         ...(settings.klineStyle.value || {}),
       })
     );
+
+    // MA 草稿加载
     const maDefaults = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
     const maLocal = settings.maConfigs.value || {};
     Object.keys(maDefaults).forEach((k) => {
@@ -566,18 +572,28 @@ function openSettingsDialog() {
       maDefaults[k] = { ...maDefaults[k], ...src };
     });
     settingsDraft.maForm = maDefaults;
+
+    // 缠论设置草稿加载（统一合并表达式，pen 与其他项相同“默认+用户覆盖”的策略）
     settingsDraft.chanForm = JSON.parse(
       JSON.stringify({
         ...CHAN_DEFAULTS,
         ...(settings.chanSettings.value || {}),
+        pen: {
+          ...(PENS_DEFAULTS),
+          ...(((settings.chanSettings.value || {}).pen) || {}),
+        },
       })
     );
+
+    // 分型设置草稿加载（保持一致的“默认+用户覆盖”）
     settingsDraft.fractalForm = JSON.parse(
       JSON.stringify({
         ...FRACTAL_DEFAULTS,
         ...(settings.fractalSettings.value || {}),
       })
     );
+
+    // 复权草稿加载
     prevAdjust = String(
       vm.adjust.value || settings.adjust.value || DEFAULT_APP_PREFERENCES.adjust
     );
@@ -593,10 +609,34 @@ function openSettingsDialog() {
             h("div", { class: "std-item-label" }, label),
             h("div", { class: "std-item-input" }, [node]),
           ]);
-        const checkCell = (checked, onChange) =>
+        const simpleCheckCell = (checked, onChange) =>
           h("div", { class: "std-check" }, [
-            h("input", { type: "checkbox", checked, onChange }),
+            h("input", {
+              type: "checkbox",
+              checked,
+              onChange,
+            }),
           ]);
+        // tri-state checkbox：通过 vnode 钩子设置 indeterminate
+        function triCheckCell({ checked, indeterminate, onToggle }) {
+          return h("div", { class: "std-check" }, [
+            h("input", {
+              type: "checkbox",
+              checked,
+              onChange: onToggle,
+              onVnodeMounted(vnode) {
+                try {
+                  vnode.el && (vnode.el.indeterminate = !!indeterminate);
+                } catch {}
+              },
+              onVnodeUpdated(vnode) {
+                try {
+                  vnode.el && (vnode.el.indeterminate = !!indeterminate);
+                } catch {}
+              },
+            }),
+          ]);
+        }
         const resetBtn = (onClick) =>
           h("div", { class: "std-reset" }, [
             h("button", {
@@ -606,6 +646,112 @@ function openSettingsDialog() {
               onClick,
             }),
           ]);
+
+        // —— 分型总开关快照与循环逻辑（仅针对四项 enabled） —— //
+        const ff = settingsDraft.fractalForm;
+        const lastManualSnapshot = ref(getCurrentFractalCombination(ff)); // 只在四项 enabled 改变时更新
+        const globalCycleIndex = ref(0); // 总开关循环指针
+
+        function getCurrentFractalCombination(ff) {
+          return {
+            strong: !!(ff.styleByStrength?.strong?.enabled),
+            standard: !!(ff.styleByStrength?.standard?.enabled),
+            weak: !!(ff.styleByStrength?.weak?.enabled),
+            confirm: !!(ff.confirmStyle?.enabled),
+          };
+        }
+        function setCombination(ff, combo) {
+          const s = ff.styleByStrength || {};
+          ["strong", "standard", "weak"].forEach((k) => {
+            if (!s[k])
+              s[k] = JSON.parse(
+                JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[k])
+              );
+          });
+          s.strong.enabled = !!combo.strong;
+          s.standard.enabled = !!combo.standard;
+          s.weak.enabled = !!combo.weak;
+          ff.styleByStrength = { ...s };
+          // showStrength 与 enabled 同步（避免与渲染层不一致）
+          ff.showStrength = {
+            strong: !!combo.strong,
+            standard: !!combo.standard,
+            weak: !!combo.weak,
+          };
+          ff.confirmStyle = {
+            ...(ff.confirmStyle ||
+              JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle))),
+            enabled: !!combo.confirm,
+          };
+        }
+        function isAllOn(combo) {
+          return !!(
+            combo.strong &&
+            combo.standard &&
+            combo.weak &&
+            combo.confirm
+          );
+        }
+        function isAllOff(combo) {
+          return !!(
+            !combo.strong &&
+            !combo.standard &&
+            !combo.weak &&
+            !combo.confirm
+          );
+        }
+        function statesForGlobalToggle() {
+          // 若快照为“全开/全关”，仅两态；否则三态
+          const snap = lastManualSnapshot.value;
+          if (isAllOn(snap) || isAllOff(snap)) {
+            return ["allOn", "allOff"];
+          }
+          return ["allOn", "allOff", "snapshot"];
+        }
+        function applyGlobalState(ff, stateKey) {
+          if (stateKey === "allOn") {
+            setCombination(ff, {
+              strong: true,
+              standard: true,
+              weak: true,
+              confirm: true,
+            });
+            return;
+          }
+          if (stateKey === "allOff") {
+            setCombination(ff, {
+              strong: false,
+              standard: false,
+              weak: false,
+              confirm: false,
+            });
+            return;
+          }
+          if (stateKey === "snapshot") {
+            setCombination(ff, { ...lastManualSnapshot.value });
+            return;
+          }
+        }
+        function globalToggleUi(ff) {
+          const cur = getCurrentFractalCombination(ff);
+          return {
+            checked: isAllOn(cur),
+            indeterminate: !isAllOn(cur) && !isAllOff(cur),
+          };
+        }
+        function onGlobalToggle(ff) {
+          const states = statesForGlobalToggle();
+          const stateKey = states[globalCycleIndex.value % states.length];
+          applyGlobalState(ff, stateKey);
+          // 总控点击不更新快照；用于“恢复快照”
+          globalCycleIndex.value = (globalCycleIndex.value + 1) % states.length;
+        }
+        function updateSnapshotFromCurrent() {
+          lastManualSnapshot.value = getCurrentFractalCombination(
+            settingsDraft.fractalForm
+          );
+          globalCycleIndex.value = 0; // 重置循环起点
+        }
 
         // 行情显示页（仅更新草稿）
         const renderDisplay = () => {
@@ -718,13 +864,9 @@ function openSettingsDialog() {
                   },
                 })
               ),
-              // 原始K线开关
-              checkCell(
-                !!K.originalEnabled,
-                (e) =>
-                  (settingsDraft.kForm.originalEnabled = !!e.target.checked)
-              ),
-              // 重置：恢复原始K线相关默认与复权默认
+              simpleCheckCell(!!K.originalEnabled, (e) => {
+                settingsDraft.kForm.originalEnabled = !!e.target.checked;
+              }),
               resetBtn(() => {
                 Object.assign(settingsDraft.kForm, {
                   upColor: DEFAULT_KLINE_STYLE.upColor,
@@ -838,10 +980,10 @@ function openSettingsDialog() {
                   ]
                 )
               ),
-              // 合并K线开关
-              checkCell(
+              simpleCheckCell(
                 !!settingsDraft.kForm.mergedEnabled,
-                (e) => (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
+                (e) =>
+                  (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
               ),
               // 重置：恢复合并K线相关默认
               resetBtn(() => {
@@ -924,14 +1066,10 @@ function openSettingsDialog() {
                       )),
                   })
                 ),
-                h("div", { class: "std-check" }, [
-                  h("input", {
-                    type: "checkbox",
-                    checked: !!conf.enabled,
-                    onChange: (e) =>
-                      (settingsDraft.maForm[key].enabled = !!e.target.checked),
-                  }),
-                ]),
+                h("div"), //空列占位
+                simpleCheckCell(!!conf.enabled, (e) => {
+                  settingsDraft.maForm[key].enabled = !!e.target.checked;
+                }),
                 resetBtn(() => {
                   const def = DEFAULT_MA_CONFIGS[key];
                   if (def) settingsDraft.maForm[key] = { ...def };
@@ -1026,15 +1164,9 @@ function openSettingsDialog() {
                   ]
                 )
               ),
-              h("div", { class: "std-check" }, [
-                h("input", {
-                  type: "checkbox",
-                  checked: !!cf.showUpDownMarkers,
-                  onChange: (e) =>
-                    (settingsDraft.chanForm.showUpDownMarkers =
-                      !!e.target.checked),
-                }),
-              ]),
+              simpleCheckCell(!!cf.showUpDownMarkers, (e) => {
+                settingsDraft.chanForm.showUpDownMarkers = !!e.target.checked;
+              }),
               resetBtn(() => {
                 settingsDraft.chanForm.upShape = CHAN_DEFAULTS.upShape;
                 settingsDraft.chanForm.upColor = CHAN_DEFAULTS.upColor;
@@ -1048,7 +1180,7 @@ function openSettingsDialog() {
             ])
           );
 
-          // 分型判定 + 强/标准/弱 + 确认分型（路径写回保持已修复）
+          // 分型判定（第7列为无标题总开关 tri-state；第8列重置）
           const ff = settingsDraft.fractalForm;
           const styleByStrength = (ff.styleByStrength =
             ff.styleByStrength ||
@@ -1056,6 +1188,8 @@ function openSettingsDialog() {
           const confirmStyle = (ff.confirmStyle =
             ff.confirmStyle ||
             JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)));
+
+          const globalUi = globalToggleUi(ff);
 
           rows.push(
             h("div", { class: "std-row" }, [
@@ -1113,37 +1247,51 @@ function openSettingsDialog() {
                   ]
                 )
               ),
-              h("div"),
-              h("div"),
-              h("div"),
+              h("div"), //空列占位
+              h("div"), //空列占位
+              // 第7列：总开关（无标题，仅 checkbox，三态）
+              triCheckCell({
+                checked: globalUi.checked,
+                indeterminate: globalUi.indeterminate,
+                onToggle: () => onGlobalToggle(ff),
+              }),
+              // 第8列：重置
               resetBtn(() => {
                 settingsDraft.fractalForm.minTickCount =
                   FRACTAL_DEFAULTS.minTickCount;
                 settingsDraft.fractalForm.minPct = FRACTAL_DEFAULTS.minPct;
                 settingsDraft.fractalForm.minCond = FRACTAL_DEFAULTS.minCond;
+                const d = JSON.parse(
+                  JSON.stringify(FRACTAL_DEFAULTS.styleByStrength)
+                );
+                d.strong.enabled = true;
+                d.standard.enabled = true;
+                d.weak.enabled = true;
+                settingsDraft.fractalForm.styleByStrength = d;
+                settingsDraft.fractalForm.showStrength = {
+                  strong: true,
+                  standard: true,
+                  weak: true,
+                };
+                settingsDraft.fractalForm.confirmStyle = JSON.parse(
+                  JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)
+                );
+                settingsDraft.fractalForm.confirmStyle.enabled = true;
+                // 重置后，快照更新并循环指针归零
+                lastManualSnapshot.value = getCurrentFractalCombination(
+                  settingsDraft.fractalForm
+                );
+                globalCycleIndex.value = 0;
               }),
             ])
           );
 
-          const specs = [
-            { k: "strong", label: "强分型" },
-            { k: "standard", label: "标准分型" },
-            { k: "weak", label: "弱分型" },
-          ];
-          function resetStrengthRow(key) {
-            const cur = settingsDraft.fractalForm.styleByStrength || {};
-            settingsDraft.fractalForm.styleByStrength = {
-              ...cur,
-              [key]: JSON.parse(
-                JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[key])
-              ),
-            };
-          }
-          for (const sp of specs) {
-            const conf = styleByStrength[sp.k];
+          // 强分型行（仅在 enabled 改变时更新快照）
+          (() => {
+            const conf = styleByStrength.strong;
             rows.push(
               h("div", { class: "std-row" }, [
-                nameCell(sp.label),
+                nameCell("强分型"),
                 itemCell(
                   "底分符号",
                   h(
@@ -1152,16 +1300,13 @@ function openSettingsDialog() {
                       class: "input",
                       value: conf.bottomShape,
                       onChange: (e) => {
-                        const cur =
+                        const s =
                           settingsDraft.fractalForm.styleByStrength || {};
-                        const old = cur[sp.k] || {};
-                        settingsDraft.fractalForm.styleByStrength = {
-                          ...cur,
-                          [sp.k]: {
-                            ...old,
-                            bottomShape: String(e.target.value),
-                          },
+                        s.strong = {
+                          ...(s.strong || conf),
+                          bottomShape: String(e.target.value),
                         };
+                        settingsDraft.fractalForm.styleByStrength = s;
                       },
                     },
                     (FRACTAL_SHAPES || []).map((opt) =>
@@ -1176,13 +1321,13 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.bottomColor,
                     onInput: (e) => {
-                      const cur =
+                      const s =
                         settingsDraft.fractalForm.styleByStrength || {};
-                      const old = cur[sp.k] || {};
-                      settingsDraft.fractalForm.styleByStrength = {
-                        ...cur,
-                        [sp.k]: { ...old, bottomColor: String(e.target.value) },
+                      s.strong = {
+                        ...(s.strong || conf),
+                        bottomColor: String(e.target.value),
                       };
+                      settingsDraft.fractalForm.styleByStrength = s;
                     },
                   })
                 ),
@@ -1194,13 +1339,13 @@ function openSettingsDialog() {
                       class: "input",
                       value: conf.topShape,
                       onChange: (e) => {
-                        const cur =
+                        const s =
                           settingsDraft.fractalForm.styleByStrength || {};
-                        const old = cur[sp.k] || {};
-                        settingsDraft.fractalForm.styleByStrength = {
-                          ...cur,
-                          [sp.k]: { ...old, topShape: String(e.target.value) },
+                        s.strong = {
+                          ...(s.strong || conf),
+                          topShape: String(e.target.value),
                         };
+                        settingsDraft.fractalForm.styleByStrength = s;
                       },
                     },
                     (FRACTAL_SHAPES || []).map((opt) =>
@@ -1215,13 +1360,13 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.topColor,
                     onInput: (e) => {
-                      const cur =
+                      const s =
                         settingsDraft.fractalForm.styleByStrength || {};
-                      const old = cur[sp.k] || {};
-                      settingsDraft.fractalForm.styleByStrength = {
-                        ...cur,
-                        [sp.k]: { ...old, topColor: String(e.target.value) },
+                      s.strong = {
+                        ...(s.strong || conf),
+                        topColor: String(e.target.value),
                       };
+                      settingsDraft.fractalForm.styleByStrength = s;
                     },
                   })
                 ),
@@ -1233,13 +1378,13 @@ function openSettingsDialog() {
                       class: "input",
                       value: conf.fill,
                       onChange: (e) => {
-                        const cur =
+                        const s =
                           settingsDraft.fractalForm.styleByStrength || {};
-                        const old = cur[sp.k] || {};
-                        settingsDraft.fractalForm.styleByStrength = {
-                          ...cur,
-                          [sp.k]: { ...old, fill: String(e.target.value) },
+                        s.strong = {
+                          ...(s.strong || conf),
+                          fill: String(e.target.value),
                         };
+                        settingsDraft.fractalForm.styleByStrength = s;
                       },
                     },
                     (FRACTAL_FILLS || []).map((opt) =>
@@ -1247,26 +1392,328 @@ function openSettingsDialog() {
                     )
                   )
                 ),
-                h("div", { class: "std-check" }, [
-                  h("input", {
-                    type: "checkbox",
-                    checked: !!conf.enabled,
-                    onChange: (e) => {
-                      const cur =
-                        settingsDraft.fractalForm.styleByStrength || {};
-                      const old = cur[sp.k] || {};
-                      settingsDraft.fractalForm.styleByStrength = {
-                        ...cur,
-                        [sp.k]: { ...old, enabled: !!e.target.checked },
-                      };
-                    },
-                  }),
-                ]),
-                resetBtn(() => resetStrengthRow(sp.k)),
+                simpleCheckCell(!!conf.enabled, (e) => {
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.strong = {
+                    ...(s.strong || conf),
+                    enabled: !!e.target.checked,
+                  };
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    strong: !!e.target.checked,
+                  };
+                  updateSnapshotFromCurrent(); // 仅在四项 enabled 改变时更新快照
+                }),
+                resetBtn(() => {
+                  const d = JSON.parse(
+                    JSON.stringify(
+                      FRACTAL_DEFAULTS.styleByStrength.strong
+                    )
+                  );
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.strong = d;
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  // showStrength 同步默认
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    strong: true,
+                  };
+                  updateSnapshotFromCurrent();
+                }),
               ])
             );
-          }
+          })();
 
+          // 标准分型行（仅在 enabled 改变时更新快照）
+          (() => {
+            const conf = styleByStrength.standard;
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell("标准分型"),
+                itemCell(
+                  "底分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.bottomShape,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.standard = {
+                          ...(s.standard || conf),
+                          bottomShape: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "底分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.bottomColor,
+                    onInput: (e) => {
+                      const s =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      s.standard = {
+                        ...(s.standard || conf),
+                        bottomColor: String(e.target.value),
+                      };
+                      settingsDraft.fractalForm.styleByStrength = s;
+                    },
+                  })
+                ),
+                itemCell(
+                  "顶分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.topShape,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.standard = {
+                          ...(s.standard || conf),
+                          topShape: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "顶分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.topColor,
+                    onInput: (e) => {
+                      const s =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      s.standard = {
+                        ...(s.standard || conf),
+                        topColor: String(e.target.value),
+                      };
+                      settingsDraft.fractalForm.styleByStrength = s;
+                    },
+                  })
+                ),
+                itemCell(
+                  "填充",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.fill,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.standard = {
+                          ...(s.standard || conf),
+                          fill: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_FILLS || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                simpleCheckCell(!!conf.enabled, (e) => {
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.standard = {
+                    ...(s.standard || conf),
+                    enabled: !!e.target.checked,
+                  };
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    standard: !!e.target.checked,
+                  };
+                  updateSnapshotFromCurrent();
+                }),
+                resetBtn(() => {
+                  const d = JSON.parse(
+                    JSON.stringify(
+                      FRACTAL_DEFAULTS.styleByStrength.standard
+                    )
+                  );
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.standard = d;
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    standard: true,
+                  };
+                  updateSnapshotFromCurrent();
+                }),
+              ])
+            );
+          })();
+
+          // 弱分型行（仅在 enabled 改变时更新快照）
+          (() => {
+            const conf = styleByStrength.weak;
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell("弱分型"),
+                itemCell(
+                  "底分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.bottomShape,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.weak = {
+                          ...(s.weak || conf),
+                          bottomShape: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "底分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.bottomColor,
+                    onInput: (e) => {
+                      const s =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      s.weak = {
+                        ...(s.weak || conf),
+                        bottomColor: String(e.target.value),
+                      };
+                      settingsDraft.fractalForm.styleByStrength = s;
+                    },
+                  })
+                ),
+                itemCell(
+                  "顶分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.topShape,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.weak = {
+                          ...(s.weak || conf),
+                          topShape: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                itemCell(
+                  "顶分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: conf.topColor,
+                    onInput: (e) => {
+                      const s =
+                        settingsDraft.fractalForm.styleByStrength || {};
+                      s.weak = {
+                        ...(s.weak || conf),
+                        topColor: String(e.target.value),
+                      };
+                      settingsDraft.fractalForm.styleByStrength = s;
+                    },
+                  })
+                ),
+                itemCell(
+                  "填充",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: conf.fill,
+                      onChange: (e) => {
+                        const s =
+                          settingsDraft.fractalForm.styleByStrength || {};
+                        s.weak = {
+                          ...(s.weak || conf),
+                          fill: String(e.target.value),
+                        };
+                        settingsDraft.fractalForm.styleByStrength = s;
+                      },
+                    },
+                    (FRACTAL_FILLS || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
+                  )
+                ),
+                simpleCheckCell(!!conf.enabled, (e) => {
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.weak = {
+                    ...(s.weak || conf),
+                    enabled: !!e.target.checked,
+                  };
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    weak: !!e.target.checked,
+                      };
+                  updateSnapshotFromCurrent();
+                  }),
+                resetBtn(() => {
+                  const d = JSON.parse(
+                    JSON.stringify(FRACTAL_DEFAULTS.styleByStrength.weak)
+                  );
+                  const s =
+                    settingsDraft.fractalForm.styleByStrength || {};
+                  s.weak = d;
+                  settingsDraft.fractalForm.styleByStrength = s;
+                  const ss = settingsDraft.fractalForm.showStrength || {};
+                  settingsDraft.fractalForm.showStrength = {
+                    ...ss,
+                    weak: true,
+                  };
+                  updateSnapshotFromCurrent();
+                }),
+              ])
+            );
+          })();
+
+          // 确认分型行（仅在 enabled 改变时更新快照）
+          (() => {
+            const cs = confirmStyle;
           rows.push(
             h("div", { class: "std-row" }, [
               nameCell("确认分型"),
@@ -1276,7 +1723,7 @@ function openSettingsDialog() {
                   "select",
                   {
                     class: "input",
-                    value: confirmStyle.bottomShape,
+                      value: cs.bottomShape,
                     onChange: (e) =>
                       (settingsDraft.fractalForm.confirmStyle.bottomShape =
                         String(e.target.value)),
@@ -1291,7 +1738,7 @@ function openSettingsDialog() {
                 h("input", {
                   class: "input color",
                   type: "color",
-                  value: confirmStyle.bottomColor,
+                    value: cs.bottomColor,
                   onInput: (e) =>
                     (settingsDraft.fractalForm.confirmStyle.bottomColor =
                       String(e.target.value)),
@@ -1303,11 +1750,10 @@ function openSettingsDialog() {
                   "select",
                   {
                     class: "input",
-                    value: confirmStyle.topShape,
+                      value: cs.topShape,
                     onChange: (e) =>
-                      (settingsDraft.fractalForm.confirmStyle.topShape = String(
-                        e.target.value
-                      )),
+                        (settingsDraft.fractalForm.confirmStyle.topShape =
+                          String(e.target.value)),
                   },
                   (FRACTAL_SHAPES || []).map((opt) =>
                     h("option", { value: opt.v }, opt.label)
@@ -1319,11 +1765,10 @@ function openSettingsDialog() {
                 h("input", {
                   class: "input color",
                   type: "color",
-                  value: confirmStyle.topColor,
+                    value: cs.topColor,
                   onInput: (e) =>
-                    (settingsDraft.fractalForm.confirmStyle.topColor = String(
-                      e.target.value
-                    )),
+                      (settingsDraft.fractalForm.confirmStyle.topColor =
+                        String(e.target.value)),
                 })
               ),
               itemCell(
@@ -1332,7 +1777,7 @@ function openSettingsDialog() {
                   "select",
                   {
                     class: "input",
-                    value: confirmStyle.fill,
+                      value: cs.fill,
                     onChange: (e) =>
                       (settingsDraft.fractalForm.confirmStyle.fill = String(
                         e.target.value
@@ -1343,25 +1788,26 @@ function openSettingsDialog() {
                   )
                 )
               ),
-              h("div", { class: "std-check" }, [
-                h("input", {
-                  type: "checkbox",
-                  checked: !!confirmStyle.enabled,
-                  onChange: (e) =>
-                    (settingsDraft.fractalForm.confirmStyle.enabled =
-                      !!e.target.checked),
+                simpleCheckCell(!!cs.enabled, (e) => {
+                  settingsDraft.fractalForm.confirmStyle = {
+                    ...(settingsDraft.fractalForm.confirmStyle || cs),
+                    enabled: !!e.target.checked,
+                  };
+                  updateSnapshotFromCurrent();
                 }),
-              ]),
               resetBtn(() => {
-                const def = FRACTAL_DEFAULTS.confirmStyle;
-                settingsDraft.fractalForm.confirmStyle = JSON.parse(
-                  JSON.stringify(def)
-                );
+                  const def = JSON.parse(
+                    JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)
+                  );
+                  def.enabled = true;
+                  settingsDraft.fractalForm.confirmStyle = def;
+                  updateSnapshotFromCurrent();
               }),
             ])
           );
+          })();
 
-          // NEW: 画笔设置（追加到缠论标记页末尾；数据先行持久化）
+          // 画笔设置
           const penCfg =
             settingsDraft.chanForm.pen &&
             typeof settingsDraft.chanForm.pen === "object"
@@ -1455,21 +1901,15 @@ function openSettingsDialog() {
                   ]
                 )
               ),
-              // 占位（空列，保持网格对齐）
-              h("div"),
-              // 勾选（启用）
-              h("div", { class: "std-check" }, [
-                h("input", {
-                  type: "checkbox",
-                  checked: (penCfg.enabled ?? PENS_DEFAULTS.enabled) === true,
-                  onChange: (e) => {
+              h("div"),// 空列占位
+              simpleCheckCell(
+                (penCfg.enabled ?? PENS_DEFAULTS.enabled) === true,
+                (e) => {
                     settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
                       enabled: !!e.target.checked,
                     });
-                  },
-                }),
-              ]),
-              // 重置键
+                }
+              ),
               resetBtn(() => {
                 settingsDraft.chanForm.pen = JSON.parse(
                   JSON.stringify(PENS_DEFAULTS)
@@ -1497,24 +1937,31 @@ function openSettingsDialog() {
         { key: "chan", label: "缠论标记" },
       ],
       activeTab: "display",
-      // —— 新增 onResetAll：恢复“所有页”的草稿为默认值（仅草稿，不落地） —— //
+      // 全部恢复默认（统一合并表达式，pen 与其他项一致）
       onResetAll: () => {
         try {
-          // 深拷贝默认，避免共享引用
+          // 显示设置默认
           settingsDraft.kForm = JSON.parse(JSON.stringify(DEFAULT_KLINE_STYLE));
           settingsDraft.maForm = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
-          settingsDraft.chanForm = JSON.parse(JSON.stringify(CHAN_DEFAULTS));
+          settingsDraft.adjust = String(DEFAULT_APP_PREFERENCES.adjust || "none");
+
+          // 缠论设置默认（包含 pen 默认，与其他项统一在同一对象表达式中）
+          settingsDraft.chanForm = JSON.parse(
+            JSON.stringify({
+              ...CHAN_DEFAULTS,
+              pen: { ...PENS_DEFAULTS },
+            })
+          );
+
+          // 分型设置默认
           settingsDraft.fractalForm = JSON.parse(
             JSON.stringify(FRACTAL_DEFAULTS)
           );
-          settingsDraft.adjust = String(
-            DEFAULT_APP_PREFERENCES.adjust || "none"
-          );
         } catch (e) {
-          console.error("resetAll (MainChart) failed:", e);
+          console.error("MainChartSettings onResetAll error:", e);
         }
       },
-      // 全部恢复默认：仅更新草稿；保存后生效
+      // 保存并关闭（保持原逻辑，无需特别处理 pen）
       onSave: () => {
         try {
           // 数据持久化
@@ -1522,6 +1969,7 @@ function openSettingsDialog() {
           settings.setMaConfigs(settingsDraft.maForm);
           settings.setChanSettings({ ...settingsDraft.chanForm });
           settings.setFractalSettings({ ...settingsDraft.fractalForm });
+
           const nextAdjust = String(settingsDraft.adjust || "none");
           settings.setAdjust(nextAdjust);
 
@@ -1740,7 +2188,7 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
 
 /* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 let dzIdleTimer = null;
-const dzIdleDelayMs = 100; // 建议 160–200ms，避免频繁承接
+const dzIdleDelayMs = 100; // 建议 100–200ms，避免频繁承接
 
 /* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 function onDataZoom(params) {
@@ -1830,7 +2278,7 @@ function onDataZoom(params) {
   } catch {}
 }
 
-/* 一次订阅一次渲染：交互期间不做 notMerge 重绘，避免抢权 */
+/* 一次性装配渲染（交互期间不做 notMerge 重绘） */
 function doSinglePassRender(snapshot) {
   try {
     if (!chart || !snapshot) return;
@@ -1929,7 +2377,7 @@ function doSinglePassRender(snapshot) {
   } catch {}
 }
 
-/* 预览显示（保持原逻辑） */
+/* 预览显示 */
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -2002,7 +2450,7 @@ function onPreviewRange(ev) {
   } catch {}
 }
 
-/* 生命周期（订阅时机调整到 chart.init 后） */
+/* 生命周期 */
 onMounted(() => {
   const el = host.value;
   if (!el) return;
@@ -2109,7 +2557,7 @@ onBeforeUnmount(() => {
   } catch {}
 });
 
-/* 标题/刷新徽标更新（保持原逻辑） */
+/* 标题/刷新徽标更新 */
 watch(
   () => vm.meta.value,
   () => {
@@ -2594,5 +3042,58 @@ function applyBarsInline() {
 }
 .bottom-strip:hover {
   cursor: ns-resize;
+}
+
+/* 设置弹窗标准网格样式（与 ModalDialog.vue 保持一致） */
+:deep(.std-row) {
+  display: grid;
+  grid-template-columns: 90px repeat(5, 140px) 30px 30px;
+  align-items: center;
+  justify-items: center;
+  column-gap: 8px;
+  min-height: 36px;
+}
+:deep(.std-name) {
+  justify-self: start;
+  font-weight: 600;
+}
+:deep(.std-item) {
+  width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+:deep(.std-item-label) {
+  width: 60px;
+  text-align: right;
+  color: #bbb;
+  font-size: 12px;
+}
+:deep(.std-item-input) {
+  width: 80px;
+  display: flex;
+  align-items: center;
+}
+:deep(.std-item-input > input),
+:deep(.std-item-input > select) {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f0f0f;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+:deep(.std-check) {
+  width: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+:deep(.std-reset) {
+  width: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>

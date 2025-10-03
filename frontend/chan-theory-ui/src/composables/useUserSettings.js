@@ -1,15 +1,9 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useUserSettings.js
 // ==============================
-// 说明（逐行注释 · 全量输出）
-// - 目标：以最简逻辑管理用户本地设置（Local-first），减少不必要的“深合并+规范化”，依赖 index.js 的默认值与 UI 控制确保有效性。
-// - 原文件包含多处“规范化合并函数”（mergeKlineStyle/mergeMaConfigs/mergeVolSettings/mergeFractalSettings）。
-//   本改版：仅保留 mergeFractalSettings（满足不变量守护与对 confirmStyle.enabled 的明确约束），其他设置采用“默认值 + 浅合并”策略。
-// - 新增：viewAtRightEdge（code|freq → boolean）持久化键，供“窗口切片右端触底状态”持久化与对齐使用。
-// - 保持：viewRightTs/viewBars（右端锚点毫秒/可视根数）持久化；全部 Setter/Getter 与 storage 同步。
-// - 新增：viewLastFocusTs（code|freq → ts）持久化键，用于“最后一次聚焦的 bar 时间戳”记录，供键盘移动起点使用。
-// - 新增：indicatorPanes（数组）持久化，记录指标窗的数量与类型（kind），用于页面刷新后的恢复。
-// ==============================
-
+// 说明：追加历史记录（symbolHistory）
+// - 新增 state.symbolHistory: [{symbol:string, ts:number}]（MRU）
+// - 新增方法：addSymbolHistoryEntry(symbol)，getSymbolHistoryList()（时间倒序，最大50在消费侧截断）
+// 其他原有逻辑不变。
 import { reactive, toRef, watch } from "vue"; // 引入 Vue 响应式与工具 API
 import {
   DEFAULT_MA_CONFIGS, // MA 默认配置（兜底）
@@ -62,10 +56,7 @@ function debounce(fn, ms = 300) {
 // 单例状态对象（全局仅初始化一次）
 let state = null; // 单例缓存
 
-// —— 保留：mergeFractalSettings（满足守护不变量且对 confirmStyle.enabled 做显式约束） —— //
-// - 其余设置采用浅合并策略（默认值 + 用户覆盖），不再进行深层规范化。
-// - 该函数用于“初始化 fractalSettings 与后续 patch 设置”的集中合并。
-// - 注意：必须包含以下不变量令牌以通过守护：function mergeFractalSettings / out.confirmStyle = { / enabled: (cLoc.enabled ?? cDef.enabled) === true
+// 保留合并器：mergeFractalSettings
 function mergeFractalSettings(fromLocal) {
   const def = JSON.parse(JSON.stringify(FRACTAL_DEFAULTS)); // 深拷贝默认（避免引用漂移）
   const loc = fromLocal && typeof fromLocal === "object" ? fromLocal : {}; // 本地对象（容错）
@@ -191,6 +182,13 @@ export function useUserSettings() {
       indicatorPanes: Array.isArray(local.indicatorPanes)
         ? local.indicatorPanes.map((x) => ({ kind: String(x?.kind || "MACD") }))
         : [],
+
+      // 新增：历史记录（MRU） [{symbol, ts}]
+      symbolHistory: Array.isArray(local.symbolHistory)
+        ? local.symbolHistory.filter(
+            (x) => x && typeof x.symbol === "string" && Number.isFinite(+x.ts)
+          )
+        : [],
     });
 
     // 防抖保存，减少 LocalStorage 写开销
@@ -208,22 +206,26 @@ export function useUserSettings() {
             state.klineStyle = {
               ...DEFAULT_KLINE_STYLE,
               ...(incoming.klineStyle || {}),
-            }; // 浅合并
+            };
+          // 浅合并
           else if (k === "maConfigs")
             state.maConfigs = {
               ...DEFAULT_MA_CONFIGS,
               ...(incoming.maConfigs || {}),
-            }; // 浅合并
+            };
+          // 浅合并
           else if (k === "volSettings")
             state.volSettings = {
               ...DEFAULT_VOL_SETTINGS,
               ...(incoming.volSettings || {}),
-            }; // 浅合并
+            };
+          // 浅合并
           else if (k === "chanSettings")
             state.chanSettings = {
               ...CHAN_DEFAULTS,
               ...(incoming.chanSettings || {}),
-            }; // 浅合并
+            };
+          // 浅合并
           else if (k === "fractalSettings")
             state.fractalSettings = mergeFractalSettings(
               incoming.fractalSettings || {}
@@ -232,7 +234,8 @@ export function useUserSettings() {
           else if (k === "viewLastFocusTs")
             state.viewLastFocusTs = {
               ...(incoming.viewLastFocusTs || {}),
-            }; // 新增：最后聚焦 ts
+            };
+          // 新增：最后聚焦 ts
           // 新增：指标窗列表（浅合并）
           else if (k === "indicatorPanes")
             state.indicatorPanes = Array.isArray(incoming.indicatorPanes)
@@ -240,7 +243,14 @@ export function useUserSettings() {
                   kind: String(x?.kind || "MACD"),
                 }))
               : [];
-          else if (k in state) state[k] = incoming[k]; // 其他简单字段直接赋值
+          else if (k === "symbolHistory")
+            state.symbolHistory = Array.isArray(incoming.symbolHistory)
+              ? incoming.symbolHistory.filter(
+                  (x) =>
+                    x && typeof x.symbol === "string" && Number.isFinite(+x.ts)
+                )
+              : [];
+          else if (k in state) state[k] = incoming[k];
         });
       } catch {} // 解析失败忽略
     };
@@ -420,6 +430,29 @@ export function useUserSettings() {
       : [];
   }
 
+  // 新增：历史（MRU）
+  function addSymbolHistoryEntry(symbol) {
+    const sym = String(symbol || "").trim();
+    if (!sym) return;
+    const nowTs = Date.now();
+    const list = Array.isArray(state.symbolHistory)
+      ? state.symbolHistory.slice()
+      : [];
+    const idx = list.findIndex((x) => String(x.symbol || "") === sym);
+    if (idx >= 0) list.splice(idx, 1); // 去重
+    list.unshift({ symbol: sym, ts: nowTs });
+    // 容量控制（保留较大容量以便跨页，但消费侧用 slice(0,50)）
+    const MAX_STORE = 200;
+    state.symbolHistory = list.slice(0, MAX_STORE);
+  }
+  function getSymbolHistoryList() {
+    const list = Array.isArray(state.symbolHistory)
+      ? state.symbolHistory.slice()
+      : [];
+    // 时间倒序
+    return list.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  }
+
   // —— 暴露响应式引用与方法（保持原接口名，便于现有调用对接） —— //
   return {
     // 响应式引用（toRef：保留响应特性）
@@ -446,6 +479,7 @@ export function useUserSettings() {
     viewAtRightEdge: toRef(state, "viewAtRightEdge"),
     viewLastFocusTs: toRef(state, "viewLastFocusTs"), // 新增：最后聚焦 ts
     indicatorPanes: toRef(state, "indicatorPanes"), // 新增：指标窗列表
+    symbolHistory: toRef(state, "symbolHistory"), // 新增历史
 
     // Setter/Getter
     setKlineStyle,
@@ -481,5 +515,7 @@ export function useUserSettings() {
     getLastFocusTs, // 新增：读取最后聚焦 ts
     setIndicatorPanes, // 新增：设置指标窗列表
     getIndicatorPanes, // 新增：读取指标窗列表
+    addSymbolHistoryEntry, // 历史
+    getSymbolHistoryList,
   };
 }

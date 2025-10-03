@@ -1,17 +1,11 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
-<!-- ============================== -->
-<!-- 说明：应用根组件（组合根）
-     - 增加：初始化并提供统一渲染中枢 useViewRenderHub（上游唯一源头）。
-     - 下游（主/量/技窗）将订阅该中枢以一次性渲染，避免二次订阅与多源竞态。
--->
+<!-- 说明：删除旧自选面板 WatchlistPanel 的引入与渲染；其余保持不变 -->
 <template>
   <div class="page-wrap">
     <TopTitle />
     <SymbolPanel />
     <MainChartPanel />
     <TechPanels />
-
-    <WatchlistPanel v-if="backendReady" />
     <StorageManager v-if="backendReady" />
 
     <!-- 全局唯一设置弹窗外壳：新增 tabs/activeTab 透传与 tab-change 处理 -->
@@ -58,7 +52,6 @@ import TopTitle from "./components/features/TopTitle.vue";
 import SymbolPanel from "./components/features/SymbolPanel.vue";
 import MainChartPanel from "./components/features/MainChartPanel.vue";
 import TechPanels from "./components/features/TechPanels.vue";
-import WatchlistPanel from "@/components/features/WatchlistPanel.vue";
 import StorageManager from "@/components/features/StorageManager.vue";
 import ModalDialog from "@/components/ui/ModalDialog.vue";
 
