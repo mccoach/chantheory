@@ -579,8 +579,8 @@ function openSettingsDialog() {
         ...CHAN_DEFAULTS,
         ...(settings.chanSettings.value || {}),
         pen: {
-          ...(PENS_DEFAULTS),
-          ...(((settings.chanSettings.value || {}).pen) || {}),
+          ...PENS_DEFAULTS,
+          ...((settings.chanSettings.value || {}).pen || {}),
         },
       })
     );
@@ -598,6 +598,9 @@ function openSettingsDialog() {
       vm.adjust.value || settings.adjust.value || DEFAULT_APP_PREFERENCES.adjust
     );
     settingsDraft.adjust = prevAdjust;
+
+    // NEW: “全部恢复默认”触发计数器（供内部组件监听以刷新快照）
+    const resetAllTick = ref(0);
 
     // 行情显示与缠论设置内容组件
     const MainChartSettingsContent = defineComponent({
@@ -652,12 +655,26 @@ function openSettingsDialog() {
         const lastManualSnapshot = ref(getCurrentFractalCombination(ff)); // 只在四项 enabled 改变时更新
         const globalCycleIndex = ref(0); // 总开关循环指针
 
+        // —— 快照更新抑制（分型/均线总控共用） —— //
+        const snapshotSuppressKeys = new Set();
+        function withSnapshotSuppressed(key, fn) {
+          try {
+            if (key) snapshotSuppressKeys.add(String(key));
+            if (typeof fn === "function") fn();
+          } finally {
+            if (key) snapshotSuppressKeys.delete(String(key));
+          }
+        }
+        function shouldUpdateSnapshot() {
+          return snapshotSuppressKeys.size === 0;
+        }
+
         function getCurrentFractalCombination(ff) {
           return {
-            strong: !!(ff.styleByStrength?.strong?.enabled),
-            standard: !!(ff.styleByStrength?.standard?.enabled),
-            weak: !!(ff.styleByStrength?.weak?.enabled),
-            confirm: !!(ff.confirmStyle?.enabled),
+            strong: !!ff.styleByStrength?.strong?.enabled,
+            standard: !!ff.styleByStrength?.standard?.enabled,
+            weak: !!ff.styleByStrength?.weak?.enabled,
+            confirm: !!ff.confirmStyle?.enabled,
           };
         }
         function setCombination(ff, combo) {
@@ -742,16 +759,114 @@ function openSettingsDialog() {
         function onGlobalToggle(ff) {
           const states = statesForGlobalToggle();
           const stateKey = states[globalCycleIndex.value % states.length];
-          applyGlobalState(ff, stateKey);
+          // —— 总控开关批量改变时抑制快照更新 —— //
+          withSnapshotSuppressed("fractal-global", () =>
+            applyGlobalState(ff, stateKey)
+          );
           // 总控点击不更新快照；用于“恢复快照”
           globalCycleIndex.value = (globalCycleIndex.value + 1) % states.length;
         }
         function updateSnapshotFromCurrent() {
+          // —— 仅在未抑制时更新快照（各分项直接点击触发） —— //
+          if (!shouldUpdateSnapshot()) return;
           lastManualSnapshot.value = getCurrentFractalCombination(
             settingsDraft.fractalForm
           );
           globalCycleIndex.value = 0; // 重置循环起点
         }
+
+        // —— 均线总控三态 + 快照逻辑（与分型总控一致化；快照持久于组件会话，不随 render 重置） —— //
+        function getMAKeys() {
+          return Object.keys(settingsDraft.maForm || {});
+        }
+        function getCurrentMACombination() {
+          const combo = {};
+          for (const k of getMAKeys()) {
+            combo[k] = !!(settingsDraft.maForm?.[k]?.enabled);
+          }
+          return combo;
+        }
+        const maLastManualSnapshot = ref(getCurrentMACombination());
+        const maGlobalCycleIndex = ref(0);
+
+        function isAllMAOn(combo) {
+          const ks = getMAKeys();
+          return ks.length > 0 && ks.every((k) => combo[k] === true);
+        }
+        function isAllMAOff(combo) {
+          const ks = getMAKeys();
+          return ks.length > 0 && ks.every((k) => combo[k] === false);
+        }
+        function maStatesForGlobalToggle() {
+          const snap = maLastManualSnapshot.value || {};
+          if (isAllMAOn(snap) || isAllMAOff(snap)) {
+            return ["allOn", "allOff"];
+          }
+          return ["allOn", "allOff", "snapshot"];
+        }
+        function applyMAGlobalState(stateKey) {
+          const ks = getMAKeys();
+          if (!ks.length) return;
+          if (stateKey === "allOn") {
+            for (const k of ks) {
+              if (!settingsDraft.maForm[k]) settingsDraft.maForm[k] = {};
+              // 仅修改属性，不替换对象引用（与分型总控一致）
+              settingsDraft.maForm[k].enabled = true;
+            }
+            return;
+          }
+          if (stateKey === "allOff") {
+            for (const k of ks) {
+              if (!settingsDraft.maForm[k]) settingsDraft.maForm[k] = {};
+              settingsDraft.maForm[k].enabled = false;
+            }
+            return;
+          }
+          if (stateKey === "snapshot") {
+            const snap = maLastManualSnapshot.value || {};
+            for (const k of ks) {
+              if (!settingsDraft.maForm[k]) settingsDraft.maForm[k] = {};
+              settingsDraft.maForm[k].enabled = !!snap[k];
+            }
+            return;
+          }
+        }
+        function maGlobalUi() {
+          const cur = getCurrentMACombination();
+          return {
+            checked: isAllMAOn(cur),
+            indeterminate: !isAllMAOn(cur) && !isAllMAOff(cur),
+          };
+        }
+        function onMAGlobalToggle() {
+          const states = maStatesForGlobalToggle();
+          const key = states[maGlobalCycleIndex.value % states.length];
+          // 均线总控批量改变时抑制快照更新（防止 render 导致快照被“隐式重置”）
+          withSnapshotSuppressed("ma-global", () => applyMAGlobalState(key));
+          // 总控点击不更新快照（用于“恢复快照”）
+          maGlobalCycleIndex.value =
+            (maGlobalCycleIndex.value + 1) % states.length;
+        }
+        function updateMASnapshotFromCurrent() {
+          // 仅在非总控路径时更新快照（只记录各 MA 勾选状态）
+          if (!shouldUpdateSnapshot()) return;
+          maLastManualSnapshot.value = getCurrentMACombination();
+          maGlobalCycleIndex.value = 0;
+        }
+
+          // NEW: 监听“全部恢复默认”计数器，统一刷新分型与均线快照（并重置循环指针）
+          watch(resetAllTick, () => {
+            try {
+              // 分型快照刷新
+              lastManualSnapshot.value = getCurrentFractalCombination(
+                settingsDraft.fractalForm
+              );
+              globalCycleIndex.value = 0;
+              // 均线快照刷新
+              maLastManualSnapshot.value = getCurrentMACombination();
+              maGlobalCycleIndex.value = 0;
+            } catch {}
+          });
 
         // 行情显示页（仅更新草稿）
         const renderDisplay = () => {
@@ -982,8 +1097,7 @@ function openSettingsDialog() {
               ),
               simpleCheckCell(
                 !!settingsDraft.kForm.mergedEnabled,
-                (e) =>
-                  (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
+                (e) => (settingsDraft.kForm.mergedEnabled = !!e.target.checked)
               ),
               // 重置：恢复合并K线相关默认
               resetBtn(() => {
@@ -995,6 +1109,27 @@ function openSettingsDialog() {
               }),
             ])
           );
+
+          // “均线总控”行（第2-6列空，第7列勾选框，第8列空）
+          {
+            const mui = maGlobalUi();
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell("均线总控"),
+                h("div"),
+                h("div"),
+                h("div"),
+                h("div"),
+                h("div"),
+                triCheckCell({
+                  checked: mui.checked,
+                  indeterminate: mui.indeterminate,
+                  onToggle: onMAGlobalToggle,
+                }),
+                h("div"),
+              ])
+            );
+          }
 
           // MA 行（仅更新草稿；保存时统一持久化 + 应用）
           Object.entries(settingsDraft.maForm || {}).forEach(([key, conf]) => {
@@ -1069,10 +1204,16 @@ function openSettingsDialog() {
                 h("div"), //空列占位
                 simpleCheckCell(!!conf.enabled, (e) => {
                   settingsDraft.maForm[key].enabled = !!e.target.checked;
+                  // 单项勾选改变后，更新“均线总控”的快照（仅保存勾选状态）
+                  updateMASnapshotFromCurrent();
                 }),
                 resetBtn(() => {
                   const def = DEFAULT_MA_CONFIGS[key];
-                  if (def) settingsDraft.maForm[key] = { ...def };
+                  if (def) {
+                    settingsDraft.maForm[key] = { ...def };
+                    // 单项重置后更新均线快照
+                  updateMASnapshotFromCurrent();
+                  }
                 }),
               ])
             );
@@ -1321,8 +1462,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.bottomColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.strong = {
                         ...(s.strong || conf),
                         bottomColor: String(e.target.value),
@@ -1360,8 +1500,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.topColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.strong = {
                         ...(s.strong || conf),
                         topColor: String(e.target.value),
@@ -1393,8 +1532,7 @@ function openSettingsDialog() {
                   )
                 ),
                 simpleCheckCell(!!conf.enabled, (e) => {
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.strong = {
                     ...(s.strong || conf),
                     enabled: !!e.target.checked,
@@ -1409,12 +1547,9 @@ function openSettingsDialog() {
                 }),
                 resetBtn(() => {
                   const d = JSON.parse(
-                    JSON.stringify(
-                      FRACTAL_DEFAULTS.styleByStrength.strong
-                    )
+                    JSON.stringify(FRACTAL_DEFAULTS.styleByStrength.strong)
                   );
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.strong = d;
                   settingsDraft.fractalForm.styleByStrength = s;
                   // showStrength 同步默认
@@ -1423,6 +1558,7 @@ function openSettingsDialog() {
                     ...ss,
                     strong: true,
                   };
+                  // 修正：分型快照更新调用自身
                   updateSnapshotFromCurrent();
                 }),
               ])
@@ -1464,8 +1600,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.bottomColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.standard = {
                         ...(s.standard || conf),
                         bottomColor: String(e.target.value),
@@ -1503,8 +1638,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.topColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.standard = {
                         ...(s.standard || conf),
                         topColor: String(e.target.value),
@@ -1536,8 +1670,7 @@ function openSettingsDialog() {
                   )
                 ),
                 simpleCheckCell(!!conf.enabled, (e) => {
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.standard = {
                     ...(s.standard || conf),
                     enabled: !!e.target.checked,
@@ -1552,12 +1685,9 @@ function openSettingsDialog() {
                 }),
                 resetBtn(() => {
                   const d = JSON.parse(
-                    JSON.stringify(
-                      FRACTAL_DEFAULTS.styleByStrength.standard
-                    )
+                    JSON.stringify(FRACTAL_DEFAULTS.styleByStrength.standard)
                   );
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.standard = d;
                   settingsDraft.fractalForm.styleByStrength = s;
                   const ss = settingsDraft.fractalForm.showStrength || {};
@@ -1606,8 +1736,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.bottomColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.weak = {
                         ...(s.weak || conf),
                         bottomColor: String(e.target.value),
@@ -1645,8 +1774,7 @@ function openSettingsDialog() {
                     type: "color",
                     value: conf.topColor,
                     onInput: (e) => {
-                      const s =
-                        settingsDraft.fractalForm.styleByStrength || {};
+                      const s = settingsDraft.fractalForm.styleByStrength || {};
                       s.weak = {
                         ...(s.weak || conf),
                         topColor: String(e.target.value),
@@ -1678,8 +1806,7 @@ function openSettingsDialog() {
                   )
                 ),
                 simpleCheckCell(!!conf.enabled, (e) => {
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.weak = {
                     ...(s.weak || conf),
                     enabled: !!e.target.checked,
@@ -1689,15 +1816,14 @@ function openSettingsDialog() {
                   settingsDraft.fractalForm.showStrength = {
                     ...ss,
                     weak: !!e.target.checked,
-                      };
+                  };
                   updateSnapshotFromCurrent();
-                  }),
+                }),
                 resetBtn(() => {
                   const d = JSON.parse(
                     JSON.stringify(FRACTAL_DEFAULTS.styleByStrength.weak)
                   );
-                  const s =
-                    settingsDraft.fractalForm.styleByStrength || {};
+                  const s = settingsDraft.fractalForm.styleByStrength || {};
                   s.weak = d;
                   settingsDraft.fractalForm.styleByStrength = s;
                   const ss = settingsDraft.fractalForm.showStrength || {};
@@ -1714,80 +1840,81 @@ function openSettingsDialog() {
           // 确认分型行（仅在 enabled 改变时更新快照）
           (() => {
             const cs = confirmStyle;
-          rows.push(
-            h("div", { class: "std-row" }, [
-              nameCell("确认分型"),
-              itemCell(
-                "底分符号",
-                h(
-                  "select",
-                  {
-                    class: "input",
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell("确认分型"),
+                itemCell(
+                  "底分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
                       value: cs.bottomShape,
-                    onChange: (e) =>
-                      (settingsDraft.fractalForm.confirmStyle.bottomShape =
-                        String(e.target.value)),
-                  },
-                  (FRACTAL_SHAPES || []).map((opt) =>
-                    h("option", { value: opt.v }, opt.label)
+                      onChange: (e) =>
+                        (settingsDraft.fractalForm.confirmStyle.bottomShape =
+                          String(e.target.value)),
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
                   )
-                )
-              ),
-              itemCell(
-                "底分颜色",
-                h("input", {
-                  class: "input color",
-                  type: "color",
+                ),
+                itemCell(
+                  "底分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
                     value: cs.bottomColor,
-                  onInput: (e) =>
-                    (settingsDraft.fractalForm.confirmStyle.bottomColor =
-                      String(e.target.value)),
-                })
-              ),
-              itemCell(
-                "顶分符号",
-                h(
-                  "select",
-                  {
-                    class: "input",
+                    onInput: (e) =>
+                      (settingsDraft.fractalForm.confirmStyle.bottomColor =
+                        String(e.target.value)),
+                  })
+                ),
+                itemCell(
+                  "顶分符号",
+                  h(
+                    "select",
+                    {
+                      class: "input",
                       value: cs.topShape,
-                    onChange: (e) =>
+                      onChange: (e) =>
                         (settingsDraft.fractalForm.confirmStyle.topShape =
                           String(e.target.value)),
-                  },
-                  (FRACTAL_SHAPES || []).map((opt) =>
-                    h("option", { value: opt.v }, opt.label)
+                    },
+                    (FRACTAL_SHAPES || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
                   )
-                )
-              ),
-              itemCell(
-                "顶分颜色",
-                h("input", {
-                  class: "input color",
-                  type: "color",
+                ),
+                itemCell(
+                  "顶分颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
                     value: cs.topColor,
-                  onInput: (e) =>
-                      (settingsDraft.fractalForm.confirmStyle.topColor =
-                        String(e.target.value)),
-                })
-              ),
-              itemCell(
-                "填充",
-                h(
-                  "select",
-                  {
-                    class: "input",
-                      value: cs.fill,
-                    onChange: (e) =>
-                      (settingsDraft.fractalForm.confirmStyle.fill = String(
+                    onInput: (e) =>
+                      (settingsDraft.fractalForm.confirmStyle.topColor = String(
                         e.target.value
                       )),
-                  },
-                  (FRACTAL_FILLS || []).map((opt) =>
-                    h("option", { value: opt.v }, opt.label)
+                  })
+                ),
+                itemCell(
+                  "填充",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: cs.fill,
+                      onChange: (e) =>
+                        (settingsDraft.fractalForm.confirmStyle.fill = String(
+                          e.target.value
+                        )),
+                    },
+                    (FRACTAL_FILLS || []).map((opt) =>
+                      h("option", { value: opt.v }, opt.label)
+                    )
                   )
-                )
-              ),
+                ),
                 simpleCheckCell(!!cs.enabled, (e) => {
                   settingsDraft.fractalForm.confirmStyle = {
                     ...(settingsDraft.fractalForm.confirmStyle || cs),
@@ -1795,16 +1922,16 @@ function openSettingsDialog() {
                   };
                   updateSnapshotFromCurrent();
                 }),
-              resetBtn(() => {
+                resetBtn(() => {
                   const def = JSON.parse(
                     JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)
                   );
                   def.enabled = true;
                   settingsDraft.fractalForm.confirmStyle = def;
                   updateSnapshotFromCurrent();
-              }),
-            ])
-          );
+                }),
+              ])
+            );
           })();
 
           // 画笔设置
@@ -1901,13 +2028,13 @@ function openSettingsDialog() {
                   ]
                 )
               ),
-              h("div"),// 空列占位
+              h("div"), // 空列占位
               simpleCheckCell(
                 (penCfg.enabled ?? PENS_DEFAULTS.enabled) === true,
                 (e) => {
-                    settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
-                      enabled: !!e.target.checked,
-                    });
+                  settingsDraft.chanForm.pen = Object.assign({}, penCfg, {
+                    enabled: !!e.target.checked,
+                  });
                 }
               ),
               resetBtn(() => {
@@ -1943,7 +2070,9 @@ function openSettingsDialog() {
           // 显示设置默认
           settingsDraft.kForm = JSON.parse(JSON.stringify(DEFAULT_KLINE_STYLE));
           settingsDraft.maForm = JSON.parse(JSON.stringify(DEFAULT_MA_CONFIGS));
-          settingsDraft.adjust = String(DEFAULT_APP_PREFERENCES.adjust || "none");
+          settingsDraft.adjust = String(
+            DEFAULT_APP_PREFERENCES.adjust || "none"
+          );
 
           // 缠论设置默认（包含 pen 默认，与其他项统一在同一对象表达式中）
           settingsDraft.chanForm = JSON.parse(
@@ -1957,6 +2086,10 @@ function openSettingsDialog() {
           settingsDraft.fractalForm = JSON.parse(
             JSON.stringify(FRACTAL_DEFAULTS)
           );
+
+          // NEW: 触发“全部恢复默认”一次，供内部组件刷新快照
+          resetAllTick.value++;
+
         } catch (e) {
           console.error("MainChartSettings onResetAll error:", e);
         }

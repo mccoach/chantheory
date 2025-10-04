@@ -170,6 +170,10 @@ const settingsDraftVol = reactive({
   markerDump: { ...DEFAULT_VOL_SETTINGS.markerDump },
 });
 const draftRev = ref(0);
+
+// NEW: “全部恢复默认”触发计数器（用于刷新 MAVOL 总控快照）
+const resetAllTickVol = ref(0);
+
 const VolumeSettingsContent = defineComponent({
   setup() {
     const nameCell = (t) => h("div", { class: "std-name" }, t);
@@ -182,6 +186,24 @@ const VolumeSettingsContent = defineComponent({
       h("div", { class: "std-check" }, [
         h("input", { type: "checkbox", checked, onChange }),
       ]);
+    const triCheckCell = ({ checked, indeterminate, onToggle }) =>
+      h("div", { class: "std-check" }, [
+        h("input", {
+          type: "checkbox",
+          checked,
+          onChange: onToggle,
+          onVnodeMounted(vnode) {
+            try {
+              vnode.el && (vnode.el.indeterminate = !!indeterminate);
+            } catch {}
+          },
+          onVnodeUpdated(vnode) {
+            try {
+              vnode.el && (vnode.el.indeterminate = !!indeterminate);
+            } catch {}
+          },
+        }),
+      ]);
     const resetBtn = (onClick) =>
       h("div", { class: "std-reset" }, [
         h("button", {
@@ -192,8 +214,112 @@ const VolumeSettingsContent = defineComponent({
         }),
       ]);
 
+    // —— 快照更新抑制：总控批量变更时不更新快照（与主窗一致） —— //
+    const snapshotSuppressKeys = new Set();
+    function withSnapshotSuppressed(key, fn) {
+      try {
+        if (key) snapshotSuppressKeys.add(String(key));
+        if (typeof fn === "function") fn();
+      } finally {
+        if (key) snapshotSuppressKeys.delete(String(key));
+      }
+    }
+    function shouldUpdateSnapshot() {
+      return snapshotSuppressKeys.size === 0;
+    }
+
+    // —— MAVOL 总控三态 + 快照 —— //
+    function getMavolKeys() {
+      return Object.keys(settingsDraftVol.mavolForm || {});
+    }
+    function getCurrentMavolCombination() {
+      const combo = {};
+      for (const k of getMavolKeys()) {
+        combo[k] = !!(settingsDraftVol.mavolForm?.[k]?.enabled);
+      }
+      return combo;
+    }
+    const mavolLastManualSnapshot = ref(getCurrentMavolCombination());
+    const mavolGlobalCycleIndex = ref(0);
+
+    function isAllMavolOn(combo) {
+      const ks = getMavolKeys();
+      return ks.length > 0 && ks.every((k) => combo[k] === true);
+    }
+    function isAllMavolOff(combo) {
+      const ks = getMavolKeys();
+      return ks.length > 0 && ks.every((k) => combo[k] === false);
+    }
+    function mavolStatesForGlobalToggle() {
+      const snap = mavolLastManualSnapshot.value || {};
+      if (isAllMavolOn(snap) || isAllMavolOff(snap)) {
+        return ["allOn", "allOff"];
+      }
+      return ["allOn", "allOff", "snapshot"];
+    }
+    function applyMavolGlobalState(stateKey) {
+      const ks = getMavolKeys();
+      if (!ks.length) return;
+      if (stateKey === "allOn") {
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = true; // 仅改属性，不替换对象
+        }
+        return;
+      }
+      if (stateKey === "allOff") {
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = false;
+        }
+        return;
+      }
+      if (stateKey === "snapshot") {
+        const snap = mavolLastManualSnapshot.value || {};
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = !!snap[k];
+        }
+        return;
+      }
+    }
+    function mavolGlobalUi() {
+      const cur = getCurrentMavolCombination();
+      return {
+        checked: isAllMavolOn(cur),
+        indeterminate: !isAllMavolOn(cur) && !isAllMavolOff(cur),
+      };
+    }
+    function onMavolGlobalToggle() {
+      const states = mavolStatesForGlobalToggle();
+      const key = states[mavolGlobalCycleIndex.value % states.length];
+      withSnapshotSuppressed("mavol-global", () => applyMavolGlobalState(key));
+      mavolGlobalCycleIndex.value =
+        (mavolGlobalCycleIndex.value + 1) % states.length;
+      // 触发一次轻量重绘（依靠 Vue 响应式）——不需要 draftRev
+    }
+    function updateMavolSnapshotFromCurrent() {
+      if (!shouldUpdateSnapshot()) return;
+      mavolLastManualSnapshot.value = getCurrentMavolCombination();
+      mavolGlobalCycleIndex.value = 0;
+    }
+
+    // NEW: 监听“全部恢复默认”计数器，刷新 MAVOL 总控快照并归零循环指针
+    watch(resetAllTickVol, () => {
+      try {
+        mavolLastManualSnapshot.value = getCurrentMavolCombination();
+        mavolGlobalCycleIndex.value = 0;
+      } catch {}
+    });
+
+    // —— 构造行：改为每次渲染即时生成（避免静态 VNode 导致总控 UI不刷新） —— //
+    const renderRows = () => {
+      const rows = [];
+
     // 行：量额柱基础样式
-    const rows = [];
     rows.push(
       h("div", { class: "std-row", key: `volbar-${draftRev.value}` }, [
         nameCell("量额柱"),
@@ -251,6 +377,27 @@ const VolumeSettingsContent = defineComponent({
       ])
     );
 
+      // —— 均线总控：紧挨“量额柱”之后插入；第2–6列空，第7列 tri-state checkbox，第8列空 —— //
+      {
+        const ui = mavolGlobalUi();
+        rows.push(
+          h("div", { class: "std-row", key: `mavol-global-${draftRev.value}` }, [
+            nameCell("均线总控"),
+            h("div"),
+            h("div"),
+            h("div"),
+            h("div"),
+            h("div"),
+            triCheckCell({
+              checked: ui.checked,
+              indeterminate: ui.indeterminate,
+              onToggle: onMavolGlobalToggle,
+            }),
+            h("div"),
+          ])
+        );
+      }
+
     // 行：MAVOL 三条线参数
     Object.entries(settingsDraftVol.mavolForm).forEach(([k, conf]) => {
       rows.push(
@@ -265,7 +412,10 @@ const VolumeSettingsContent = defineComponent({
               max: 4,
               step: 0.5,
               value: Number(conf.width ?? 1),
-              onInput: (e) => (conf.width = Number(e.target.value || 1)),
+                onInput: (e) =>
+                  (settingsDraftVol.mavolForm[k].width = Number(
+                    e.target.value || 1
+                  )),
             })
           ),
           itemCell(
@@ -273,9 +423,14 @@ const VolumeSettingsContent = defineComponent({
             h("input", {
               class: "input color",
               type: "color",
-              value: conf.color || "#ee6666",
+                value:
+                  conf.color ||
+                  DEFAULT_VOL_SETTINGS.mavolStyles[k]?.color ||
+                  DEFAULT_VOL_SETTINGS.mavolStyles.MAVOL5.color,
               onInput: (e) =>
-                (conf.color = String(e.target.value || "#ee6666")),
+                  (settingsDraftVol.mavolForm[k].color = String(
+                    e.target.value
+                  )),
             })
           ),
           itemCell(
@@ -285,7 +440,10 @@ const VolumeSettingsContent = defineComponent({
               {
                 class: "input",
                 value: conf.style || "solid",
-                onChange: (e) => (conf.style = String(e.target.value)),
+                  onChange: (e) =>
+                    (settingsDraftVol.mavolForm[k].style = String(
+                      e.target.value
+                    )),
               },
               [
                 h("option", { value: "solid" }, "实线"),
@@ -303,16 +461,25 @@ const VolumeSettingsContent = defineComponent({
               step: 1,
               value: Number(conf.period ?? 5),
               onInput: (e) =>
-                (conf.period = Math.max(1, parseInt(e.target.value || 5, 10))),
+                  (settingsDraftVol.mavolForm[k].period = Math.max(
+                    1,
+                    parseInt(e.target.value || 5, 10)
+                  )),
             })
           ),
           h("div"),
-          checkCell(!!conf.enabled, (e) => (conf.enabled = !!e.target.checked)),
+            checkCell(!!conf.enabled, (e) => {
+              settingsDraftVol.mavolForm[k].enabled = !!e.target.checked;
+              // 单项勾选改变后，更新“均线总控”的快照（仅保存 enabled 状态）
+              updateMavolSnapshotFromCurrent();
+            }),
           resetBtn(() => {
             const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
             if (def) {
               settingsDraftVol.mavolForm[k] = { ...def };
               draftRev.value++;
+                // 单项重置后，更新“均线总控快照”
+                updateMavolSnapshotFromCurrent();
             }
           }),
         ])
@@ -352,7 +519,9 @@ const VolumeSettingsContent = defineComponent({
               settingsDraftVol.markerPump.color ||
               DEFAULT_VOL_SETTINGS.markerPump.color,
             onInput: (e) =>
-              (settingsDraftVol.markerPump.color = String(e.target.value)),
+                (settingsDraftVol.markerPump.color = String(
+                  e.target.value
+                )),
           })
         ),
         itemCell(
@@ -422,7 +591,9 @@ const VolumeSettingsContent = defineComponent({
               settingsDraftVol.markerDump.color ||
               DEFAULT_VOL_SETTINGS.markerDump.color,
             onInput: (e) =>
-              (settingsDraftVol.markerDump.color = String(e.target.value)),
+                (settingsDraftVol.markerDump.color = String(
+                  e.target.value
+                )),
           })
         ),
         itemCell(
@@ -459,7 +630,15 @@ const VolumeSettingsContent = defineComponent({
       ])
     );
 
-    return () => h("div", { key: `vol-settings-root-${draftRev.value}` }, rows);
+      return rows;
+    };
+
+    return () =>
+      h(
+        "div",
+        { key: `vol-settings-root-${draftRev.value}` },
+        renderRows()
+      );
   },
 });
 
@@ -514,7 +693,19 @@ function openSettingsDialog() {
       ? +vs.markerDump.threshold
       : DEFAULT_VOL_SETTINGS.markerDump.threshold,
   });
+
+  // 初次打开时刷新一次 MAVOL 快照（与主窗一致：读取已有设置即可恢复第三态循环）
+  try {
+    // 组合并重置循环指针
+    const combo = {};
+    Object.keys(settingsDraftVol.mavolForm || {}).forEach((k) => {
+      combo[k] = !!settingsDraftVol.mavolForm[k]?.enabled;
+    });
+    // 局部临时 ref（在子组件中重新计算，但此处保证初值正确）
+    // 通过 draftRev 触发一次重绘，确保 tri-state UI 初始正确
   draftRev.value++;
+  } catch {}
+
   dialogManager.open({
     title: "量窗设置",
     contentComponent: VolumeSettingsContent,
@@ -527,6 +718,10 @@ function openSettingsDialog() {
         );
         settingsDraftVol.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
         settingsDraftVol.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
+
+        // NEW: 全部恢复默认后，立即刷新“均线总控”的快照（覆盖为默认组合）
+        resetAllTickVol.value++;
+
         draftRev.value++;
       } catch (e) {
         console.error("resetAll (Volume) failed:", e);

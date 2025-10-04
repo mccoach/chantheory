@@ -241,6 +241,22 @@ function resetAll() {
   transform: rotate(45deg);
 }
 
+/* === 新增：部分选中（indeterminate）状态样式，呈现第三种视觉 === */
+:deep(.std-check input[type="checkbox"]:indeterminate) {
+  background: #7f8c8d;       /* 灰色背景与选中区分 */
+  border-color: #95a5a6;
+}
+:deep(.std-check input[type="checkbox"]:indeterminate::after) {
+  content: "";
+  position: absolute;
+  left: 2px;                 /* 在方框中居中显示短横线 */
+  top: 6px;
+  width: 10px;
+  height: 2px;
+  background: #fff;
+  border-radius: 1px;
+}
+
 /* 统一“重置”按钮容器 */
 :deep(.std-reset) {
   width: 30px;
