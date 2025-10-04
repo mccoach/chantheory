@@ -6,6 +6,9 @@
 #   * 若缺列 → ALTER TABLE 增加 close_time；
 #   * 若列顺序不满足“close_time 在 ts 前”，则重建新表并回填（close_time 为空时按 ts 计算）。
 # - upsert_candles/upsert_cache_candles 改为“命名占位符 + 字典绑定”（更稳健），并在写库前自动补齐 close_time。
+# - 新增两张表：
+#   * user_watchlist：本地自选池（权威源），symbol 主键 + 元数据
+#   * symbol_history：标的框历史记录（追加式日志）
 # ==============================
 
 from __future__ import annotations
@@ -345,16 +348,35 @@ def init_schema() -> None:
       snapshot_at TEXT PRIMARY KEY,
       total_rows  INTEGER NOT NULL,
       by_type_json TEXT NOT NULL,
-      by_type_market_json TEXT NOT NULL
+      by_type_market_json TEXT NOT NULL,
+      delta_by_type_json TEXT
     );
     """)
-    try:
-        cur.execute("PRAGMA table_info(symbol_index_summary);")
-        cols = [r["name"] for r in cur.fetchall()]
-        if "delta_by_type_json" not in cols:
-            cur.execute("ALTER TABLE symbol_index_summary ADD COLUMN delta_by_type_json TEXT;")
-    except Exception:
-        pass
+
+    # --- 新增：用户自选池表（权威源） ---
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_watchlist (
+      symbol TEXT PRIMARY KEY,      -- 自选标的代码（唯一）
+      added_at TEXT NOT NULL,       -- 加入时间（ISO8601）
+      source TEXT,                  -- 来源（'user'|'sync' 等）
+      note TEXT,                    -- 备注（可空）
+      updated_at TEXT               -- 最近修改时间（ISO8601，可空）
+    );
+    """)
+
+    # --- 新增：标的框历史记录表（追加式日志） ---
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS symbol_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 自增ID
+      symbol TEXT NOT NULL,                  -- 标的代码
+      freq TEXT,                             -- 当时频率（如 '1d'）
+      selected_at TEXT NOT NULL,             -- 选择时间（ISO8601）
+      source TEXT                            -- 来源（'ui' 等）
+    );
+    """)
+    # 索引：按选择时间倒序查询与按 symbol 查询
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_symbol_history_selected_at ON symbol_history(selected_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_symbol_history_symbol ON symbol_history(symbol);")
 
     # 索引
     cur.execute("CREATE INDEX IF NOT EXISTS idx_candles_symfreq ON candles(symbol,freq,adjust,ts);")
@@ -674,6 +696,15 @@ def get_usage() -> Dict[str, Any]:
         snap_rows = int(cur.fetchone()["r"])
     except Exception:
         snap_rows = 0
+    # 新增：统计 user_watchlist 与 symbol_history 行数（便于前端显示用量）
+    try:
+        cur.execute("SELECT COUNT(1) AS r FROM user_watchlist;"); wl_rows = int(cur.fetchone()["r"])
+    except Exception:
+        wl_rows = 0
+    try:
+        cur.execute("SELECT COUNT(1) AS r FROM symbol_history;"); hist_rows = int(cur.fetchone()["r"])
+    except Exception:
+        hist_rows = 0
     return {
         "db_path": str(db_path),
         "size_bytes": size_bytes,
@@ -683,6 +714,8 @@ def get_usage() -> Dict[str, Any]:
             "adj_factors": factors_rows,
             "symbol_index": si_rows,
             "symbol_index_summary": snap_rows,
+            "user_watchlist": wl_rows,
+            "symbol_history": hist_rows,
         },
         "checked_at": datetime.now().isoformat(),
     }
@@ -749,3 +782,68 @@ def close_conn() -> None:
 
 def ensure_initialized() -> None:
     init_schema()
+
+# -------------------------------
+# 新增：用户自选池与标的历史的读写方法
+# -------------------------------
+
+def upsert_user_watchlist(rows: Iterable[Tuple[str, str, Optional[str], Optional[str], Optional[str]]]) -> int:
+    """
+    UPSERT 自选池：
+      行结构：(symbol, added_at, source, note, updated_at)
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    sql = """
+    INSERT INTO user_watchlist(symbol, added_at, source, note, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(symbol) DO UPDATE SET
+      added_at=excluded.added_at,
+      source=excluded.source,
+      note=excluded.note,
+      updated_at=excluded.updated_at;
+    """
+    cur.executemany(sql, list(rows))
+    conn.commit()
+    return cur.rowcount
+
+def delete_user_watchlist(symbol: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM user_watchlist WHERE symbol=?;", (symbol,))
+    conn.commit()
+    return cur.rowcount
+
+def select_user_watchlist() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT symbol, added_at, source, note, updated_at FROM user_watchlist ORDER BY symbol ASC;")
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+def insert_symbol_history(rows: Iterable[Tuple[str, Optional[str], str, Optional[str]]]) -> int:
+    """
+    追加历史记录：
+      行结构：(symbol, freq, selected_at, source)
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    sql = "INSERT INTO symbol_history(symbol, freq, selected_at, source) VALUES (?, ?, ?, ?);"
+    cur.executemany(sql, list(rows))
+    conn.commit()
+    return cur.rowcount
+
+def select_symbol_history(limit: int = 50) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    lim = max(1, int(limit or 50))
+    cur.execute("SELECT id, symbol, freq, selected_at, source FROM symbol_history ORDER BY selected_at DESC LIMIT ?;", (lim,))
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+def clear_symbol_history() -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM symbol_history;")
+    conn.commit()
+    return cur.rowcount

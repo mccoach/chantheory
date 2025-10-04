@@ -5,13 +5,12 @@
 // - 涨跌标记：绑定隐藏 yAxis=1（不变量），符号宽度统一来源于中枢派生（env.symbolWidthPx），若未传则按 hostWidth/visCount 估算，仅作为几何估算而非设置项。
 // - 分型标记：绑定主价格轴 yAxisIndex=0（不变量）；样式与开关来自 FRACTAL_DEFAULTS + 本地持久化 fractalSettings。
 // - 画笔折线：绑定主价格轴 yAxisIndex=0（不变量）；样式来自 PENS_DEFAULTS + 本地持久化 chanSettings.pen；不再从 env 读取样式。
-// ==============================
-
+// - 本次变动：标记高度集中归口 index.js —— 主窗涨跌用 CHAN_DEFAULTS.markerHeightPx / 分型用 FRACTAL_DEFAULTS.markerHeightPx。
 import {
   CHAN_MARKER_PRESETS, // 视觉预设集合
-  CHAN_DEFAULTS,       // 缺省参数（包含图形/颜色/最大数量）
-  FRACTAL_DEFAULTS,    // 分型默认（包含样式与间距）
-  PENS_DEFAULTS,       // 画笔默认方案（线宽/颜色/线型/开关）
+  CHAN_DEFAULTS, // 缺省参数（包含图形/颜色/最大数量）
+  FRACTAL_DEFAULTS, // 分型默认（包含样式与间距）
+  PENS_DEFAULTS, // 画笔默认方案（线宽/颜色/线型/开关）
 } from "@/constants";
 
 import { useUserSettings } from "@/composables/useUserSettings";
@@ -28,7 +27,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
   );
 
   const hostWidth = Math.max(1, Number(env.hostWidth || 0)); // 宿主宽度（几何计算）
-  const visCount = Math.max(1, Number(env.visCount || 1));   // 可见根数（几何计算）
+  const visCount = Math.max(1, Number(env.visCount || 1)); // 可见根数（几何计算）
   // NEW: 统一符号宽度来源（设置项外）：优先外部 symbolWidthPx（中枢派生），否则根据 hostWidth+visCount 估算
   const extW = Number(env.symbolWidthPx || NaN);
   const approxW =
@@ -39,8 +38,11 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     ? Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, Math.round(extW)))
     : Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, approxW));
 
-  const markerH = 10; // 高度恒定 10px
-  const offsetDownPx = Math.round(markerH * 1.2);
+  // 统一高度与偏移来源：仅由 index.js 的 CHAN_DEFAULTS 决定（不读持久化，不写死常量）
+  const markerH = Math.max(1, Math.round(Number(CHAN_DEFAULTS.markerHeightPx)));
+  const offsetDownPx = Math.round(
+    markerH + Number(CHAN_DEFAULTS.markerYOffsetPx)
+  );
 
   const upPoints = [];
   const downPoints = []; // 承载点集合
@@ -49,7 +51,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     const d = Number(rb?.dir || 0);
     if (!Number.isFinite(d) || d === 0) continue;
     const x = Number(rb.anchor_idx ?? rb.idx_end ?? i); // 横坐标：承载点（原始K索引）
-    const point = [x, 0]; // 隐藏轴固定 y=0
+    const point = [x, 0]; // 隐藏轴固定 y=0 —— 垂直定位锚点
     if (d > 0) upPoints.push(point);
     else downPoints.push(point);
   }
@@ -104,14 +106,15 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     itemStyle: { color: downFill, opacity: chan.opacity },
   };
 
-    return {
+  return {
     series: [upSeries, downSeries],
-    };
-  }
+  };
+}
 
 // 分型标记：横坐标用 xIndex；绑定主轴 yAxisIndex=0；高度/间距按外部宽度与默认规则
 // 设置项来源：useUserSettings().fractalSettings（优先）→ FRACTAL_DEFAULTS（兜底）
 // 几何宽度来源：env.symbolWidthPx（中枢统一广播，优先）→ 按 hostWidth/visCount 估算（仅几何，不属于设置项）
+// 本次变动：高度统一使用 FRACTAL_DEFAULTS.markerHeightPx（或持久化值），不再按宽度推导高度。
 export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   const settings = useUserSettings();
   const cfg = Object.assign(
@@ -133,10 +136,12 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   const markerW = Number.isFinite(extW)
     ? Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, Math.round(extW)))
     : Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, approxW));
-  const markerH = Math.max(8, Math.round(markerW * 0.8)); // 高度与宽度比例
-  const apexGap = Math.abs(cfg.markerYOffsetPx || 2); // 顶点距 bar 间距（2px）
-  const yOffTop = -(markerH / 2 + apexGap); // 顶分中心向上偏移（顶点与 bar 间距 2px）
-  const yOffBottom = +(markerH / 2 + apexGap); // 底分中心向下偏移（顶点与 bar 间距 2px）
+
+  // 统一高度与顶/底偏移来源：仅使用 index.js 的 FRACTAL_DEFAULTS（不读持久化，不写死常量）
+  const markerH = Math.max(1, Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx)));
+  const apexGap = Math.max(0, Math.round(Number(FRACTAL_DEFAULTS.markerYOffsetPx))); // 顶点距 bar 的预设间距
+  const yOffTop = -(markerH / 2 + apexGap);     // 顶分中心向上偏移
+  const yOffBottom = +(markerH / 2 + apexGap);  // 底分中心向下偏移
 
   const bins = {
     top: { strong: [], standard: [], weak: [] },
@@ -175,7 +180,7 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
 
     series.push({
       id: `FR_TOP_${sp.k}`,
-      name: sp.name,
+      name: "TOP_STRONG".replace("STRONG", sp.k.toUpperCase()),
       type: "scatter",
       yAxisIndex: 0, // 不变量：yAxisIndex: 0
       data,
@@ -213,7 +218,7 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
 
     series.push({
       id: `FR_BOT_${sp.k}`,
-      name: sp.name,
+      name: "BOT_STRONG".replace("STRONG", sp.k.toUpperCase()),
       type: "scatter",
       yAxisIndex: 0, // 不变量：yAxisIndex: 0
       data,
@@ -241,7 +246,10 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       if (f.type === "top") topConfirmData.push({ value: [f.xIndex, f.G2] });
       else botConfirmData.push({ value: [f.xIndex, f.D2] });
     }
-    const extraGap = markerH + 4; // NEW：比常规再外移（与要求一致）
+
+    // 统一额外外移量：仅用 FRACTAL_DEFAULTS.markerYOffsetPx，无硬编码常量
+    const extraGap = Math.max(0, Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx) + Number(FRACTAL_DEFAULTS.markerYOffsetPx)));
+
     if (topConfirmData.length) {
       const shape = cs.topShape || "triangle";
       const color = cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor;
@@ -254,8 +262,9 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         data: topConfirmData,
         symbol: shape,
         symbolRotate: shape === "triangle" ? 180 : 0,
-        symbolSize: () => [markerW, markerH], // 高度恒定 10px
-        symbolOffset: [0, -(markerH / 2 + (cfg.markerYOffsetPx + extraGap))],
+        symbolSize: () => [markerW, markerH],
+        // 比常规分型再外移一个预设偏移量：markerH/2 + apexGap + extraGap
+        symbolOffset: [0, -(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
           ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
           : { color },
@@ -276,8 +285,8 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         data: botConfirmData,
         symbol: shape,
         symbolRotate: 0,
-        symbolSize: () => [markerW, markerH], // 高度恒定 10px
-        symbolOffset: [0, +(markerH / 2 + (cfg.markerYOffsetPx + extraGap))],
+        symbolSize: () => [markerW, markerH],
+        symbolOffset: [0, +(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
           ? { color: "transparent", borderColor: color, borderWidth: 1.2 }
           : { color },
@@ -349,10 +358,10 @@ export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env =
   const penCfg = Object.assign(
     {},
     PENS_DEFAULTS,
-    ((settings.chanSettings &&
+    (settings.chanSettings &&
       settings.chanSettings.value &&
       settings.chanSettings.value.pen) ||
-      {})
+      {}
   );
 
   const pens = pensObj || {};
@@ -364,8 +373,12 @@ export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env =
   const lineW = Number.isFinite(+penCfg.lineWidth)
     ? +penCfg.lineWidth
     : PENS_DEFAULTS.lineWidth;
-  const confirmedStyle = String(penCfg.confirmedStyle || PENS_DEFAULTS.confirmedStyle);
-  const provisionalStyle = String(penCfg.provisionalStyle || PENS_DEFAULTS.provisionalStyle);
+  const confirmedStyle = String(
+    penCfg.confirmedStyle || PENS_DEFAULTS.confirmedStyle
+  );
+  const provisionalStyle = String(
+    penCfg.provisionalStyle || PENS_DEFAULTS.provisionalStyle
+  );
 
   function toLineData(arr) {
     const data = [];
@@ -395,39 +408,39 @@ export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env =
   const series = [];
   if (confirmedData.length) {
     series.push({
-          id: "CHAN_PENS_CONFIRMED",
-          name: "CHAN_PENS_CONFIRMED",
-          type: "line",
-          yAxisIndex: 0,
-          data: confirmedData,
-          showSymbol: false,
-          smooth: false,
+      id: "CHAN_PENS_CONFIRMED",
+      name: "CHAN_PENS_CONFIRMED",
+      type: "line",
+      yAxisIndex: 0,
+      data: confirmedData,
+      showSymbol: false,
+      smooth: false,
       lineStyle: { color: baseColor, width: lineW, type: confirmedStyle },
-          itemStyle: { color: baseColor },
-          color: baseColor,
-          z: 4,
-          connectNulls: false,
-          tooltip: { show: false },
-          emphasis: { disabled: true },
+      itemStyle: { color: baseColor },
+      color: baseColor,
+      z: 4,
+      connectNulls: false,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
     });
   }
   if (provisionalData.length) {
     series.push({
-          id: "CHAN_PENS_PROVISIONAL",
-          name: "CHAN_PENS_PROVISIONAL",
-          type: "line",
-          yAxisIndex: 0,
-          data: provisionalData,
-          showSymbol: false,
-          smooth: false,
+      id: "CHAN_PENS_PROVISIONAL",
+      name: "CHAN_PENS_PROVISIONAL",
+      type: "line",
+      yAxisIndex: 0,
+      data: provisionalData,
+      showSymbol: false,
+      smooth: false,
       lineStyle: { color: dashedColor, width: lineW, type: provisionalStyle },
-          itemStyle: { color: dashedColor },
-          color: dashedColor,
-          z: 3,
-          connectNulls: false,
-          tooltip: { show: false },
-          emphasis: { disabled: true },
+      itemStyle: { color: dashedColor },
+      color: dashedColor,
+      z: 3,
+      connectNulls: false,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
     });
-        }
+  }
   return { series };
 }

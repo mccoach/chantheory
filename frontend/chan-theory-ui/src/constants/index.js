@@ -8,6 +8,7 @@
 //   1) 原始K线增加“阳线淡显/阴线淡显”（仅作用填充），保持上下影线/轮廓线100%不受影响；      // 变更点 1
 //   2) 合并K线增加“填充淡显”与“显示层级（先/后，默认先）”；颜色同时作用于轮廓与填充；        // 变更点 2
 //   3) 移除根层 displayOrder，改由 mergedK.displayOrder 管理合并K线的层级先后。              // 变更点 3
+//   4) 新增各类标记高度集中归口：主窗涨跌/分型/量窗标记高度统一在本文件配置，所有使用点引用。 // 变更点 4
 // ==============================                                           // 分隔注释
 
 // ------------------------------                                          // 小节：应用偏好
@@ -62,8 +63,8 @@ export const DEFAULT_VOL_MARKER_SIZE = {
   // 量/额标记尺寸默认
   minPx: 1, // 标记宽度最小像素
   maxPx: 16, // 标记宽度最大像素
-  baseHeightPx: 10, // 标记基准高度像素
-  offsetK: 1.2, // 标记与柱底的垂直偏移倍数
+  markerHeightPx: 10, // 标记基准高度像素
+  markerYOffsetPx: 2, // 标记尺寸与极值偏移
 }; // 对象结束
 
 // ------------------------------                                          // 小节：图表默认
@@ -74,20 +75,20 @@ export const DEFAULT_KLINE_STYLE = {
   barPercent: 100,
 
   // 原始K线（蜡烛）颜色与淡显（仅作用填充体）
-  upColor: "#f56c6c",                // 阳线主色（边线/影线/填充基色）
-  downColor: "#26a69a",              // 阴线主色（边线/影线/填充基色）
-  originalFadeUpPercent: 100,        // 阳线填充淡显（0~100；100=不淡显，纯色填充；仅作用填充，不影响边线/影线）
-  originalFadeDownPercent: 0,        // 阴线填充淡显（0~100；默认空心效果=0）
-  originalEnabled: true,             // 原始K线显示开关（默认选中）
+  upColor: "#f56c6c", // 阳线主色（边线/影线/填充基色）
+  downColor: "#26a69a", // 阴线主色（边线/影线/填充基色）
+  originalFadeUpPercent: 100, // 阳线填充淡显（0~100；100=不淡显，纯色填充；仅作用填充，不影响边线/影线）
+  originalFadeDownPercent: 0, // 阴线填充淡显（0~100；默认空心效果=0）
+  originalEnabled: true, // 原始K线显示开关（默认选中）
 
   // 合并K线（HL柱）样式与层级
-  mergedEnabled: true,               // 合并K线显示开关（默认选中）
+  mergedEnabled: true, // 合并K线显示开关（默认选中）
   mergedK: {
-    outlineWidth: 1.2,               // 轮廓线宽（作用于轮廓线）
-    upColor: "#FF0000",              // 上涨颜色（同时作用于轮廓线与填充体）
-    downColor: "#00ff00",            // 下跌颜色（同时作用于轮廓线与填充体）
-    fillFadePercent: 0,              // 填充淡显（0~100；仅作用填充，轮廓线始终100%）
-    displayOrder: "first",           // 显示层级：'first'（先）|'after'（后）；默认先
+    outlineWidth: 1.2, // 轮廓线宽（作用于轮廓线）
+    upColor: "#FF0000", // 上涨颜色（同时作用于轮廓线与填充体）
+    downColor: "#00ff00", // 下跌颜色（同时作用于轮廓线与填充体）
+    fillFadePercent: 0, // 填充淡显（0~100；仅作用填充，轮廓线始终100%）
+    displayOrder: "first", // 显示层级：'first'（先）|'after'（后）；默认先
   },
 
   // 保留旧字段兼容（不再使用）
@@ -212,6 +213,8 @@ export const CHAN_DEFAULTS = {
   visualPreset: "tri-default", // 视觉预设键
   markerMinPx: 1, // 标记最小宽度
   markerMaxPx: 16, // 标记最大宽度
+  markerHeightPx: 10,     // 主窗涨跌标记统一高度（唯一数据源）
+  markerYOffsetPx: 2, // 标记尺寸与极值偏移
   opacity: 0.9, // 标记透明度
   upShape: "triangle",
   upColor: "#f56c6c", // 上涨符号与颜色
@@ -270,6 +273,7 @@ export const FRACTAL_DEFAULTS = {
   minCond: "or", // 判定条件（or/and）
   markerMinPx: 1,
   markerMaxPx: 16,
+  markerHeightPx: 10, // 新增：分型标记高度（px，集中归口）
   markerYOffsetPx: 2, // 标记尺寸与极值偏移
   topShape: "triangle",
   bottomShape: "triangle", // 顶/底默认形状
@@ -330,11 +334,11 @@ export const FRACTAL_FILLS = [
 // 画笔默认设置（主窗设置窗 · 缠论标记页引用；渲染层通过该预置方案提供默认值）
 // ==============================
 export const PENS_DEFAULTS = {
-  enabled: true,                  // 是否显示画笔
-  lineWidth: 2,                   // 线宽（px）
-  color: "#ffffff",               // 颜色（白色）
-  confirmedStyle: "solid",        // 确认笔线型：solid|dashed|dotted
-  provisionalStyle: "dashed",     // 预备笔线型：solid|dashed|dotted
+  enabled: true, // 是否显示画笔
+  lineWidth: 2, // 线宽（px）
+  color: "#ffffff", // 颜色（白色）
+  confirmedStyle: "solid", // 确认笔线型：solid|dashed|dotted
+  provisionalStyle: "dashed", // 预备笔线型：solid|dashed|dotted
 }; // 对象结束
 
 // ======================================================================                                     // 小节：预设映射与高亮
@@ -431,8 +435,7 @@ export function pickPresetByBarsCountDown(freq, barsCount, totalBars) {
     return "ALL";
   }
 
-  const candidates = WINDOW_PRESETS
-    .filter((p) => p !== "ALL")
+  const candidates = WINDOW_PRESETS.filter((p) => p !== "ALL")
     .map((p) => ({ p, v: presetToBars(freq, p, totalBars) }))
     .filter((x) => x.v > 0)
     .sort((a, b) => a.v - b.v);

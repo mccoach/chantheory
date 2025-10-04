@@ -1,17 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
-<!-- ====================================================================== -->
-<!-- 主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     本轮改动目标：
-     1) 统一 pen 与其他项的草稿合并表达式（默认 + 用户覆盖）；
-     2) 在“分型判定”行第7列加入无标题的显隐总开关（tri-state checkbox），实现全开/全关/恢复快照三态循环：
-        - 四项分型（强/标/弱/确认）的显隐仅由各自项的勾选决定（styleByStrength[k].enabled 与 confirmStyle.enabled）。
-        - 总开关仅提供快捷操作，不另建决策机制；点击时在“全开、全关、恢复快照”中循环；
-          若快照本身为全开或全关则仅两态循环。
-        - 快照只在四个单项 enabled 勾选发生变化时更新；总控点击不更新快照（用于“恢复快照”）。
-     3) 尽量不改动原有顺序；新增辅助函数仅在局部增加，标注注释说明。
--->
-<!-- ====================================================================== -->
-
+<!-- 说明：主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
+     本次改动目标（仅集中高度来源，保持其余逻辑与顺序不变）：
+     1) 标记高度统一归口 constants/index.js：主窗涨跌使用 CHAN_DEFAULTS.markerHeightPx（或持久化值）；分型在 layers.js 内部已统一；量窗标记高度已统一由 DEFAULT_VOL_MARKER_SIZE.baseHeightPx。
+     2) 未开启涨跌标记时的占位系列也引用集中高度源，不再写死 10/12。
+     3) 主图底部避让高度 mainBottomExtraPx 的计算统一使用集中高度源。 -->
 <template>
   <!-- 顶部两行两列布局 -->
   <div class="controls controls-grid-2x2">
@@ -618,6 +610,17 @@ function openSettingsDialog() {
               type: "checkbox",
               checked,
               onChange,
+              // —— 关键修复：普通复选框必须显式清除 indeterminate —— //
+              onVnodeMounted(vnode) {
+                try {
+                  if (vnode?.el) vnode.el.indeterminate = false;
+                } catch {}
+              },
+              onVnodeUpdated(vnode) {
+                try {
+                  if (vnode?.el) vnode.el.indeterminate = false;
+                } catch {}
+              },
             }),
           ]);
         // tri-state checkbox：通过 vnode 钩子设置 indeterminate
@@ -782,7 +785,7 @@ function openSettingsDialog() {
         function getCurrentMACombination() {
           const combo = {};
           for (const k of getMAKeys()) {
-            combo[k] = !!(settingsDraft.maForm?.[k]?.enabled);
+            combo[k] = !!settingsDraft.maForm?.[k]?.enabled;
           }
           return combo;
         }
@@ -854,19 +857,19 @@ function openSettingsDialog() {
           maGlobalCycleIndex.value = 0;
         }
 
-          // NEW: 监听“全部恢复默认”计数器，统一刷新分型与均线快照（并重置循环指针）
-          watch(resetAllTick, () => {
-            try {
-              // 分型快照刷新
-              lastManualSnapshot.value = getCurrentFractalCombination(
-                settingsDraft.fractalForm
-              );
-              globalCycleIndex.value = 0;
-              // 均线快照刷新
-              maLastManualSnapshot.value = getCurrentMACombination();
-              maGlobalCycleIndex.value = 0;
-            } catch {}
-          });
+        // NEW: 监听“全部恢复默认”计数器，统一刷新分型与均线快照（并重置循环指针）
+        watch(resetAllTick, () => {
+          try {
+            // 分型快照刷新
+            lastManualSnapshot.value = getCurrentFractalCombination(
+              settingsDraft.fractalForm
+            );
+            globalCycleIndex.value = 0;
+            // 均线快照刷新
+            maLastManualSnapshot.value = getCurrentMACombination();
+            maGlobalCycleIndex.value = 0;
+          } catch {}
+        });
 
         // 行情显示页（仅更新草稿）
         const renderDisplay = () => {
@@ -1212,7 +1215,7 @@ function openSettingsDialog() {
                   if (def) {
                     settingsDraft.maForm[key] = { ...def };
                     // 单项重置后更新均线快照
-                  updateMASnapshotFromCurrent();
+                    updateMASnapshotFromCurrent();
                   }
                 }),
               ])
@@ -2089,7 +2092,6 @@ function openSettingsDialog() {
 
           // NEW: 触发“全部恢复默认”一次，供内部组件刷新快照
           resetAllTick.value++;
-
         } catch (e) {
           console.error("MainChartSettings onResetAll error:", e);
         }
@@ -2229,6 +2231,7 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
 
   // 涨跌标记
   if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
+    // 正常路径由 layers.js 的集中高度控制
     const upDownLayer = buildUpDownMarkers(reduced, {
       chanSettings: settings.chanSettings.value,
       hostWidth: hostW,
@@ -2237,6 +2240,15 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
     });
     out.push(...(upDownLayer.series || []));
   } else {
+    // 占位路径：统一从 index.js 预设取高度与偏移
+    const markerHeight = Math.max(
+      1,
+      Math.round(Number(CHAN_DEFAULTS.markerHeightPx))
+    );
+    const offsetDownPx = Math.round(
+      markerHeight + Number(CHAN_DEFAULTS.markerYOffsetPx)
+    );
+
     out.push(
       {
         type: "scatter",
@@ -2245,11 +2257,11 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
         yAxisIndex: 1,
         data: [],
         symbol: "triangle",
-        symbolSize: () => [8, 10],
-        symbolOffset: [0, 12], // 上移，避免与底部轴标签重叠
+        symbolSize: () => [markerW, markerHeight],
+        symbolOffset: [0, offsetDownPx],
         itemStyle: {
-          color: settings.chanSettings.value.upColor || CHAN_DEFAULTS.upColor,
-          opacity: settings.chanSettings.value.opacity ?? CHAN_DEFAULTS.opacity,
+          color: CHAN_DEFAULTS.upColor,
+          opacity: CHAN_DEFAULTS.opacity,
         },
         tooltip: { show: false },
         z: 2,
@@ -2262,12 +2274,11 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
         yAxisIndex: 1,
         data: [],
         symbol: "triangle",
-        symbolSize: () => [8, 10],
-        symbolOffset: [0, 12],
+        symbolSize: () => [markerW, markerHeight],
+        symbolOffset: [0, offsetDownPx],
         itemStyle: {
-          color:
-            settings.chanSettings.value.downColor || CHAN_DEFAULTS.downColor,
-          opacity: settings.chanSettings.value.opacity ?? CHAN_DEFAULTS.opacity,
+          color: CHAN_DEFAULTS.downColor,
+          opacity: CHAN_DEFAULTS.opacity,
         },
         tooltip: { show: false },
         z: 2,
@@ -2428,19 +2439,25 @@ function doSinglePassRender(snapshot) {
     };
     const tipPositioner = renderHub.getTipPositioner();
 
-    // 标记存在则给主图内部挤空间（逻辑保持不变）
+    // 标记存在则给主图内部挤空间（完全由 CHAN_DEFAULTS 决定几何与避让量）
     const anyMarkers =
       (settings.chanSettings.value?.showUpDownMarkers ?? true) === true &&
       reduced.length > 0;
-    const MARKER_HEIGHT_PX = Math.max(
-      2,
-      Math.round(snapshot.core?.markerWidthPx || 4)
+
+    // 唯一数据源：高度与偏移取自 index.js 的 CHAN_DEFAULTS
+    const markerHeight = Math.max(
+      1,
+      Math.round(Number(CHAN_DEFAULTS.markerHeightPx))
     );
-    const SAFE_PADDING_PX = 12;
-    const mainBottomExtraPx = anyMarkers
-      ? MARKER_HEIGHT_PX + SAFE_PADDING_PX - 8
-      : 0;
-    const xAxisLabelMargin = 12 + mainBottomExtraPx;
+    const markerYOffset = Math.max(
+      0,
+      Math.round(Number(CHAN_DEFAULTS.markerYOffsetPx))
+    );
+    const offsetDownPx = Math.round(markerHeight + markerYOffset);
+
+    // 主图底部空白与横轴标签避让量：与符号向下偏移量一致，避免遮挡
+    const mainBottomExtraPx = anyMarkers ? offsetDownPx : 0;
+    const xAxisLabelMargin = anyMarkers ? offsetDownPx + 12 : 12;
 
     const rebuiltMainOption = buildMainChartOption(
       {
@@ -2460,7 +2477,7 @@ function doSinglePassRender(snapshot) {
         mainAxisLabelSpacePx: 28,
         xAxisLabelMargin,
         mainBottomExtraPx,
-        isHovered: snapshot.main.isHovered, // MOD: 传入悬浮状态
+        isHovered: snapshot.main.isHovered, // 传入悬浮状态
       }
     );
 

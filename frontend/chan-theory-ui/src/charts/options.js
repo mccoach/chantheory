@@ -1014,11 +1014,11 @@ export function buildVolumeOption(
         MARKER_W_MIN,
         Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
       );
-  const markerH = DEFAULT_VOL_MARKER_SIZE.baseHeightPx;
-  const symbolOffsetBelow = [
-    0,
-    Math.round(markerH * DEFAULT_VOL_MARKER_SIZE.offsetK),
-  ];
+  // —— 唯一数据源：高度与偏移量完全由 index.js 的 DEFAULT_VOL_MARKER_SIZE 决定 —— //
+  const markerH = DEFAULT_VOL_MARKER_SIZE.markerHeightPx;
+  const markerYOffset = DEFAULT_VOL_MARKER_SIZE.markerYOffsetPx;
+  const offsetDownPx = Math.round(markerH + markerYOffset);
+  const symbolOffsetBelow = [0, offsetDownPx];
 
   // 放/缩量散点
   const primPeriod = periods.length ? +periods[0].period : null;
@@ -1087,8 +1087,10 @@ export function buildVolumeOption(
   // 顶部空间与横轴 margin（按是否有标记略作增加）
   const anyMarkers =
     (pumpEnabled && pumpPts.length > 0) || (dumpEnabled && dumpPts.length > 0);
-  const extraBottomPx = anyMarkers ? markerH : 0;
-  const xAxisLabelMargin = anyMarkers ? Math.max(12, markerH + 12) : 12;
+  // 底部额外空白：与符号向下偏移量一致，避免遮挡
+  const extraBottomPx = anyMarkers ? offsetDownPx : 0;
+  // 横轴标签避让：与符号高度+偏移量一致，完全匹配
+  const xAxisLabelMargin = anyMarkers ? offsetDownPx + 12 : 12;
 
   // 量窗 option
   const option = {
@@ -1395,7 +1397,10 @@ export function buildKdjOrRsiOption(
     option,
     {
       ...ui,
-      isMain: false, // 技术窗
+      isMain: false,
+      // 完全由 DEFAULT_VOL_MARKER_SIZE 决定的避让量与底部空白
+      extraBottomPx,
+      xAxisLabelMargin,
     },
     { dates, freq }
   );

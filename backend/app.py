@@ -4,7 +4,7 @@
 # - 启动：仅做轻量初始化（SQLite 架构 + 配置监听），立即可服务
 # - 后台：启动守护线程执行初始化任务（如自选池近窗同步），不阻塞端口监听
 # - 健康：/api/health 返回后台任务状态，前端可据此显示“后台初始化进行中”
-# - 本次改动：注册 symbols 路由，提供 /api/symbols/index
+# - 本次改动：注册 symbols 路由，提供 /api/symbols/index；以及新增 user_history 路由。
 # ==============================
 
 from __future__ import annotations  # 启用前置注解（便于类型注解前引用）
@@ -26,6 +26,7 @@ from backend.routers.watchlist import router as watchlist_router  # 自选路由
 from backend.routers.storage import router as storage_router  # 存储管理路由
 from backend.routers.debug import router as debug_router  # 调试路由
 from backend.routers.symbols import router as symbols_router  # 符号索引路由（新增）
+from backend.routers.user_history import router as user_history_router  # 历史记录路由（新增）
 from backend.services.config import start_watcher  # 配置文件监听线程
 from backend.services.tasks import start_background_tasks, get_task_status  # 后台任务管理
 
@@ -73,7 +74,8 @@ app.include_router(user_config_router)    # /api/user/config
 app.include_router(watchlist_router)      # /api/watchlist*
 app.include_router(storage_router)        # /api/storage*
 app.include_router(debug_router)          # /api/debug*
-app.include_router(symbols_router)        # /api/symbols*（新增）
+app.include_router(symbols_router)        # /api/symbols*
+app.include_router(user_history_router)   # /api/user/history*（新增）
 
 # 本地直接运行（调试）
 if __name__ == "__main__":  # 判断是否脚本运行

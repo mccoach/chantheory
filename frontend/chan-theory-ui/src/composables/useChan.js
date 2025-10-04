@@ -364,45 +364,45 @@ export function computeFractals(reducedBars, params = {}) {
     i += 1;
   }
 
-  // 确认分型（严格不等 & 紧邻配对）
-  for (let k = 0; k + 1 < out.length; k++) {
-    const a = out[k],
-      b = out[k + 1];
-    if (a.type !== b.type) continue;
-    if (b.i1 !== a.i3 + 1) continue; // 紧邻
+  // 确认分型（严格不等 & 窗口紧邻：b.i1 === a.i3 + 1；不要求分型在 out 数组相邻）
+  // 说明：为避免高复杂度，先按分型窗口起点 i1 建立索引映射，再对每个 a 在映射中查找 b（b.i1=a.i3+1）。
+  const byStartIdx = new Map();
+  for (const f of out) {
+    const arr = byStartIdx.get(f.i1) || [];
+    arr.push(f);
+    byStartIdx.set(f.i1, arr);
+  }
 
-    if (a.type === "top") {
-      const G3 = a.G3,
-        D3 = a.D3,
-        G4 = b.G1,
-        D4 = b.D1,
-        G2 = a.G2,
-        G5 = b.G2;
-      if (G4 < G3 && D4 < D3 && G5 < G2) {
-        a.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "first" };
-        b.confirm = {
-          paired: true,
-          pair_id: `${a.id}|${b.id}`,
-          role: "second",
-        };
-      }
-    } else {
-      const G3 = a.G3,
-        D3 = a.D3,
-        G4 = b.G1,
-        D4 = b.D1,
-        D2 = a.D2,
-        D5 = b.D2;
-      if (G4 > G3 && D4 > D3 && D5 > D2) {
-        a.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "first" };
-        b.confirm = {
-          paired: true,
-          pair_id: `${a.id}|${b.id}`,
-          role: "second",
-        };
+  for (let k = 0; k < out.length; k++) {
+    const a = out[k];
+    if (a?.confirm?.paired) continue; // 已配对跳过
+    const candidates = byStartIdx.get(a.i3 + 1) || []; // 窗口紧邻：b.i1 === a.i3 + 1
+    for (const b of candidates) {
+      if (b?.confirm?.paired) continue;
+      if (a.type !== b.type) continue;
+
+      if (a.type === "top") {
+        // 顶分确认：G2>G5, G3>G4, D3>D4
+        const G2 = a.G2, G3 = a.G3, D3 = a.D3;
+        const G4 = b.G1, D4 = b.D1, G5 = b.G2;
+        if (G5 < G2 && G4 < G3 && D4 < D3) {
+          a.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "first" };
+          b.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "second" };
+          break; // a 已配对，检查下一个 a
+        }
+      } else {
+        // 底分确认：D2<D5, D3<D4, G3<G4
+        const D2 = a.D2, D3 = a.D3, G3 = a.G3;
+        const G4 = b.G1, D4 = b.D1, D5 = b.D2;
+        if (D5 > D2 && D4 > D3 && G4 > G3) {
+          a.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "first" };
+          b.confirm = { paired: true, pair_id: `${a.id}|${b.id}`, role: "second" };
+          break; // a 已配对，检查下一个 a
+        }
       }
     }
   }
+
 
   return out;
 }

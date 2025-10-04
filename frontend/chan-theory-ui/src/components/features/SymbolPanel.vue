@@ -116,7 +116,7 @@
                 findBySymbol(h.symbol)?.type || ""
               }}</span>
             </div>
-            <!-- 历史下拉的星标��即时落地，与联想一致） -->
+            <!-- 历史下拉的星标（即时落地，与联想一致） -->
             <button
               class="star-btn"
               :class="{ active: isStarOn(h.symbol) }"
@@ -269,6 +269,7 @@ import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
+import * as historyApi from "@/services/historyService"; // NEW: 历史入库服务
 
 defineOptions({ directives: { selectAll: vSelectAll } });
 
@@ -307,8 +308,7 @@ const inWatchlistSet = computed(() => {
   return new Set(arr);
 });
 
-// —— 历史：当输入为空时自动弹出，下拉展示最近（最大50，时间倒序） —— //
-// 替换这里：不再依赖列表长度，输入为空就显示历史下拉
+// 历史：输入为空时自动弹出（UI 仍读取本地持久化列表，以保持“本地-first”的体验）
 const showHistory = computed(
   () =>
     focused.value && !favoritesOpen.value && inputText.value.trim().length === 0
@@ -487,12 +487,22 @@ function selectHistoryByRow(hItem) {
   selectItem(entry);
 }
 
-// 选中项：写入历史并刷新
-function selectItem(item) {
-  inputText.value = item.symbol;
-  vm.code.value = item.symbol;
-  settings.setLastSymbol(item.symbol);
-  settings.addSymbolHistoryEntry(item.symbol); // 写入历史（MRU）
+// 选中项：写入历史并刷新（本地持久化 + 后端入库）
+async function selectItem(item) {
+  const sym = String(item.symbol).trim();
+  inputText.value = sym;
+  vm.code.value = sym;
+  settings.setLastSymbol(sym);
+  // 本地（LocalStorage）持久化历史
+  settings.addSymbolHistoryEntry(sym);
+  // —— 新增：写入本地数据库（后端） —— //
+  try {
+    await historyApi.add({ symbol: sym, freq: vm.freq.value });
+  } catch (e) {
+    // 静默失败，不阻断主流程
+    console.warn("history add failed:", e?.message || e);
+  }
+
   invalidHint.value = "";
   suggestions.value = [];
   activeIndex.value = -1;
@@ -544,7 +554,7 @@ async function doExport(targetId, format) {
   if (!res.ok) console.error("导出失败：", res.error);
 }
 
-// 文档点击：关闭 favorites 时 await 落地与刷新
+// 文档点击：关闭 favorites 与导出菜单
 async function onDocClick(e) {
   const el = e?.target;
   // 关闭导出菜单
