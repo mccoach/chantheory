@@ -1,4 +1,4 @@
-# ChanTheory 项目架构与关键控制规范 v1.3（整合版 · 新增“有效交互第一性原则 + 程序化 dataZoom 阻断 + 前置原子化持久化”修订 · 以代码为准）
+# ChanTheory 项目架构与关键控制规范 v1.3（整合版 · 新增“元线段规则与命名方案 v1.0 · 键名统一蛇形小写 · 旧→新键名映射 · 以代码为准”修订）
 
 说明
 
@@ -7,12 +7,8 @@
   - 程序化 dataZoom 阻断：为渲染层程序化应用视窗范围引入明确标识或范围签名；onDataZoom 遇到此类事件必须直接返回，不得进入中枢，彻底阻断回环。
   - 持久化前置与原子化：在判定“关键三项发生变化”的当帧，先写入紧凑快照（原子化持久化），再调用中枢 execute 更新权威内存态与广播；持久化作为独立链路的尽端，不作为下一步处理的前置条件。
   - 两帧合并的写频控制：中枢广播层继续执行“两帧合并”并只广播最终值；在持久化链路上优先采用“两帧合并 + 原子快照”的最简策略，是否增加“有界处理（节流/防抖 + maxWait）”可根据实测性能做开关控制，不强制。
-- 严格遵循“以代码为准”的原则：文档描述必须与实现一致；当实现演进，守护脚本与文档同步更新。
-- 关键修订与澄清（相对 v1.2）：
-  - 有效交互白名单改为“第一性原则判定”：仅当 barsCount/rightTs/hostWidthPx（派生 markerWidthPx）发生实际变化时才触发中枢，动作类型不再作为判断依据；离散量判定采用 e_idx（右端索引）、bars 整数与 markerWidthPx 派生值。
-  - 程序化 dataZoom 阻断：渲染层应用范围（dispatchAction/setOption）前设置程序化标志或范围签名；onDataZoom 内遇到标志或签名一致立即 return，不做 Pan/ScrollZoom 判定、不进入中枢，阻断回环。
-  - 持久化链路前置与原子化：变化发生的当帧先写入紧凑快照（单键或逻辑原子分组），再走中枢；持久化不作为请求参数的来源，API 锚点参数依然来自中枢权威内存态（anchor_ts=hub.rightTs）。
-  - 保留两帧合并与覆盖式防抖：中枢层的两帧合并与请求层的覆盖式防抖继续有效；持久化链路默认不再额外加节流/防抖（可选开关依据实测启用）。
+- 新增“元线段（segments）规则与命名方案 v1.0”：在已确认“笔”序列上识别并绘制“元线段”，作为线段判定的基础单元；统一蛇形小写（snake_case）键名，提供旧→新映射表与扩展说明；以代码为准，当前实现仍使用旧键名，迁移将按本文方案执行。
+- 严格遵循“以代码为准”的原则：文档描述必须与实现一致；当实现演进，守护脚本与文档同步更新。对于本版新增的命名方案，已在文档中标注“实现状态与迁移计划”。
 
 ---
 
@@ -23,8 +19,9 @@
   - 以代码为准的规范：文档描述必须与实现一致；当实现演进，守护脚本与文档同步更新。
   - 显示状态彻底统一：前端显示层仅由 barsCount 与 rightTs 决定切片范围与位置；markerWidthPx 为派生统一宽度，不依赖后端是否处理；任何主动交互都走中枢汇总，两帧合并，覆盖防抖。
   - 有效交互第一性原则：仅当关键三项发生实际变化时才进入中枢；无变化即噪声，直接过滤；程序化 dataZoom 事件标识明确并阻断回环。
-  - 持久化前置与原子化：变化发生的当帧，先落地紧凑快照，再进入中枢；持久化链路独立收尾，不作为后续处理前置条件。
+  - 持久化前置与原子化：变化发生的当帧，先落地紧凑快照（单键或逻辑原子分组），再进入中枢；持久化链路独立收尾，不作为后续处理前置条件。
   - 数据以本地 SQLite 为权威单一真相源；最小存储（仅存不复权 + 因子），最大可复现（其他即时计算）。
+  - 元线段识别与展示：仅基于本地已确认笔（不触发后端），在主图覆盖层一次性装配叠加展示，随当前可视窗口变化即时重算，遵守程序化 dataZoom 阻断与 ECharts-first 会话锁。
 
 - 总原则
   - 效率优先（交付与长期维护的总成本最小）
@@ -50,16 +47,17 @@
   - 主题与样式：global.css（CSS 变量），charts/theme.js 映射 ECharts 主题。
   - 请求与并发：统一 axios + 拦截器（trace_id 注入；取消类错误静默）；覆盖式防抖（AbortController + reqId + UI renderSeq）。
   - useViewCommandHub（显示状态中枢）：统一管理 barsCount/rightTs/markerWidthPx/atRightEdge/hostWidthPx/allRows/presetKey/freq/symbol；集中指令入口与广播合并，持久化（前置与原子化策略）与广播。
-  - 有效交互门卫（第一性原则）：交互源（dataZoom/滚轮/键盘/预设/手输/resize）的候选目标值（nextBars/nextRightTs/nextHostWidth）仅在与当前中枢快照出现实际变化时才允许进入中枢；程序化 dataZoom 标识明确，onDataZoom 确认来源后阻断回环。
-  - useMarketView：autoStart=false 支持首帧探活后再首刷；右端锚定；预览即时；持久化 viewBars/rightTs（前置写）与权威内存态一致；anchor_ts=hub.rightTs。
+  - useViewRenderHub（渲染中枢）：上游唯一源头，一次性计算并发布主/量/指标窗的 option（统一 initialRange、tooltip 固定/跟随）；交互期不做 notMerge 重绘（ECharts-first 会话锁）。
+  - 元线段（segments）覆盖层：复用已确认 pens 的本地识别结果；不触发后端；遵守一次性装配、程序化 dataZoom 阻断与 ECharts-first 会话锁。
 
 - 显示与时间
   - 分钟族 time 显示到“YYYY-MM-DD HH:MM”；日/周/月显示到“YYYY-MM-DD”（不附带时区后缀）。
   - 分钟族 ts = 结束时刻；日/周/月 ts = 15:00（Asia/Shanghai）。
+  - API 返回 candles 元素的时间字段为 ISO 字符串 t（“t_iso”的别名），当前不返回 ts；内部计算使用 ts。后续可按需要在响应 meta 扩展 t_iso 与 ts 的并存键位。
 
 ---
 
-## 2. 数据模型与持久化
+## 2. 数据模型与持久化（修订 · 命名方案 v1.0 · 旧→新键名映射）
 
 - 存储介质
 
@@ -71,6 +69,8 @@
   - candles（仅存 adjust='none'）
     - 主键：symbol, freq('1m'|'1d'), adjust('none'), ts(ms)
     - 列：open, high, low, close, volume, amount?, turnover_rate?, source, fetched_at(ISO), revision?
+    - 规范时间字段：数据库存 ts（毫秒），API 返回 t（ISO 字符串）；后续若扩展 ts 与 t_iso 并存，将以 t_iso 命名 ISO 字符串，ts 为毫秒整数。
+
   - adj_factors
     - 主键：symbol, date(YYYYMMDD)
     - 列：qfq_factor, hfq_factor, updated_at
@@ -80,6 +80,70 @@
 - 存储策略
   - 仅存不复权序列 + 因子表；复权即时计算；指标即时计算。
   - 不存冗余派生（change/change_pct/amplitude 等前端可稳算的列一律即时计算）。
+
+- 命名方案 v1.0（统一蛇形小写 · 旧→新键名映射）
+
+  - 统一原则
+    - 统一蛇形小写（snake_case）。
+    - 所有出现 red 索引的字段，必须同时提供对应的 orig 索引。
+    - 起止一律使用 start_/end_ 前缀（不再使用 s/e）。
+    - 凡有毫秒时间戳 ts，一律成对提供 ISO 时间 t_iso（API 现状仅返回 ISO 字符串 t，等价于 t_iso；ts 在内部使用）。
+    - 分型三柱统一用 k1/k2/k3 表示；k2 为中柱。
+    - anchor 仅出现在合并K（reducedBars）中；其它类型元素不再使用 anchor 命名。
+    - 笔默认起点和线段默认端点的 orig 索引值，语义即“对应合并K承载点的原始K索引”（无需在笔/线段中重复强调 anchor）。
+    - 层级定位完整：笔包含分型/合并K/原始K三层起止索引；线段包含笔/分型/合并K/原始K四层起止索引。
+    - 价格字段统一：原始K保留 hi/lo；其它对象使用 g/d 表示高/低价。
+
+  - reducedBars（合并K）新键名（当前代码旧键名保留，迁移按此方案）
+    - start_idx_orig / end_idx_orig（旧：idx_start / idx_end）
+    - g_pri / d_pri（旧：hi / lo）
+    - dir_int（旧：dir）
+    - start_t_iso / end_t_iso（旧：t_start / t_end）
+    - g_idx_orig / d_idx_orig（旧：hi_idx / lo_idx）
+    - anchor_idx_orig（旧：anchor_idx）
+    - reason_str（旧：reason）
+
+  - fractals（分型）新键名（当前代码旧键名保留，迁移按此方案）
+    - id_str（旧：id）
+    - kind_enum（旧：type；'top'|'bottom'）
+    - k1_idx_red / k2_idx_red / k3_idx_red（旧：i1/i2/i3）
+    - k1_t_iso / k2_t_iso / k3_t_iso（旧：t1/t2/t3）
+    - k1_g_pri / k1_d_pri；k2_g_pri / k2_d_pri；k3_g_pri / k3_d_pri（旧：G1/D1、G2/D2、G3/D3）
+    - k1_mid_pri（旧：M1）
+    - k2_idx_orig（旧：xIndex）
+    - strength_enum（旧：strength）
+    - dir_seq_str（旧：dir_seq）
+    - min_tick_cnt_int / min_pct_num / min_cond_enum（旧：params.minTickCount/minPct/minCond）
+    - algo_ver_str（旧：algo_version）
+    - sig_tick_ok_bool / sig_pct_ok_bool（旧：significance.tick_ok/pct_ok）
+    - cf_paired_bool / cf_pair_id_str / cf_role_enum（旧：confirm.paired/pair_id/role）
+    - labels_arr / note_str（旧：labels/note）
+
+  - pens（已确认笔）新键名（当前代码旧键名保留，迁移按此方案）
+    - start_frac_idx_int / end_frac_idx_int（新增）
+    - start_idx_red / end_idx_red（旧：startReducedIdx/endReducedIdx）
+    - start_idx_orig / end_idx_orig（旧：startOrigIdx/endOrigIdx；默认取各自合并K的 anchor 对应的 orig）
+    - start_t_iso / end_t_iso（可选，与 ts_ms 成对，若需要时间快照）
+    - start_g_pri / start_d_pri；end_g_pri / end_d_pri（旧：startY/endY 可拆分）
+    - span_red_cnt_int（旧：spanReducedBars）
+    - amp_abs_pri（旧：amplitudeAbs）
+    - dir_enum（旧：direction；'UP'|'DOWN'）
+    - start_frac_id_str / end_frac_id_str（旧：startFractalId/endFractalId）
+    - state_enum（旧：state；'confirmed'|'provisional'）
+
+  - segments（线段·元线段）新键名（当前代码旧键名保留，迁移按此方案）
+    - start_pen_idx_int / end_pen_idx_int（旧：startPenIndex/endPenIndex）
+    - start_frac_idx_int / end_frac_idx_int（新增）
+    - start_idx_red / end_idx_red（新增）
+    - start_idx_orig / end_idx_orig（旧：startX/endX；横轴端点一致化）
+    - start_g_pri / start_d_pri；end_g_pri / end_d_pri（旧：startY/endY 可拆分）
+    - dir_enum（旧：direction）
+    - success_pen_idx_arr / checks_arr（可选新增）
+    - end_gap_exists_bool（新增：末端特征序列缺口判定预留）
+
+  - 实现状态与迁移说明（以代码为准）
+    - 当前代码使用旧键名（如 fractals.i1/i2/i3、reducedBars.idx_start/idx_end、pens.startReducedIdx 等）；API 与前端模块已基于旧键名稳定运行。
+    - 本版文档确立统一蛇形小写命名方案 v1.0，并提供旧→新映射；迁移将按“只增不删不改”的 SOP 执行，逐步在前端/后端添加新键名并保持旧键名兼容，待守护脚本与测试完成后再进行旧键名的软弃用声明。
 
 ---
 
@@ -126,6 +190,8 @@
     - iface_key（方法键，选填），trace_id（选填）
   - 行为
     - 服务端一次成型计算可视窗口（右端锚定，bars 优先；ALL=当前序列总根数）；返回 ALL candles + meta.view*；前端仅按 meta 应用 dataZoom。
+    - 响应中时间：candles 元素按 ISO 字符串 t（等价 t_iso），meta 中提供 start/end（ISO 字符串）。当前版本不返回 ts 给前端（内部使用）。
+
   - 出参
     - candles：[ {t,o,h,l,c,v,a?,tr?} ]
     - indicators：按 include 即时计算（MA/MACD/KDJ/RSI/BOLL）
@@ -146,7 +212,7 @@
 ## 7. 后端模块化（文件职责）
 
 - app.py：入口与 CORS；启动钩子（DB 初始化、配置监听、后台任务启动）；/api/ping 与 /api/health。
-- routers：candles/symbols/storage/watchlist/user_config/debug —— 仅组装参数/校验/调用服务并返回。
+- routers：candles/symbols/storage/watchlist/user_config/user_history/debug —— 仅组装参数/校验/调用服务并返回。
 - services：
   - market：核心链路（读取 → 复权 → 重采样 → 可视窗口计算 → 组装响应）
   - storage：SQLite 读写、UPSERT、缓存元信息维护、LRU/TTL 清理
@@ -158,7 +224,7 @@
 
 ---
 
-## 8. 前端结构与交互（修订 · 有效交互第一性原则 · 程序化阻断 · 前置原子化持久化）
+## 8. 前端结构与交互（修订 · 有效交互第一性原则 · 程序化阻断 · 前置原子化持久化 · 元线段）
 
 - 主题与样式
 
@@ -175,6 +241,7 @@
   - 指令入口（execute）：ChangeFreq、ChangeWidthPreset、ScrollZoom、Pan、KeyMove、SetBarsManual、SetDatesManual、Refresh、ChangeSymbol、ResizeHost。
   - 广播机制：两帧合并（最多 2 帧），仅广播最终值；任何有效交互立即持久化（前置与原子化）并调度广播。
   - 边界与触底：setDatasetBounds(minTs,maxTs,totalRows) 落地后，若 atRightEdge=true 自动锚到最新；rightTs 越界按就近夹取；随后更新 atRightEdge = (rightTs==maxTs)。
+  - 变更澄清：点击 ALL 预设时，除 bars=ALL 外，若已知 maxTs，则强制 rightTs=maxTs 并置 atRightEdge=true（完全覆盖全量）。
 
 - 有效交互第一性原则与门卫（新增）
 
@@ -194,6 +261,27 @@
   - 变化发生当帧，先写入紧凑快照（单键或逻辑原子分组；例如 code|freq → {bars,rightTs,atRightEdge}），保证原子性与恢复一致性；
   - 持久化为独立链路的尽端，不作为请求参数的前置；请求锚点取自中枢权威内存态；
   - 写频控制：默认依靠“两帧合并”自然限制写频；是否增加“有界处理（节流/防抖 + maxWait）”由实测性能决定（可开关），不强制。
+
+- 元线段覆盖层（新增 · 规则与链路）
+
+  - 范围与目标：在已确认的“笔”序列上识别并绘制“元线段”，作为线段判定的第一层基础单元；仅基于本地已确认笔，不触发后端。
+  - 基本术语：
+    - 笔序列交替：已确认的笔必然一涨一跌交替。
+    - 组（pair）：一次比对用两条同向笔，索引相隔一条反向笔（前一笔与其紧后第一个同向笔，索引 +2）。
+    - 轮（round）：一条元线段的构建过程，可能包含一组或多组成功配对；失败即终止该轮。
+    - 端点术语：笔的低端/高端（价格区间的最小/最大）。
+  - 成功判定（三要素，严格不等）：
+    - 无缺口：两条笔的价格区间必须出现“内部重叠”（overlapHigh > overlapLow），不接受边界相等。
+    - 不相互包含：两条笔的价格区间必须部分重叠但没有一方完全包含另一方。
+    - 发展趋势一致：上涨笔后一同向笔更高（低端更高且高端更高）；下跌笔后一同向笔更低（高端更低且低端更低）。
+  - 一轮构建流程：
+    - 轮启动即固定起点：上涨段用起始笔的低端，横轴用起始笔的原始 K 起点索引；下跌段用起始笔的高端，横轴用起始笔的原始 K 起点索引。
+    - 比对推进：当前笔与其紧后同向笔（索引 +2）进行成功判定；成功则临时终点推进到后一同向笔的终点端（上涨用高端、下跌用低端，横轴为该笔的原始 K 终点索引），当前笔后移到后一同向笔继续；失败则若已成功过则输出该元线段，否则本轮失败不输出；下一轮从失败组中间反向笔起跳（线性推进）。
+    - 尾部处理：序列不足以组出同向笔时，本轮结束；若已成功过则以临时终点输出，否则不输出。
+  - 展示与样式：主图覆盖层折线，默认线宽 3、明黄色、实线；绑定主价格轴；集中配置 constants/index.js 中 SEGMENT_DEFAULTS（color=#FFD700、lineWidth=3、lineStyle='solid'）。
+  - 实现澄清（以代码为准）：
+    - 当前实现的横轴端点取值基于分型锚点（anchor）对应的 orig 索引（startOrigIdx/endOrigIdx），可能导致端点过近甚至相等的短段视觉；按本文方案，迁移后端点应取“起始笔的原始 K 起点索引”与“最后一次成功组的后一同向笔的原始 K 终点索引”，以保证与主图完全对齐且至少跨三笔。
+    - 迁移计划：在 pens 生成时补齐笔的真实起止 orig 边界（start_idx_orig_bound/end_idx_orig_bound 可选），segments 端点改为使用上述起止 orig 索引；保持判定逻辑与线性推进不变。
 
 - 组件与职责
 
@@ -325,7 +413,7 @@
 
 - 覆盖式防抖：Abort+reqId+renderSeq；仅最后一次请求/动作落地。
 - 中枢两帧合并：滚轮/拖动等高频指令仅广播最终值；避免抖动。
-- 前置原子化持久化：有效交互发生当帧写入紧凑快照（单键或逻辑原子分组）；默认依靠两帧合并自然限制写频；是否启用“有界处理（节流/防抛 + maxWait）”由实测性能决定，可作为开关（不强制）。
+- 前置原子化持久化：有效交互发生当帧写入紧凑快照（单键或逻辑原子分组）；默认依靠两帧合并自然限制写频；如观测到卡顿，按开关启用“有界处理”，限定节流与 maxWait。
 - 显示层即时预览：任意有效交互都即时更新 barsCount/rightTs 与 symbol 文案，高亮与 markerWidthPx 同步；前置持久化后由中枢广播；回包一致。
 - 日志与可观测：NDJSON + 基本度量；trace_id 贯穿链路；建议增加“过滤无效事件数”“每秒持久化写次数/耗时”“渲染掉帧统计”打点以便调参。
 
@@ -348,6 +436,7 @@
 - 本地守护遗漏：每次验收新增“可机检要点”入 invariants.json（病毒库式增强）。
 - 视窗越界：按“就近区间原则”落地；必要时全量显示（ALL）。
 - 持久化写频：默认依靠两帧合并控制；如观测到卡顿，按开关启用“有界处理”，限定节流与 maxWait。
+- 元线段端点对齐风险：当前实现端点基于分型 anchor 的 orig 索引，可能出现“极短段”视觉；迁移后端点改为“起始笔 orig 起点与后一同向笔 orig 终点”，避免误判。
 
 ---
 
@@ -358,6 +447,7 @@
 - retry.base_delay_ms = 500
 - 日线近端截止小时 daily_fresh_cutoff_hour（当前 settings 中默认 18）
 - DEBUG = 开发 True / 生产 False
+- SEGMENT_DEFAULTS（线段默认样式）：color = #FFD700、lineWidth = 3、lineStyle = "solid"
 
 ---
 
@@ -366,7 +456,7 @@
 - 一步到位新骨架（与现实现保持一致）
 
   - 后端：SQLite DDL/PRAGMA、datasource、storage、market、routers、meta 扩展
-  - 前端：global.css + charts/theme.js、统一 axios、覆盖式防抖（Abort+reqId+renderSeq）、主/量/指标窗体、LocalStorage 持久化（前置原子化）、显示状态中枢（第一性原则门卫）、起止与 bars 即时预览、CHAN 占位稳定、程序化 dataZoom 阻断
+  - 前端：global.css + charts/theme.js、统一 axios、覆盖式防抖（Abort+reqId+renderSeq）、主/量/指标窗体、LocalStorage 持久化（前置原子化）、显示状态中枢（第一性原则门卫）、起止与 bars 即时预览、CHAN 占位稳定、程序化 dataZoom 阻断、元线段覆盖层（一次性装配）
 
 - 验收补充（不变量清单）
 
@@ -380,6 +470,7 @@
   - 缠论覆盖层稳定（隐藏 yAxis=1 + CHAN_UP/CHAN_DOWN 占位）
   - 探活首刷策略生效（后端未活不首刷）
   - 错误模型：取消类错误静默（不污染 error）
+  - 元线段：一次性装配渲染；端点横轴与价格端一致；失败线性推进；不触发后端。
 
 - 变更流程（本地守护为强制）
   - 守护脚本通过（Patch Fence + Invariants）；pre-commit 自动执行；手动可随时运行；
@@ -395,6 +486,7 @@
 - 程序化 dataZoom：由渲染层调用 dispatchAction/setOption 应用范围导致的 zoom 事件，不属于用户交互；须阻断。
 - 有效交互门卫：比较候选 nextBars/nextRightTs/nextHostWidth 与中枢快照，未变则 return。
 - 前置原子化持久化：变化发生当帧写入紧凑快照（单键或逻辑原子分组），随后进入中枢路径。
+- 元线段（segments）：在已确认的“笔”序列上识别出的基础线段单元；连续成功推进形成，失败线性接续下一轮；端点横轴对齐“起始笔原始 K 起点索引”与“最后一次成功组的后一同向笔原始 K 终点索引”；默认样式集中配置。
 
 ---
 
@@ -436,6 +528,8 @@
 - 一次性装配渲染（Single-pass setOption）（新增要点）
   - 主窗 onRender 中将主图基础 series 与覆盖层 series 合并为单个 finalOption，并仅调用一次 setOption(notMerge)；不得在 ECharts 主流程期间调用 setOption/resize（统一经 rAF+setTimeout(0) 调度）。
   - 不得使用 JSON 深拷贝构造 finalOption（避免 itemStyle.color 等函数样式丢失），使用浅拷贝保留函数。
+- 元线段覆盖层（新增）
+  - 建立在已确认笔的本地识别结果之上；一次性装配叠加到主图；不触发后端；随视窗变化即时重算。
 
 ### 17.4 切频/切窗解耦与右端锚定缩放规则（修订 · 显示状态中枢版 · 项目专用唯一规则）
 
@@ -471,11 +565,13 @@
   - fence.json：主白名单（allowAdd/Modify/Delete + allow\*Dirs）；fence.local.json：本地覆盖（.gitignore 忽略）。
 - 本版新增可机检要点建议：
   - useViewCommandHub.js 必含 execute(…) 的各 action 令牌与 setDatasetBounds/markerWidthPx/_recalcMarkerWidth、有效交互门卫与幂等早退令牌。
-  - MainChartPanel.vue 必含 onDataZoom 程序化阻断令牌与 Pan/ScrollZoom 分支调用、chan:marker-size 转发、SetDatesManual。
-  - VolumePanel.vue 必含订阅中枢快照应用 overrideMarkWidth 与传入 buildVolumeOption。
+  - useViewRenderHub.js 必含 onRender、beginInteraction/endInteraction/isInteracting、getIndicatorOption 与统一 initialRange/tip 定位器。
+  - MainChartPanel.vue 必含 onDataZoom 程序化阻断令牌与 Pan/ScrollZoom 分支调用、chan:marker-size 转发、SetDatesManual 与一次性装配渲染。
+  - VolumePanel.vue 必含订阅中枢快照应用 overrideMarkWidth 与传入 buildVolumeOption，数据Zoom 会后承接。
   - useMarketView.js 必含 hub.onChange 中 presetKey/barsCount/rightTs 文案更新、reload anchor_ts=hub.rightTs。
   - 有效交互门卫令牌：在交互源中判定 nextBars/nextRightTs/nextHostWidth 与快照差异后方执行下游。
   - 新增守护点：一次性装配渲染（主窗单次 setOption）；禁止 JSON 深拷贝 finalOption（函数样式保真）。
+  - 元线段：buildSegmentLines 的系列 ID、样式与数据源令牌（segments）可作为新增不变量。
 
 ---
 
@@ -484,15 +580,16 @@
 - 语义化版本：MAJOR.MINOR.PATCH；破坏性变更需标注与迁移说明。
 - 产出元信息：algo_version、参数、数据窗、生成时间、timezone。
 - Changelog：用户可读 + 研发可复现；必要时附对拍差异。
+- 命名方案 v1.0 迁移说明：旧→新键名并存期为一个小版本周期，期间守护脚本验证新旧键同时存在；完成后逐步软弃用旧键名并在另一个小版本中去除。
 
 ---
 
 ## 20. 测试与回归
 
-- 单测：utils 与算法；charts option 快照；关键交互最小集成；onDataZoom 程序化阻断与门卫判定；中枢 action 落地。
+- 单测：utils 与算法；charts option 快照；关键交互最小集成；onDataZoom 程序化阻断与门卫判定；中枢 action 落地；元线段推进与失败接续。
 - 集成慢测：/api/candles 贯通对拍（scripts/cases.yaml）。
 - 守护脚本：Patch Fence 与 Invariants 必过；与测试互补。
-- 性能观测（建议）：前端记录“过滤无效事件数”“持久化写次数/耗时”“渲染掉帧统计”，用于调参。
+- 性能观测（建议）：前端记录“过滤的无效事件数”“持久化写次数/耗时”“渲染掉帧统计”，用于调参。
 
 ---
 
@@ -511,11 +608,12 @@
 
   - 宽度计算：markerWidthPx = round(hostWidthPx × 0.88 / barsCount)，限制 [1,16]。
   - 广播机制：主窗订阅中枢后将 snapshot.markerWidthPx 以事件 chan:marker-size 转发；宽度唯一来源为中枢派生值。
-  - 订阅与应用：主图缠论标记、量窗标记、分型标记等模块仅订阅该事件或直接订阅中枢快照并立即应用；不做各自估算、也不触发任何数据处理。
+  - 订阅与应用：主图缠论标记、量窗标记、分型标记、元线段等模块仅订阅该事件或直接订阅中枢快照并立即应用；不做各自估算、也不触发任何数据处理。
 
 - 覆盖层不变量
   - 主图存在 overlayMarkerYAxis（index=1，隐藏）；CHAN_UP/CHAN_DOWN 占位系列稳定存在（仅更新 data）。
   - 分型标记绑定主价格轴 yAxisIndex=0；确认分型连线按设置绘制；仅受统一宽度源影响其符号宽高与偏移。
+  - 元线段覆盖层绑定主价格轴 yAxisIndex=0；一次性装配叠加；遵循渲染时机与会话锁；默认样式集中配置。
 
 - 新增：与轴标签避让的协同
   - 开启涨跌标记时，标记位置不变（仍绑定 yAxisIndex=1，不做上移）；主图横轴标签向下避让由主图 UI 参数（xAxisLabelMargin、mainAxisLabelSpacePx）动态增量实现；关闭标记则恢复默认，确保“标签与标记不重叠”。
@@ -527,7 +625,7 @@
 - 主动交互统一入口（execute）
 
   - ChangeFreq：仅改变 barsCount；rightTs 不变；越界夹取；自动高亮；变化当帧前置原子化持久化与广播。
-  - ChangeWidthPreset：仅改变 barsCount；rightTs 不变；越界夹取；自动高亮；变化当帧前置原子化持久化与广播。
+  - ChangeWidthPreset：仅改变 barsCount；rightTs 不变（点击 ALL 时若已知 maxTs 强制 rightTs=maxTs 并置 atRightEdge=true）；越界夹取；自动高亮；变化当帧前置原子化持久化与广播。
   - ScrollZoom：双改 barsCount+rightTs；自动高亮；变化当帧前置原子化持久化与广播。
   - Pan：仅改变 rightTs；barsCount 不变；越界夹取；变化当帧前置原子化持久化与广播。
   - KeyMove：仅改变 rightTs；barsCount 不变；越界夹取；变化当帧前置原子化持久化与广播。
@@ -575,33 +673,45 @@
 - 影响分析与禁止改动项（示例）
 
   - 不得破坏：公共 API 契约（/api/candles meta 键与语义）、时间语义（分钟右端、日/周/月 15:00）、日志结构、覆盖式防抖/序号守护、显示状态中枢不变量（execute 指令集、setDatasetBounds、markerWidthPx 派生与广播）、程序化 dataZoom 阻断与有效交互门卫、性能与并发模型。
+  - 命名方案 v1.0 迁移：采用“只增不删不改”的策略并保持旧键兼容一个小版本周期；守护脚本需验证新旧键并存，防止不一致。
 
 - 交付护栏（交付包必须包含）
   - 变更核对单、回归核对单、手测步骤、守护脚本结果（本地）。
   - Guards-ChangeLog（守护脚本修订说明）。
   - 新增令牌有效性校验结果。
+  - 命名方案迁移清单与旧→新键名映射覆盖情况。
 
 ---
 
-## 25. 验收清单（有效交互门卫 + 程序化阻断 + 前置持久化版）
+## 25. 验收清单（有效交互门卫 + 程序化阻断 + 前置持久化 + 元线段版）
 
 - 仅当关键三项发生实际变化，主窗 onDataZoom 才触发中枢；程序化 dataZoom 阻断有效。
 - 任何 barsCount/rightTs/hostWidthPx（派生 markerWidthPx）变化，变化当帧前置原子化持久化，写入紧凑快照（单键或逻辑原子分组）。
 - 中枢两帧合并与覆盖式防抖有效：高频滚轮/拖动仅落地最后一次请求与最终广播。
 - 任何 barsCount 改变，窗宽高亮向下就近即时更新；非标 bars 不被拉齐。
 - 任何有效交互改变 barsCount 或 rightTs，均立即持久化到 LocalStorage（code|freq 维度）。
-- markerWidthPx 始终由中枢计算并统一广播；量窗/分型/缠论标记等均无自估逻辑；随缩放即时变化。
+- markerWidthPx 始终由中枢计算并统一广播；量窗/分型/缠论标记/元线段等均无自估逻辑；随缩放即时变化。
 - 刷新/改频/改标三类后台处理结束后触底保持与越界夹取规则正确；rightTs 无被动漂移。
 - anchor_ts=hub.rightTs 强制锚定；服务端返回 ALL + meta.view* 正确；前端仅依 meta 设置 dataZoom。
 - 缠论覆盖层不变量：overlayMarkerYAxis（index=1）存在，CHAN_UP/CHAN_DOWN 占位存在。
 - 跨窗 hover 同步与 dataZoom 联动保持一致；结构化日志打点可观测“过滤的无效事件数/持久化写频与耗时”。
 
-- 新增：一次性装配渲染 验收项
+- 一次性装配渲染 验收项
   - 一次性装配渲染：主窗 onRender 中将主图基础 series 与覆盖层 series 合并为单个 finalOption，并仅调用一次 setOption(notMerge)。
   - 时机安全：不在 ECharts 主流程期间调用 setOption/resize（全链路经 rAF+setTimeout(0) 调度），无 “setOption/resize during main process” 报错。
   - 函数样式保真：finalOption 不使用 JSON 深拷贝，itemStyle.color 等函数样式可用（如合并K线填充按 fillFadePercent 生效）。
   - 轴标签避让：开启涨跌标记时主图横轴标签向下避让（xAxisLabelMargin 与 mainAxisLabelSpacePx 动态增量），关闭标记恢复默认，标记位置不动且不与标签重叠。
+  - 元线段：端点横轴与价格端一致，至少跨三笔；失败线性接续；不触发后端；一次性装配叠加到主图。
 
 ---
 
 ## 结束
+
+附录 A：命名方案 v1.0 旧→新键名映射与新增键名列表（以代码为准，当前实现使用旧键名）
+
+- fractals：id→id_str、type→kind_enum、i1/i2/i3→k1_idx_red/k2_idx_red/k3_idx_red、t1/t2/t3→k1_t_iso/k2_t_iso/k3_t_iso、G1/D1/G2/D2/G3/D3→k1_g_pri/k1_d_pri/k2_g_pri/k2_d_pri/k3_g_pri/k3_d_pri、M1→k1_mid_pri、xIndex→k2_idx_orig、strength→strength_enum、dir_seq→dir_seq_str、params.*→min_*、algo_version→algo_ver_str、significance.*→sig_*、confirm.*→cf_*、labels→labels_arr、note→note_str。
+- reducedBars：idx_start/idx_end→start_idx_orig/end_idx_orig、hi/lo→g_pri/d_pri、dir→dir_int、t_start/t_end→start_t_iso/end_t_iso、hi_idx/lo_idx→g_idx_orig/d_idx_orig、anchor_idx→anchor_idx_orig、reason→reason_str。
+- pens：startReducedIdx/endReducedIdx→start_idx_red/end_idx_red、startOrigIdx/endOrigIdx→start_idx_orig/end_idx_orig、startY/endY→start_g_pri/start_d_pri、end_g_pri/end_d_pri、spanReducedBars→span_red_cnt_int、amplitudeAbs→amp_abs_pri、direction→dir_enum、startFractalId/endFractalId→start_frac_id_str/end_frac_id_str、state→state_enum；新增 start_frac_idx_int/end_frac_idx_int。
+- segments：startPenIndex/endPenIndex→start_pen_idx_int/end_pen_idx_int、startX/endX→start_idx_orig/end_idx_orig、startY/endY→start_g_pri/start_d_pri、end_g_pri/end_d_pri、direction→dir_enum；新增 start_frac_idx_int/end_frac_idx_int、start_idx_red/end_idx_red、success_pen_idx_arr/checks_arr（可选）、end_gap_exists_bool。
+
+迁移策略：以不破坏现有链路为前提，在模块产出中增补新键名并保持旧键名兼容一个小版本周期；守护脚本与测试覆盖新旧键并存；完成后发布软弃用说明与后续清理计划。

@@ -1,9 +1,8 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- 说明：主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     本次改动目标（仅集中高度来源，保持其余逻辑与顺序不变）：
-     1) 标记高度统一归口 constants/index.js：主窗涨跌使用 CHAN_DEFAULTS.markerHeightPx（或持久化值）；分型在 layers.js 内部已统一；量窗标记高度已统一由 DEFAULT_VOL_MARKER_SIZE.baseHeightPx。
-     2) 未开启涨跌标记时的占位系列也引用集中高度源，不再写死 10/12。
-     3) 主图底部避让高度 mainBottomExtraPx 的计算统一使用集中高度源。 -->
+     本次仅适配 useChan 输出的新键；覆盖层 series 的构造保持原方法与时序，
+     仅在 recomputeChan() 与 buildOverlaySeriesForOption() 内消费新键，不改变其余流程/顺序。
+-->
 <template>
   <!-- 顶部两行两列布局 -->
   <div class="controls controls-grid-2x2">
@@ -387,7 +386,8 @@ import {
   computeInclude,
   computeFractals,
   computePens,
-} from "@/composables/useChan";
+  computeSegments,
+} from "@/composables/useChan"; // 新增：computeSegments
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
@@ -395,7 +395,9 @@ import {
   buildUpDownMarkers,
   buildFractalMarkers,
   buildPenLines,
-} from "@/charts/chan/layers";
+  buildSegmentLines,
+  buildBarrierLines, // NEW: 屏障竖线
+} from "@/charts/chan/layers"; // 新增：buildSegmentLines
 
 /* 双跳脱调度，避免主流程期 setOption/resize */
 function schedule(fn) {
@@ -2151,20 +2153,21 @@ const refreshedAtHHMMSS = computed(() => {
 
 /* 键盘左右键 */
 let currentIndex = -1;
-
 function focusWrap() {
   try {
     wrap.value?.focus?.();
   } catch {}
 }
 
-/* 缠论/分型覆盖层 —— 构造覆盖层 series（一次性装配） */
+/* 缠论/分型/笔/线段/屏障缓存 —— 统一在 recomputeChan 中构建 */
 const chanCache = ref({
   reduced: [],
   map: [],
   meta: null,
   fractals: [],
   pens: { confirmed: [], provisional: null, all: [] },
+  segments: [], // 新增：元线段缓存
+  barriersIndices: [], // NEW: 屏障竖线位置（原始K索引，含左右各一）
 });
 function recomputeChan() {
   try {
@@ -2176,6 +2179,8 @@ function recomputeChan() {
         meta: null,
         fractals: [],
         pens: { confirmed: [], provisional: null, all: [] },
+        segments: [],
+        barriersIndices: [],
       };
       return;
     }
@@ -2196,12 +2201,31 @@ function recomputeChan() {
       { minGapReduced: 4 }
     );
 
+    // 新增：识别元线段（基于确认笔）；位置追加，不改变既有步骤顺序
+    const segments = computeSegments(pens.confirmed || []);
+
+    // NEW: 由 reducedBars 中的屏障标记计算竖线位置：gap 两侧紧邻原始K（left=end_idx_orig(prev)，right=start_idx_orig(curr)）
+    const barrierIdxList = [];
+    const rb = res.reducedBars || [];
+    for (let i = 0; i < rb.length; i++) {
+      const cur = rb[i];
+      if (cur && cur.barrier_after_prev_bool) {
+        const prev = i > 0 ? rb[i - 1] : null;
+        const left = prev ? prev.end_idx_orig : null;
+        const right = cur.start_idx_orig;
+        if (Number.isFinite(+left)) barrierIdxList.push(+left);
+        if (Number.isFinite(+right)) barrierIdxList.push(+right);
+      }
+    }
+
     chanCache.value = {
       reduced: res.reducedBars || [],
       map: res.mapOrigToReduced || [],
       meta: res.meta || null,
       fractals: fr || [],
       pens: pens || { confirmed: [], provisional: null, all: [] },
+      segments: segments || [],
+      barriersIndices: barrierIdxList, // NEW
     };
   } catch {
     chanCache.value = {
@@ -2210,14 +2234,18 @@ function recomputeChan() {
       meta: null,
       fractals: [],
       pens: { confirmed: [], provisional: null, all: [] },
+      segments: [],
+      barriersIndices: [],
     };
   }
 }
 
 /**
- * 构造覆盖层 series（一次性装配）
- * - 保持原有 buildUpDownMarkers/buildFractalMarkers；
- * - 新增画笔折线（confirmed/实线，provisional/虚线）追加 series；样式从 useUserSettings 读取（在 buildPenLines 内部处理）。
+ * 覆盖层 series（一次性装配）
+ * - 涨跌标记：anchor_idx_orig 作 x
+ * - 分型：k2_idx_orig 作 x
+ * - 笔/线段：*_idx_orig + *_y_pri
+ * - 屏障：在 gap 两侧紧邻原始 K 处绘制竖线（markLine）
  */
 function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
   const out = [];
@@ -2228,6 +2256,14 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
     provisional: null,
     all: [],
   };
+  const segments = chanCache.value.segments || [];
+  const barrierIdxList = chanCache.value.barriersIndices || [];
+
+  // 屏障竖线（优先叠加，z 更高）
+  if (barrierIdxList.length) {
+    const bl = buildBarrierLines(barrierIdxList);
+    out.push(...(bl.series || []));
+  }
 
   // 涨跌标记
   if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
@@ -2314,7 +2350,7 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
     }
   }
 
-  // 画笔折线（样式读取在 buildPenLines 内；不传 env 样式）
+  // 画笔折线（传入屏障索引，确保在断点处分段；每段为独立 series）
   const penEnabled =
     (settings.chanSettings.value?.pen?.enabled ?? PENS_DEFAULTS.enabled) ===
     true;
@@ -2323,8 +2359,14 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
     reduced.length &&
     (pens.confirmed.length || pens.provisional)
   ) {
-    const penLayer = buildPenLines(pens);
+    const penLayer = buildPenLines(pens, { barrierIdxList });
     out.push(...(penLayer.series || []));
+  }
+
+  // 元线段（每段独立 series；传入屏障索引以防跨断点）
+  if ((segments || []).length) {
+    const segLayer = buildSegmentLines(segments, { barrierIdxList });
+    out.push(...(segLayer.series || []));
   }
 
   return out;
@@ -2428,7 +2470,7 @@ function doSinglePassRender(snapshot) {
     if (!chart || !snapshot) return;
     const mySeq = ++renderSeq;
 
-    // 先计算缠论（含分型与画笔）
+    // 先计算缠论（含分型/画笔/线段/屏障）
     recomputeChan();
     const reduced = chanCache.value.reduced || [];
     const mapReduced = chanCache.value.map || [];
@@ -2672,7 +2714,7 @@ onMounted(() => {
     safeResize();
   });
 
-  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序） —— //
+  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序��� —— //
   // 说明：避免首帧快照在 chart 未初始化时被丢弃，导致不渲染。
   unsubId = renderHub.onRender((snapshot) => {
     doSinglePassRender(snapshot);
@@ -2878,10 +2920,7 @@ function applyInlineRangeDaily() {
     const ye = parseInt(endFields.Y, 10),
       me = parseInt(endFields.M, 10),
       de = parseInt(endFields.D, 10);
-    if (!Number.isFinite(ys) || !Number.isFinite(ms) || !Number.isFinite(ds))
-      return;
-    if (!Number.isFinite(ye) || !Number.isFinite(me) || !Number.isFinite(de))
-      return;
+    if (!([ys, ms, ds, ye, me, de].every(Number.isFinite))) return;
 
     // 构造 YYYY-MM-DD 文本
     const toYMD = (y, m, d) =>
@@ -2932,11 +2971,7 @@ function applyInlineRangeMinute() {
       he = parseInt(endFields.h, 10),
       mine = parseInt(endFields.m, 10);
 
-    // 基本校验
-    if (
-      ![ys, ms, ds, hs, mins].every(Number.isFinite) ||
-      ![ye, me, de, he, mine].every(Number.isFinite)
-    )
+    if (!([ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite)))
       return;
 
     // 构造本地时间的 Date（浏览器本地时区）；与 ECharts/前端解析保持一致

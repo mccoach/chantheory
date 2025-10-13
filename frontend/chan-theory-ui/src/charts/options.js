@@ -1,11 +1,10 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options.js
 // ==============================
 // 说明：ECharts 选项生成（主/量/指标 · 逐行注释 · 全量文件）
-// 本次与合并K线边框颜色相关的根因修复：
-// - 合并K线默认颜色的回退改为使用 DEFAULT_KLINE_STYLE.mergedK.upColor/downColor，
-//   不再回退到主题涨跌色，避免与设置项不一致。
-// - 合并K线边框与填充均源自 MK.upColor/MK.downColor；填充再按淡显处理，边框始终100%。
-// - 关键修复：applyUi 增加 initialRange 参数，让 setOption 时直接应用正确窗口，避免闪回 ALL。
+// 本版适配“新命名系统”：
+// - 合并K：使用 g_pri/d_pri/dir_int/anchor_idx_orig 等；
+// - 原始→合并K映射：mapOrigToReduced 项键为 {reduced_idx, role_str}；
+// - 主图 tooltip 的合并K极值与方向读取新键；其余逻辑不变。
 // ==============================
 
 /* =============================
@@ -368,18 +367,24 @@ function makeMainTooltipFormatter({
     // 当前原始 K 数据
     const k = list[idx] || {};
 
-    // —— 计算合并K线对应的颜色（新需求） —— //
+    // 计算合并K线对应的颜色（依据 rb.dir_int）
     const KS = klineStyle || DEFAULT_KLINE_STYLE || {};
     const MK = KS.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
     let mergedDotColor = null;
     let rbForIdx = null;
     try {
       const entry = mapOrigToReduced && mapOrigToReduced[idx];
-      rbForIdx =
-        entry && typeof entry.reducedIndex === "number"
-          ? reducedBars[entry.reducedIndex]
+      // ★ 适配新命名：读取 reduced_idx
+      const reducedIdx =
+        entry && typeof entry.reduced_idx === "number"
+          ? entry.reduced_idx
           : null;
-      const dir = Number(rbForIdx?.dir || 0);
+      rbForIdx =
+        reducedIdx != null && reducedBars[reducedIdx]
+          ? reducedBars[reducedIdx]
+          : null;
+      // ★ 适配新命名：读取 dir_int
+      const dir = Number(rbForIdx?.dir_int || 0);
       if (dir !== 0) {
         mergedDotColor =
           dir > 0
@@ -393,17 +398,18 @@ function makeMainTooltipFormatter({
       ? `background:${mergedDotColor};border-radius:50%;`
       : ""; // 无匹配则保持空心占位
 
-    // —— 统一：所有 bar 显示 G/D（优先取对应合并K线 hi/lo；失败兜底当前 bar H/L） —— //
+    // 统一：所有 bar 同时显示“当前所在合并K的 g/d”（若映射可得）
     let G = k.h,
       D = k.l;
     try {
+      // ★ 适配新命名：读取 g_pri 和 d_pri
       if (
         rbForIdx &&
-        Number.isFinite(rbForIdx.hi) &&
-        Number.isFinite(rbForIdx.lo)
+        Number.isFinite(rbForIdx.g_pri) &&
+        Number.isFinite(rbForIdx.d_pri)
       ) {
-        G = rbForIdx.hi;
-        D = rbForIdx.lo;
+        G = rbForIdx.g_pri;
+        D = rbForIdx.d_pri;
       }
     } catch {}
     rows.push(
@@ -688,16 +694,17 @@ export function buildMainChartOption(
       const hlSpan = new Array(n).fill(null);
       const upIndexSet = new Set();
       for (const rb of reducedBars) {
+        // ★ 适配新命名：anchor_idx_orig, g_pri, d_pri, dir_int
         const idx = Math.max(
           0,
-          Math.min(n - 1, Number(rb?.anchor_idx ?? rb?.idx_end ?? 0))
+          Math.min(n - 1, Number(rb?.anchor_idx_orig ?? rb?.end_idx_orig ?? 0))
         );
-        const hi = Number(rb?.hi),
-          lo = Number(rb?.lo);
+        const hi = Number(rb?.g_pri),
+          lo = Number(rb?.d_pri);
         if (!Number.isFinite(hi) || !Number.isFinite(lo) || hi < lo) continue;
         baseLow[idx] = lo;
         hlSpan[idx] = hi - lo;
-        if (Number(rb?.dir || 0) > 0) upIndexSet.add(idx);
+        if (Number(rb?.dir_int || 0) > 0) upIndexSet.add(idx);
       }
       // 透明底
       series.push({
@@ -1125,16 +1132,16 @@ export function buildVolumeOption(
       backgroundColor: "rgba(20,20,20,0.85)",
       textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
     },
-    xAxis: { type: "category", data: dates },
-    yAxis: {
-      // 量窗保持从 0 起（业务共识）
+  };
+
+  option.xAxis = { type: "category", data: dates };
+  option.yAxis = {
       min: 0,
       scale: true,
       // 关键：根据 isHovered 动态开关 y 轴指示器，且永不显示 label
       axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
-    },
-    series,
   };
+  option.series = series;
   if (ui?.tooltipPositioner) {
     option.tooltip.position = ui.tooltipPositioner;
   }
@@ -1242,7 +1249,7 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
             rows.push(
               `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
                 p.color
-              };"></span>${p.seriesName}: ${fmt3(val)}</div>`
+              };"></span>${p.seriesName || ""}: ${fmt3(val)}</div>`
             );
           }
         }

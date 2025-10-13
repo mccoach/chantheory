@@ -1,23 +1,24 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers.js
 // ==============================
-// 缠论覆盖图层（逐行注释）
-// - 统一“设置项”读取规则：优先取本地持久化（useUserSettings），缺失时回退 constants 中的默认预置；不再在本地写死兜底值。
-// - 涨跌标记：绑定隐藏 yAxis=1（不变量），符号宽度统一来源于中枢派生（env.symbolWidthPx），若未传则按 hostWidth/visCount 估算，仅作为几何估算而非设置项。
-// - 分型标记：绑定主价格轴 yAxisIndex=0（不变量）；样式与开关来自 FRACTAL_DEFAULTS + 本地持久化 fractalSettings。
-// - 画笔折线：绑定主价格轴 yAxisIndex=0（不变量）；样式来自 PENS_DEFAULTS + 本地持久化 chanSettings.pen；不再从 env 读取样式。
-// - 本次变动：标记高度集中归口 index.js —— 主窗涨跌用 CHAN_DEFAULTS.markerHeightPx / 分型用 FRACTAL_DEFAULTS.markerHeightPx。
+// 缠论覆盖图层（适配新命名）
+// - 涨跌标记：x=anchor_idx_orig；yAxisIndex=1；符号尺寸集中来源。
+// - 分型标记：x=k2_idx_orig；y取 k2_*；yAxisIndex=0。
+// - 画笔/线段：x=*_idx_orig；y=*_y_pri；样式取默认配置。
+//   本版：线段与笔采用“段落式 series”，不使用 null 分段，彻底避免跨断档连接。
+// - 连续性屏障（竖线）：在 gap 两侧紧邻原始 K 处绘制贯穿主窗的竖线（markLine）。
+// ==============================
 import {
   CHAN_MARKER_PRESETS, // 视觉预设集合
   CHAN_DEFAULTS, // 缺省参数（包含图形/颜色/最大数量）
   FRACTAL_DEFAULTS, // 分型默认（包含样式与间距）
   PENS_DEFAULTS, // 画笔默认方案（线宽/颜色/线型/开关）
+  SEGMENT_DEFAULTS, // 线段默认样式
+  CONTINUITY_BARRIER, // NEW: 连续性屏障全局参数
 } from "@/constants";
 
 import { useUserSettings } from "@/composables/useUserSettings";
 
-// 涨跌标记（横坐标 = anchor_idx；绑定隐藏 yAxis=1；支持外部 width 覆盖）
-// 设置项来源：useUserSettings().chanSettings（优先）→ CHAN_DEFAULTS（兜底）
-// 几何宽度来源：env.symbolWidthPx（中枢统一广播，优先）→ 按 hostWidth/visCount 估算（仅几何，不属于设置项）
+// 涨跌标记：横坐标 = anchor_idx_orig（承载点的原始索引），绑定隐藏 yAxis=1
 export function buildUpDownMarkers(reducedBars, env = {}) {
   const settings = useUserSettings();
   const chan = Object.assign(
@@ -48,10 +49,10 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
   const downPoints = []; // 承载点集合
   for (let i = 0; i < (reducedBars || []).length; i++) {
     const rb = reducedBars[i];
-    const d = Number(rb?.dir || 0);
+    const d = Number(rb?.dir_int || 0);
     if (!Number.isFinite(d) || d === 0) continue;
-    const x = Number(rb.anchor_idx ?? rb.idx_end ?? i); // 横坐标：承载点（原始K索引）
-    const point = [x, 0]; // 隐藏轴固定 y=0 —— 垂直定位锚点
+    const x = Number(rb?.anchor_idx_orig ?? rb?.end_idx_orig ?? i);
+    const point = [x, 0];
     if (d > 0) upPoints.push(point);
     else downPoints.push(point);
   }
@@ -111,10 +112,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
   };
 }
 
-// 分型标记：横坐标用 xIndex；绑定主轴 yAxisIndex=0；高度/间距按外部宽度与默认规则
-// 设置项来源：useUserSettings().fractalSettings（优先）→ FRACTAL_DEFAULTS（兜底）
-// 几何宽度来源：env.symbolWidthPx（中枢统一广播，优先）→ 按 hostWidth/visCount 估算（仅几何，不属于设置项）
-// 本次变动：高度统一使用 FRACTAL_DEFAULTS.markerHeightPx（或持久化值），不再按宽度推导高度。
+// 分型标记：横坐标用 k2_idx_orig；绑定主轴 yAxisIndex=0；高度与间距由 FRACTAL_DEFAULTS 集中决定
 export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   const settings = useUserSettings();
   const cfg = Object.assign(
@@ -138,10 +136,16 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     : Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, approxW));
 
   // 统一高度与顶/底偏移来源：仅使用 index.js 的 FRACTAL_DEFAULTS（不读持久化，不写死常量）
-  const markerH = Math.max(1, Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx)));
-  const apexGap = Math.max(0, Math.round(Number(FRACTAL_DEFAULTS.markerYOffsetPx))); // 顶点距 bar 的预设间距
-  const yOffTop = -(markerH / 2 + apexGap);     // 顶分中心向上偏移
-  const yOffBottom = +(markerH / 2 + apexGap);  // 底分中心向下偏移
+  const markerH = Math.max(
+    1,
+    Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx))
+  );
+  const apexGap = Math.max(
+    0,
+    Math.round(Number(FRACTAL_DEFAULTS.markerYOffsetPx))
+  ); // 顶点距 bar 的预设间距
+  const yOffTop = -(markerH / 2 + apexGap); // 顶分中心向上偏移
+  const yOffBottom = +(markerH / 2 + apexGap); // 底分中心向下偏移
 
   const bins = {
     top: { strong: [], standard: [], weak: [] },
@@ -149,11 +153,11 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   };
 
   for (const f of fractals || []) {
-    // 根据 showStrength 开关过滤
-    if (!cfg.showStrength?.[f.strength]) continue;
-    const x = Number(f.xIndex); // 横坐标（承载点索引）
-    if (f.type === "top") bins.top[f.strength].push({ value: [x, f.G2] });
-    else bins.bottom[f.strength].push({ value: [x, f.D2] });
+    if (!cfg.showStrength?.[f.strength_enum]) continue;
+    const x = Number(f?.k2_idx_orig);
+    if (f.kind_enum === "top")
+      bins.top[f.strength_enum].push({ value: [x, f.k2_g_pri] });
+    else bins.bottom[f.strength_enum].push({ value: [x, f.k2_d_pri] });
   }
 
   const series = []; // 分型系列集合
@@ -215,7 +219,6 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.bottomColor;
     const fillMode = st.fill || "solid";
     const isHollow = fillMode === "hollow";
-
     series.push({
       id: `FR_BOT_${sp.k}`,
       name: "BOT_STRONG".replace("STRONG", sp.k.toUpperCase()),
@@ -235,21 +238,24 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     });
   }
 
-  // 确认分型标记（比常规分型再外移 markerH + 4 px）
-  (function appendConfirmMarkers() {
-    const cs = cfg.confirmStyle || {};
-    if (!cs.enabled) return;
+  // 确认分型
+  const cs = cfg.confirmStyle || {};
+  if (cs.enabled) {
     const topConfirmData = [];
     const botConfirmData = [];
     for (const f of fractals || []) {
-      if (!f?.confirm?.paired) continue;
-      if (f.type === "top") topConfirmData.push({ value: [f.xIndex, f.G2] });
-      else botConfirmData.push({ value: [f.xIndex, f.D2] });
+      if (!f?.cf_paired_bool) continue;
+      if (f.kind_enum === "top")
+        topConfirmData.push({ value: [f.k2_idx_orig, f.k2_g_pri] });
+      else botConfirmData.push({ value: [f.k2_idx_orig, f.k2_d_pri] });
     }
-
-    // 统一额外外移量：仅用 FRACTAL_DEFAULTS.markerYOffsetPx，无硬编码常量
-    const extraGap = Math.max(0, Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx) + Number(FRACTAL_DEFAULTS.markerYOffsetPx)));
-
+    const extraGap = Math.max(
+      0,
+      Math.round(
+        Number(FRACTAL_DEFAULTS.markerHeightPx) +
+          Number(FRACTAL_DEFAULTS.markerYOffsetPx)
+      )
+    );
     if (topConfirmData.length) {
       const shape = cs.topShape || "triangle";
       const color = cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor;
@@ -295,42 +301,40 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         tooltip: { show: false },
       });
     }
-  })();
+  }
 
-  // 确认分型连线（按设定绘制）
+  // 预留：确认分型连线（保持默认关闭）、若启用仍沿用旧逻辑
   if (cfg.showConfirmLink) {
     const segs = [];
     for (const f of fractals || []) {
-      if (!f.confirm?.paired || f.confirm?.role !== "first") continue;
+      if (!f.cf_paired_bool || f.cf_role_enum !== "first") continue;
       const partner = (fractals || []).find(
         (x) =>
-          x.confirm?.paired &&
-          x.confirm?.pair_id === f.confirm.pair_id &&
-          x.confirm?.role === "second"
+          x.cf_paired_bool &&
+          x.cf_pair_id_str === f.cf_pair_id_str &&
+          x.cf_role_enum === "second"
       );
       if (!partner) continue;
-      if (f.type === "top")
-        segs.push([
-          [f.xIndex, f.G2],
-          [partner.xIndex, partner.G2],
-        ]);
+      if (f.kind_enum === "top")
+        segs.push(
+          [f.k2_idx_orig, f.k2_g_pri],
+          [partner.k2_idx_orig, partner.k2_g_pri],
+          null
+        );
       else
-        segs.push([
-          [f.xIndex, f.D2],
-          [partner.xIndex, partner.D2],
-        ]);
+        segs.push(
+          [f.k2_idx_orig, f.k2_d_pri],
+          [partner.k2_idx_orig, partner.k2_d_pri],
+          null
+        );
     }
     if (segs.length) {
-      const data = [];
-      segs.forEach((s) => {
-        data.push(s[0], s[1], null);
-      });
       series.push({
         id: "FR_CONFIRM_LINKS",
         name: "FR_CONFIRM",
         type: "line",
         yAxisIndex: 0,
-        data,
+        data: segs,
         connectNulls: false,
         showSymbol: false,
         lineStyle: {
@@ -340,6 +344,7 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         },
         z: 4,
         tooltip: { show: false },
+        emphasis: { disabled: true },
       });
     }
   }
@@ -347,13 +352,9 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   return { series };
 }
 
-// ==============================
-// 画笔折线 —— buildPenLines
-// - 输入 pens（computePens 的输出），生成���条系列：confirmed 与 provisional。
-// - 横轴为“原始K索引”，纵轴为分型极值（G2/D2），绑定主轴 yAxisIndex=0。
-// 设置项来源：useUserSettings().chanSettings.pen（优先）→ PENS_DEFAULTS（兜底）
-// ==============================
-export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env = {}) {
+// 画笔折线（每段 series）
+// 不跨断档与屏障：通过 barrierIdxList 将笔在断点处分段，每段独立 line 系列。
+export function buildPenLines(pensObj, env = {}) {
   const settings = useUserSettings();
   const penCfg = Object.assign(
     {},
@@ -368,8 +369,7 @@ export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env =
   const confirmed = Array.isArray(pens.confirmed) ? pens.confirmed : [];
   const provisional = pens.provisional ? [pens.provisional] : [];
 
-  const baseColor = penCfg.color; // 颜色来自本地持久化 → PENS_DEFAULTS
-  const dashedColor = penCfg.color; // 预备线与确认线同色，靠线型区分
+  const baseColor = penCfg.color;
   const lineW = Number.isFinite(+penCfg.lineWidth)
     ? +penCfg.lineWidth
     : PENS_DEFAULTS.lineWidth;
@@ -380,67 +380,203 @@ export function buildPenLines(pensObj /* 不再从 env 读取样式项 */, env =
     penCfg.provisionalStyle || PENS_DEFAULTS.provisionalStyle
   );
 
-  function toLineData(arr) {
-    const data = [];
-    for (const p of arr) {
-      // 修复点：横坐标改用“原始K索引”，与主图 dates 类目轴一致
-      const x1 = Number(p.startOrigIdx);
-      const y1 = Number(p.startY);
-      const x2 = Number(p.endOrigIdx);
-      const y2 = Number(p.endY);
-      if (
-        Number.isFinite(x1) &&
-        Number.isFinite(y1) &&
-        Number.isFinite(x2) &&
-        Number.isFinite(y2)
-      ) {
-        data.push([x1, y1]);
-        data.push([x2, y2]);
-        data.push(null); // 断段
+  const barrierIdxSet = new Set(
+    Array.isArray(env.barrierIdxList) ? env.barrierIdxList.map((x) => +x) : []
+  );
+
+  // 将笔采样为若干段（每段为单独 series）
+  function samplePenToChunks(p) {
+      const x1 = Number(p.start_idx_orig);
+      const y1 = Number(p.start_y_pri);
+      const x2 = Number(p.end_idx_orig);
+      const y2 = Number(p.end_y_pri);
+    if (![x1, y1, x2, y2].every((v) => Number.isFinite(v))) return [];
+
+    const xa = Math.min(x1, x2);
+    const xb = Math.max(x1, x2);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const slope = dx !== 0 ? dy / dx : 0;
+
+    const chunks = [];
+    let curr = [];
+
+    // 保证加入起点
+    for (let xi = xa; xi <= xb; xi++) {
+      // 屏障处分段（不包含屏障点）
+      if (barrierIdxSet.has(xi)) {
+        if (curr.length >= 2) {
+          chunks.push(curr);
+        }
+        curr = [];
+        continue;
       }
+      const t = xi - x1; // 相对原“起点”的位移（保持端点 y 精确重合）
+      const yi = y1 + slope * t;
+      curr.push([xi, yi]);
     }
-    return data;
+    if (curr.length >= 2) {
+      chunks.push(curr);
+    }
+    return chunks;
   }
 
-  const confirmedData = toLineData(confirmed);
-  const provisionalData = toLineData(provisional);
-
   const series = [];
-  if (confirmedData.length) {
+  let seqCounter = 0;
+
+  for (const p of confirmed) {
+    const chunks = samplePenToChunks(p);
+    for (let k = 0; k < chunks.length; k++) {
+      const data = chunks[k];
     series.push({
-      id: "CHAN_PENS_CONFIRMED",
+        id: `CHAN_PEN_CONF_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
       name: "CHAN_PENS_CONFIRMED",
       type: "line",
       yAxisIndex: 0,
-      data: confirmedData,
+        data,
       showSymbol: false,
       smooth: false,
       lineStyle: { color: baseColor, width: lineW, type: confirmedStyle },
-      itemStyle: { color: baseColor },
-      color: baseColor,
       z: 4,
-      connectNulls: false,
+      connectNulls: false, // 片段间断开，便于裁切后“只显示可见部分”
       tooltip: { show: false },
       emphasis: { disabled: true },
     });
   }
-  if (provisionalData.length) {
+  }
+
+  for (const p of provisional) {
+    const chunks = samplePenToChunks(p);
+    for (let k = 0; k < chunks.length; k++) {
+      const data = chunks[k];
     series.push({
-      id: "CHAN_PENS_PROVISIONAL",
+        id: `CHAN_PEN_PROV_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
       name: "CHAN_PENS_PROVISIONAL",
       type: "line",
       yAxisIndex: 0,
-      data: provisionalData,
+        data,
       showSymbol: false,
       smooth: false,
-      lineStyle: { color: dashedColor, width: lineW, type: provisionalStyle },
-      itemStyle: { color: dashedColor },
-      color: dashedColor,
+      lineStyle: { color: baseColor, width: lineW, type: provisionalStyle },
       z: 3,
       connectNulls: false,
       tooltip: { show: false },
       emphasis: { disabled: true },
     });
   }
+  }
+
   return { series };
+}
+
+// 元线段（每段 series）
+// 不跨断档：每个 segment 独立 series，不使用 null。
+export function buildSegmentLines(segments, env = {}) {
+  if (!Array.isArray(segments) || !segments.length) {
+    return { series: [] };
+  }
+
+  const barrierIdxSet = new Set(
+    Array.isArray(env.barrierIdxList) ? env.barrierIdxList.map((x) => +x) : []
+  );
+
+  function sampleSegmentToChunks(s) {
+    const xStart = Number(s.start_idx_orig);
+    const yStart = Number(s.start_y_pri);
+    const xEnd = Number(s.end_idx_orig);
+    const yEnd = Number(s.end_y_pri);
+    if (![xStart, yStart, xEnd, yEnd].every((v) => Number.isFinite(v)))
+      return [];
+
+    const x0 = Math.min(xStart, xEnd);
+    const x1 = Math.max(xStart, xEnd);
+
+    // 按原端点计算斜率（兼容 xStart>xEnd 的情况）
+    const dx = xEnd - xStart;
+    const dy = yEnd - yStart;
+    const slope = dx !== 0 ? dy / dx : 0;
+
+    const chunks = [];
+    let curr = [];
+    for (let xi = x0; xi <= x1; xi++) {
+      if (barrierIdxSet.has(xi)) {
+        if (curr.length >= 2) chunks.push(curr);
+        curr = [];
+        continue;
+      }
+      const t = xi - xStart;
+      const yi = yStart + slope * t;
+      curr.push([xi, yi]);
+    }
+    if (curr.length >= 2) chunks.push(curr);
+    return chunks;
+  }
+
+  const out = [];
+  let seqCounter = 0;
+  for (const s of segments) {
+    const chunks = sampleSegmentToChunks(s);
+    for (let k = 0; k < chunks.length; k++) {
+      const data = chunks[k];
+      out.push({
+        id: `CHAN_SEG_${s.start_idx_orig}_${s.end_idx_orig}_${k}_${seqCounter++}`,
+    name: "CHAN_SEGMENTS",
+    type: "line",
+    yAxisIndex: 0,
+    data,
+    showSymbol: false,
+    smooth: false,
+    lineStyle: {
+      color: SEGMENT_DEFAULTS.color,
+      width: Number.isFinite(+SEGMENT_DEFAULTS.lineWidth)
+        ? +SEGMENT_DEFAULTS.lineWidth
+        : 3,
+      type: SEGMENT_DEFAULTS.lineStyle || "solid",
+    },
+    z: 6, // 略高于笔与分型确认线，便于观察
+    connectNulls: false, // 断档处不连线（稳定不显示）
+    tooltip: { show: false },
+    emphasis: { disabled: true },
+      });
+    }
+  }
+  return { series: out };
+}
+
+/**
+ * 连续性屏障竖线（贯穿主窗顶底）
+ * - barrierIdxList: number[]（原始 K 的索引列表）
+ * - 用空数据的 line 系列承载 markLine，silent & symbol none，随 dataZoom 同步
+ */
+export function buildBarrierLines(barrierIdxList) {
+  const idxs = Array.isArray(barrierIdxList) ? barrierIdxList : [];
+  if (!CONTINUITY_BARRIER?.enabled || !idxs.length) return { series: [] };
+  const lines = idxs
+    .filter((i) => Number.isFinite(+i) && +i >= 0)
+    .map((i) => ({ xAxis: +i }));
+
+  if (!lines.length) return { series: [] };
+
+  const series = {
+    id: "CHAN_BARRIERS",
+    name: "CHAN_BARRIERS",
+    type: "line",
+    yAxisIndex: 0,
+    data: [],
+    markLine: {
+      symbol: "none",
+      silent: true,
+      label: { show: false },
+      lineStyle: {
+        color: CONTINUITY_BARRIER.lineColor,
+        width: Number(CONTINUITY_BARRIER.lineWidth || 1.2),
+        type: CONTINUITY_BARRIER.lineStyle || "solid",
+      },
+      data: lines,
+    },
+    z: 8,
+    tooltip: { show: false },
+    emphasis: { disabled: true },
+  };
+  return { series: [series] };
 }
