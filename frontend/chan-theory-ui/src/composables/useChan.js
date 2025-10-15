@@ -981,9 +981,12 @@ export function computePenPivots(pensConfirmed) {
         continue; // 零厚度不成立
       }
 
-      // P1“外部性”：严格不等（不允许等于）
+      // P1“外部性”修改：必须在 P2-P4 的整体包络范围以外（严格不等）
+      // 整体包络：envMin = min(P2.low, P4.low)，envMax = max(P2.high, P4.high)
       const p1Start = Number(P1.start_y_pri);
-      if (!Number.isFinite(p1Start) || !(p1Start < lower || p1Start > upper)) {
+      const envMax = Math.max(penHigh(P2), penHigh(P4));
+      const envMin = Math.min(penLow(P2), penLow(P4));
+      if (!Number.isFinite(p1Start) || !(p1Start > envMax || p1Start < envMin)) {
         i += 1;
         continue;
       }
@@ -1032,8 +1035,8 @@ export function computePenPivots(pensConfirmed) {
 
       // 下一次扫描从“完全在外”的那一笔（或末尾）作为新的 P1
       if (endedByOutside) {
-        // i 跳到 j（该笔作为新的 P1）
-        i = j;
+        // i 跳到 j - 1（该笔作为新的 P1）
+        i = Math.max(0, j - 1);
       } else {
         // 已到岛末尾
         break;
