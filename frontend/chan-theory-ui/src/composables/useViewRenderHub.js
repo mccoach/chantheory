@@ -4,6 +4,8 @@
 // - 责任：一次性计算并发布所有窗体所需的渲染参数（统一离散范围 sIdx/eIdx、markerWidthPx、主窗/量窗 option）。
 // - 下游：主窗/量窗/技术窗一次订阅一次渲染（不再分散监听 meta/事件、不再使用 zoomSync    chan:marker-size）。
 // - 触发：hub.onChange（两帧合并后的最终态）与 vm 数据落地（candles/indicators/meta）。
+// 说明：交互会话源保护（仅匹配同源的 endInteraction 才结束会话）
+// 原顺序不变；仅在 beginInteraction/endInteraction 内增加“源匹配”逻辑。
 // ==============================
 
 import { ref, watch } from "vue";
@@ -14,7 +16,7 @@ import {
   buildVolumeOption,
   buildMacdOption,
   buildKdjOrRsiOption,
-  createFixedTooltipPositioner,        // MOD: 引入固定定位器
+  createFixedTooltipPositioner, // MOD: 引入固定定位器
 } from "@/charts/options";
 
 let _singleton = null;
@@ -46,7 +48,9 @@ export function useViewRenderHub() {
       const m = String(e?.detail?.mode || "").toLowerCase();
       tipMode.value = m === "follow" ? "follow" : "fixed";
       // 可选：立即推送一次快照，促使各窗重绘（避免等待下一次中枢状态变化）
-      try { _computeAndPublish(); } catch {}
+      try {
+        _computeAndPublish();
+      } catch {}
     });
   } catch {}
 
@@ -63,12 +67,16 @@ export function useViewRenderHub() {
   let _interactionSource = null;
 
   function beginInteraction(source) {
-    // 交互开始：各窗 dataZoom 会话内调用
-    _interacting.value = true;
-    _interactionSource = source || _interactionSource;
+    // NEW: 若已处于交互中，不覆盖源；仅在开启交互时记录源
+    if (!_interacting.value) {
+      _interacting.value = true;
+      _interactionSource = source || null;
+    }
   }
   function endInteraction(source) {
-    // 交互结束：idle-commit 后调用
+    // NEW: 仅当来源匹配当前交互源时才结束交互；否则忽略
+    if (!_interacting.value) return;
+    if (source && _interactionSource && source !== _interactionSource) return;
     _interacting.value = false;
     _interactionSource = null;
   }
@@ -92,7 +100,7 @@ export function useViewRenderHub() {
   // NEW: 图表实例注册与“激活窗体”管理
   // 用途：键盘动作/程序化驱动应作用于当前激活窗体的 chart 实例
   // ==============================
-  const _charts = new Map();           // panelKey -> chartInstance
+  const _charts = new Map(); // panelKey -> chartInstance
   const _activePanelKey = ref("main"); // 默认主窗激活
 
   function registerChart(panelKey, chartInstance) {
@@ -119,12 +127,16 @@ export function useViewRenderHub() {
   function getChart(panelKey) {
     try {
       return _charts.get(String(panelKey)) || null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
   function getActiveChart() {
     try {
       return _charts.get(String(_activePanelKey.value)) || null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -139,7 +151,8 @@ export function useViewRenderHub() {
       if (!dz.length) return null;
       const z = dz.find(
         (x) =>
-          typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
+          typeof x.startValue !== "undefined" &&
+          typeof x.endValue !== "undefined"
       );
       const len = (_vmRef.vm?.candles?.value || []).length;
       if (z && len > 0) {
@@ -181,13 +194,18 @@ export function useViewRenderHub() {
       try {
         const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
         if (Number.isFinite(lastTs)) {
-          const found = tsArr.findIndex((t) => Number.isFinite(t) && t === lastTs);
+          const found = tsArr.findIndex(
+            (t) => Number.isFinite(t) && t === lastTs
+          );
           if (found >= 0) startIdx = found;
         }
       } catch {}
       if (startIdx < 0) startIdx = eIdxNow;
 
-      let nextIdx = Math.max(0, Math.min(len - 1, startIdx + (dir < 0 ? -1 : +1)));
+      let nextIdx = Math.max(
+        0,
+        Math.min(len - 1, startIdx + (dir < 0 ? -1 : +1))
+      );
       const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
 
       // 视界内：仅移动十字线
@@ -423,18 +441,67 @@ export function useViewRenderHub() {
 
     const K = String(kind || "").toUpperCase();
     if (K === "MACD") {
-      return buildMacdOption({ candles: base.candles, indicators: base.indicators, freq: base.freq }, ui);
+      return buildMacdOption(
+        { candles: base.candles, indicators: base.indicators, freq: base.freq },
+        ui
+      );
     }
     if (K === "KDJ") {
-      return buildKdjOrRsiOption({ candles: base.candles, indicators: base.indicators, freq: base.freq, useKDJ: true, useRSI: false }, ui);
+      return buildKdjOrRsiOption(
+        {
+          candles: base.candles,
+          indicators: base.indicators,
+          freq: base.freq,
+          useKDJ: true,
+          useRSI: false,
+        },
+        ui
+      );
     }
     if (K === "RSI") {
-      return buildKdjOrRsiOption({ candles: base.candles, indicators: base.indicators, freq: base.freq, useKDJ: false, useRSI: true }, ui);
+      return buildKdjOrRsiOption(
+        {
+          candles: base.candles,
+          indicators: base.indicators,
+          freq: base.freq,
+          useKDJ: false,
+          useRSI: true,
+        },
+        ui
+      );
     }
+    // NEW: BOLL 专用构造（不再错误走 RSI）
     if (K === "BOLL") {
-      return buildKdjOrRsiOption({ candles: base.candles, indicators: base.indicators, freq: base.freq, useKDJ: false, useRSI: true }, ui);
+      return buildBollOption(
+        { candles: base.candles, indicators: base.indicators, freq: base.freq },
+        ui
+      );
     }
-    return buildMacdOption({ candles: base.candles, indicators: base.indicators, freq: base.freq }, ui);
+    // NEW: 成交量/成交额立即构造量窗（不走默认 MACD）
+    if (K === "VOL" || K === "AMOUNT") {
+      const volCfg = {
+        ...(settings.volSettings.value || {}),
+        mode: K === "AMOUNT" ? "amount" : "vol",
+      };
+      return buildVolumeOption(
+        {
+          candles: base.candles,
+          indicators: base.indicators,
+          freq: base.freq,
+          volCfg,
+          volEnv: {
+            hostWidth: 0,
+            visCount: Math.max(1, _lastSnapshot.value?.core?.barsCount || 1),
+            overrideMarkWidth: _lastSnapshot.value?.core?.markerWidthPx,
+          },
+        },
+        ui
+      );
+    }
+    return buildMacdOption(
+      { candles: base.candles, indicators: base.indicators, freq: base.freq },
+      ui
+    );
   }
 
   // 新增：暴露统一源头的 tooltip 位置获取（供主窗订阅使用）

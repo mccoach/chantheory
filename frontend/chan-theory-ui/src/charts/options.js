@@ -138,6 +138,9 @@ function makeAxisLabelFormatter(freq) {
  * 量/额的单位选择器（亿/万/无）
  */
 function pickUnitDivider(maxAbs, isAmount) {
+  // NEW: 增加“万亿”层级（用于金额超大时缩短标签宽度）
+  if (isAmount && maxAbs >= 1e12)
+    return { div: 1e12, lab: "万亿" + (isAmount ? "元" : "") };
   if (maxAbs >= 1e8) return { div: 1e8, lab: "亿" + (isAmount ? "元" : "") };
   if (maxAbs >= 1e4) return { div: 1e4, lab: "万" + (isAmount ? "元" : "") };
   return { div: 1, lab: isAmount ? "元" : "" };
@@ -186,7 +189,7 @@ function applyUi(option, ui, { dates, freq }) {
   const theme = getChartTheme();
 
   // 读取 UI 覆盖或使用默认
-  const leftPx = ui?.leftPx ?? LAYOUT.LEFT_MARGIN_PX;
+  const leftPx = ui?.leftPx ?? LAYOUT.LEFT_MARGIN_PX; // 统一固定左侧标签/轴留白（各窗传同一值）
   const rightPx = ui?.rightPx ?? LAYOUT.RIGHT_MARGIN_PX;
   const isMain = !!ui?.isMain;
   const gridTop = 0; // 顶部紧贴（顶栏占用画布内 28px）
@@ -250,21 +253,22 @@ function applyUi(option, ui, { dates, freq }) {
     Object.assign({}, y || {}, {
       scale: y?.scale !== undefined ? y.scale : true, // 默认启用 scale
       axisLabel: Object.assign({}, y?.axisLabel || {}, {
-      color: theme.axisLabelColor,
+        color: theme.axisLabelColor,
         margin: (y?.axisLabel && y.axisLabel.margin) || 6,
-    }),
+        align: "right", // NEW: 左侧数值右对齐，便于垂直视觉对齐
+      }),
       axisLine: Object.assign({}, y?.axisLine || {}, {
-      lineStyle: Object.assign(
-        { color: theme.axisLineColor },
+        lineStyle: Object.assign(
+          { color: theme.axisLineColor },
           y?.axisLine?.lineStyle || {}
-      ),
-    }),
+        ),
+      }),
       splitLine: Object.assign({}, y?.splitLine || {}, {
-      lineStyle: Object.assign(
-        { color: theme.gridLineColor },
+        lineStyle: Object.assign(
+          { color: theme.gridLineColor },
           y?.splitLine?.lineStyle || {}
-      ),
-    }),
+        ),
+      }),
     })
   );
 
@@ -612,7 +616,6 @@ export function buildMainChartOption(
   },
   ui
 ) {
-
   // 主题
   const theme = getChartTheme();
   // 蜡烛数组与指标
@@ -878,6 +881,7 @@ export function buildMainChartOption(
     {
       ...ui,
       isMain: true, // 主窗
+      leftPx: 72, // NEW: 固定左侧标签宽度（各窗统一）
     },
     { dates, freq }
   );
@@ -1136,10 +1140,25 @@ export function buildVolumeOption(
 
   option.xAxis = { type: "category", data: dates };
   option.yAxis = {
-      min: 0,
-      scale: true,
-      // 关键：根据 isHovered 动态开关 y 轴指示器，且永不显示 label
-      axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
+    min: 0,
+    scale: true,
+      // NEW: 左轴标签统一显示压缩单位（万/亿/万亿），缩短宽度但保留单位信息
+    axisLabel: {
+      color: theme.axisLabelColor,
+      align: "right",
+      formatter: (val) => {
+        const n = Number(val);
+        if (!Number.isFinite(n)) return "";
+        const div = unitInfo?.div || 1;
+        const x = n / div;
+        const digits = Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2;
+          const lab = unitInfo?.lab || ""; // 例：'万'/'亿'/'万亿' + '元'
+          return `${x.toFixed(digits)}${lab}`;
+      },
+      margin: ui?.isHovered ? 6 : 6,
+    },
+    // 关键：根据 isHovered 动态开关 y 轴指示器，且永不显示 label
+    axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
   };
   option.series = series;
   if (ui?.tooltipPositioner) {
@@ -1154,6 +1173,7 @@ export function buildVolumeOption(
       isMain: false, // 量窗
       extraBottomPx, // 底部额外空间（腾给标记）
       xAxisLabelMargin, // 横轴标签 margin（略为增大）
+      leftPx: 72, // NEW: 固定左侧标签宽度（与主窗一致）
     },
     { dates, freq }
   );
@@ -1265,6 +1285,11 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   option.xAxis = { type: "category", data: dates };
   option.yAxis = {
     scale: true,
+    axisLabel: {
+      color: theme.axisLabelColor,
+      align: "right",
+      margin: ui?.isHovered ? 6 : 6,
+    },
     axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
   }; // MOD: 同理
   option.series = series;
@@ -1278,6 +1303,113 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
     {
       ...ui,
       isMain: false, // 技术窗
+      leftPx: 72, // NEW: 固定左侧标签宽度（与主窗一致）
+    },
+    { dates, freq }
+  );
+}
+
+/* =============================
+ * BOLL 窗 option 生成 —— NEW
+ * ============================= */
+export function buildBollOption({ candles, indicators, freq }, ui) {
+  const theme = getChartTheme();
+  const list = asArray(candles);
+  const inds = asIndicators(indicators);
+  const dates = list.map((d) => d.t);
+  const series = [];
+
+  if (inds.BOLL_MID && inds.BOLL_UPPER && inds.BOLL_LOWER) {
+    // 中轨
+    series.push({
+      id: "BOLL_MID",
+      type: "line",
+      name: "BOLL_MID",
+      data: inds.BOLL_MID,
+      showSymbol: false,
+      lineStyle: { color: STYLE_PALETTE.lines[0].color, width: 1 },
+      itemStyle: { color: STYLE_PALETTE.lines[0].color },
+      color: STYLE_PALETTE.lines[0].color,
+    });
+    // 上轨
+    series.push({
+      id: "BOLL_UPPER",
+      type: "line",
+      name: "BOLL_UPPER",
+      data: inds.BOLL_UPPER,
+      showSymbol: false,
+      lineStyle: { color: STYLE_PALETTE.lines[2].color, width: 1 },
+      itemStyle: { color: STYLE_PALETTE.lines[2].color },
+      color: STYLE_PALETTE.lines[2].color,
+    });
+    // 下轨
+    series.push({
+      id: "BOLL_LOWER",
+      type: "line",
+      name: "BOLL_LOWER",
+      data: inds.BOLL_LOWER,
+      showSymbol: false,
+      lineStyle: { color: STYLE_PALETTE.lines[3].color, width: 1 },
+      itemStyle: { color: STYLE_PALETTE.lines[3].color },
+      color: STYLE_PALETTE.lines[3].color,
+    });
+  }
+
+  const option = {
+    animation: false,
+    backgroundColor: theme.backgroundColor,
+    axisPointer: { link: [{ xAxisIndex: "all" }] },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "cross" },
+      appendToBody: false,
+      confine: true,
+      formatter: (params) => {
+        if (!Array.isArray(params) || !params.length) return "";
+        const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
+        const timeLabel = fmtTimeByFreq(freq, rawLabel);
+        const rows = [`<div style="margin-bottom:4px;">${timeLabel}</div>`];
+        for (const p of params) {
+          const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+          rows.push(
+            `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
+              p.color
+            };"></span>${p.seriesName || ""}: ${fmt3(val)}</div>`
+          );
+        }
+        return rows.join("");
+      },
+      className: "ct-fixed-tooltip",
+      borderWidth: 0,
+      backgroundColor: "rgba(20,20,20,0.85)",
+      textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
+    },
+  };
+
+  option.xAxis = { type: "category", data: dates };
+  option.yAxis = {
+    scale: true,
+    axisLabel: {
+      color: theme.axisLabelColor,
+      align: "right",
+      margin: ui?.isHovered ? 6 : 6,
+    },
+    axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
+  };
+
+  option.series = series;
+
+  if (ui?.tooltipPositioner) {
+    option.tooltip.position = ui.tooltipPositioner;
+  }
+
+  // 应用通用 UI（左侧标签宽度统一）
+  return applyUi(
+    option,
+    {
+      ...ui,
+      isMain: false,
+      leftPx: 72, // 固定左侧标签宽度（与主窗一致）
     },
     { dates, freq }
   );
@@ -1392,6 +1524,11 @@ export function buildKdjOrRsiOption(
   option.xAxis = { type: "category", data: dates };
   option.yAxis = {
     scale: true,
+    axisLabel: {
+      color: theme.axisLabelColor,
+      align: "right",
+      margin: ui?.isHovered ? 6 : 6,
+    },
     axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
   }; // MOD: 同理
   option.series = series;
@@ -1408,6 +1545,7 @@ export function buildKdjOrRsiOption(
       // 完全由 DEFAULT_VOL_MARKER_SIZE 决定的避让量与底部空白
       extraBottomPx,
       xAxisLabelMargin,
+      leftPx: 72, // NEW: 固定左侧标签宽度（与主窗一致）
     },
     { dates, freq }
   );

@@ -1,8 +1,12 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\IndicatorPanel.vue -->
 <!-- ============================== -->
-<!-- 指标窗（接入统一渲染中枢 · 移除 zoomSync 与 meta watcher）
-     - 订阅 useViewRenderHub.onRender(snapshot) 后，调用 renderHub.getIndicatorOption(kind) 构建 option 并一次性 setOption。
-     - 不作为交互源；onDataZoom inside-only 并早退。
+<!-- 合并版 IndicatorPanel：既可渲染 成交量/成交额，也可渲染 MACD/KDJ/RSI/BOLL/OFF
+     - 统一右上角关闭按钮（沿用原指标窗）
+     - 统一左上角下拉选择（在指标项之前插入 成交量、成交额）
+     - 右侧边悬浮拖动把手（仅悬停显示，拖动可排序；向父级发出 dragstart/dragend）
+     - 双击打开设置窗：VOL/AMOUNT → 原量窗设置；其余指标 → 原指标占位设置
+     - 统一顶栏标题：标的名称/代码/频率/来源/复权（参照主窗）
+     - 保持与 ECharts 组联动（ct-sync）、横轴竖线对齐、dataZoom 交互会后承接
 -->
 <template>
   <div
@@ -17,8 +21,10 @@
         class="sel-kind"
         v-model="kindLocal"
         @change="onKindChange"
-        title="选择指标"
+        title="选择副窗内容"
       >
+        <option value="VOL">成交量</option>
+        <option value="AMOUNT">成交额</option>
         <option value="MACD">MACD</option>
         <option value="KDJ">KDJ</option>
         <option value="RSI">RSI</option>
@@ -65,7 +71,21 @@
         </svg>
       </button>
     </div>
+
     <div ref="host" class="canvas-host"></div>
+
+    <!-- 右侧悬浮拖动把手（仅悬停显示） -->
+    <div
+      class="drag-handle"
+      draggable="true"
+      title="拖动以调整顺序"
+      @dragstart="onDragHandleStart"
+      @dragend="onDragHandleEnd"
+    >
+      <div class="grip"></div>
+    </div>
+
+    <!-- 底部高度拖拽条 -->
     <div
       class="bottom-strip"
       title="上下拖拽调整窗体高度"
@@ -85,14 +105,24 @@ import {
   computed,
   defineComponent,
   h,
+  reactive,
 } from "vue";
 import * as echarts from "echarts";
-// NEW: 统一渲染中枢
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
+import { buildVolumeOption } from "@/charts/options";
+import { DEFAULT_VOL_SETTINGS } from "@/constants";
 
+// props / emits
+const props = defineProps({
+  id: { type: [String, Number], required: true },
+  kind: { type: String, default: "MACD" },
+});
+const emit = defineEmits(["update:kind", "close", "dragstart", "dragend"]);
+
+// 注入
 const vm = inject("marketView");
 const hub = useViewCommandHub();
 const renderHub = useViewRenderHub();
@@ -100,38 +130,27 @@ const settings = useUserSettings();
 const { findBySymbol } = useSymbolIndex();
 const dialogManager = inject("dialogManager");
 
-// —— UI 序号守护（保持原逻辑） —— //
+// 渲染序号守护
 let renderSeq = 0;
 function isStale(seq) {
   return seq !== renderSeq;
 }
 
-// —— hover 跨窗体广播（保持原逻辑） —— //
-function broadcastHoverIndex(idx) {
-  try {
-    window.dispatchEvent(
-      new CustomEvent("chan:hover-index", { detail: { idx: Number(idx) } })
-    );
-  } catch {}
-}
-
-const props = defineProps({ kind: { type: String, default: "MACD" } });
-const emit = defineEmits(["update:kind", "close"]);
-
+// DOM / 实例
 const wrap = ref(null);
 const host = ref(null);
 let chart = null;
-let ro = null; // 已存在的 ResizeObserver 句柄（之前未使用）
+let ro = null;
 
-// NEW: 上报悬浮状态
+// 悬浮状态上报（合并后副窗统一使用 indicator key）
 function onMouseEnter() {
-  renderHub.setHoveredPanel("indicator"); // 简化：所有指标窗共享一个 key
+  renderHub.setHoveredPanel("indicator");
 }
 function onMouseLeave() {
   renderHub.setHoveredPanel(null);
 }
 
-// NEW: 指标窗缺少自适应，此处补充与量窗一致的安全 resize 实现
+// 尺寸安全 resize
 function safeResize() {
   if (!chart || !host.value) return;
   const seq = renderSeq;
@@ -146,20 +165,42 @@ function safeResize() {
   });
 }
 
-const kindLocal = ref(props.kind);
+// 选择种类
+const kindLocal = ref(props.kind.toUpperCase());
 watch(
   () => props.kind,
   (v) => {
-    kindLocal.value = v;
+    kindLocal.value = String(v || "MACD").toUpperCase();
   }
 );
+function onKindChange() {
+  emit("update:kind", kindLocal.value);
+  // NEW: 选完立即重绘当前副窗（不等待快照）
+  try {
+    const opt = renderHub.getIndicatorOption(kindLocal.value);
+    if (opt && chart) {
+      chart.setOption(opt, { notMerge: true, silent: true });
+    }
+  } catch (e) {
+    console.warn("indicator immediate refresh failed:", e);
+  }
+}
 
+// 顶栏标题（参照主窗：名称/代码/频率/来源/复权）
 const displayHeader = ref({ name: "", code: "", freq: "" });
 const displayTitle = computed(() => {
   const n = displayHeader.value.name || "",
     c = displayHeader.value.code || vm.code.value || "",
     f = displayHeader.value.freq || vm.freq.value || "";
-  return n ? `${n}（${c}）：${f}` : `${c}：${f}`;
+  const src = (vm.meta.value?.source || "").trim(),
+    srcLabel = src ? `（${src}）` : "";
+  const adjText =
+    { none: "", qfq: " 前复权", hfq: " 后复权" }[
+      String(vm.adjust.value || "none")
+    ] || "";
+  return n
+    ? `${n}（${c}）：${f}${srcLabel}${adjText}`
+    : `${c}：${f}${srcLabel}${adjText}`;
 });
 function updateHeaderFromCurrent() {
   const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
@@ -171,44 +212,639 @@ function updateHeaderFromCurrent() {
   displayHeader.value = { name, code: sym, freq: frq };
 }
 
+// 设置窗：两套逻辑（VOL/AMOUNT 使用量窗设置；指标类占位说明）
 function openSettingsDialog() {
-  const IndicatorSettingsContent = defineComponent({
-    setup() {
-      return () =>
-        h(
-          "div",
-          { class: "settings-hint" },
-          "当前指标窗暂无更多设置项，后续版本将开放参数配置。"
-        );
+  const K = String(kindLocal.value || "").toUpperCase();
+  if (K === "VOL" || K === "AMOUNT") {
+    openVolSettingsDialog();
+  } else {
+    const IndicatorSettingsContent = defineComponent({
+      setup() {
+        return () =>
+          h(
+            "div",
+            { class: "settings-hint" },
+            "当前指标窗暂无更多设置项，后续版本将开放参数配置。"
+          );
+      },
+    });
+    dialogManager.open({
+      title: `${K} 指标设置`,
+      contentComponent: IndicatorSettingsContent,
+      onSave: () => {
+        hub.execute("Refresh", {});
+        dialogManager.close();
+      },
+      onClose: () => dialogManager.close(),
+    });
+  }
+}
+
+// —— 量窗设置（复用原 VolumePanel 的设置 UI，移除顶部“量/额模式”切换，模式由下拉 VOL/AMOUNT 控制，不写回 settings.mode） —— //
+const settingsDraftVol = reactive({
+  volBar: { ...DEFAULT_VOL_SETTINGS.volBar },
+  mavolForm: {
+    MAVOL5: {
+      enabled: true,
+      period: 5,
+      width: 1,
+      style: "solid",
+      color: "#ee6666",
     },
+    MAVOL10: {
+      enabled: true,
+      period: 10,
+      width: 1,
+      style: "solid",
+      color: "#fac858",
+    },
+    MAVOL20: {
+      enabled: true,
+      period: 20,
+      width: 1,
+      style: "solid",
+      color: "#5470c6",
+    },
+  },
+  markerPump: { ...DEFAULT_VOL_SETTINGS.markerPump },
+  markerDump: { ...DEFAULT_VOL_SETTINGS.markerDump },
+});
+const draftRev = ref(0);
+const resetAllTickVol = ref(0);
+
+const VolumeSettingsContent = defineComponent({
+  setup() {
+    const hName = (t) => h("div", { class: "std-name" }, t);
+    const hItem = (label, input) =>
+      h("div", { class: "std-item" }, [
+        h("div", { class: "std-item-label" }, label),
+        h("div", { class: "std-item-input" }, [input]),
+      ]);
+    const hCheck = (checked, onChange) =>
+      h("div", { class: "std-check" }, [
+        h("input", { type: "checkbox", checked, onChange }),
+      ]);
+    const hReset = (onClick) =>
+      h("div", { class: "std-reset" }, [
+        h("button", {
+          class: "btn icon",
+          title: "恢复默认",
+          onClick,
+          type: "button",
+        }),
+      ]);
+
+    // === 新增 开始：均线总控（三态）与快照逻辑（完全参照原 VolumePanel.vue） ===
+    // tri-state checkbox（通过 vnode 钩子设置 indeterminate）
+    const triCheckCell = ({ checked, indeterminate, onToggle }) =>
+      h("div", { class: "std-check" }, [
+        h("input", {
+          type: "checkbox",
+          checked,
+          onChange: onToggle,
+          onVnodeMounted(vnode) {
+            try {
+              vnode.el && (vnode.el.indeterminate = !!indeterminate);
+            } catch {}
+          },
+          onVnodeUpdated(vnode) {
+            try {
+              vnode.el && (vnode.el.indeterminate = !!indeterminate);
+            } catch {}
+          },
+        }),
+      ]);
+
+    // 快照更新抑制（总控批量变更时阻止快照被覆盖）
+    const snapshotSuppressKeys = new Set();
+    function withSnapshotSuppressed(key, fn) {
+      try {
+        if (key) snapshotSuppressKeys.add(String(key));
+        if (typeof fn === "function") fn();
+      } finally {
+        if (key) snapshotSuppressKeys.delete(String(key));
+      }
+    }
+    function shouldUpdateSnapshot() {
+      return snapshotSuppressKeys.size === 0;
+    }
+
+    // 读取当前 MAVOL 组合（仅 enabled）
+    function getMavolKeys() {
+      return Object.keys(settingsDraftVol.mavolForm || {});
+    }
+    function getCurrentMavolCombination() {
+      const combo = {};
+      for (const k of getMavolKeys()) {
+        combo[k] = !!settingsDraftVol.mavolForm?.[k]?.enabled;
+      }
+      return combo;
+    }
+    const mavolLastManualSnapshot = ref(getCurrentMavolCombination());
+    const mavolGlobalCycleIndex = ref(0);
+
+    // 初始化循环指针（全部开启→首击全关）
+    function primeMavolGlobalCycle() {
+      const snap = mavolLastManualSnapshot.value || {};
+      const ks = getMavolKeys();
+      const allOnNow = ks.length > 0 && ks.every((k) => !!snap[k]);
+      mavolGlobalCycleIndex.value = allOnNow ? 1 : 0;
+    }
+    primeMavolGlobalCycle();
+
+    function isAllMavolOn(combo) {
+      const ks = getMavolKeys();
+      return ks.length > 0 && ks.every((k) => combo[k] === true);
+    }
+    function isAllMavolOff(combo) {
+      const ks = getMavolKeys();
+      return ks.length > 0 && ks.every((k) => combo[k] === false);
+    }
+    function mavolStatesForGlobalToggle() {
+      const snap = mavolLastManualSnapshot.value || {};
+      if (isAllMavolOn(snap) || isAllMavolOff(snap)) {
+        return ["allOn", "allOff"];
+      }
+      return ["allOn", "allOff", "snapshot"];
+    }
+    function applyMavolGlobalState(stateKey) {
+      const ks = getMavolKeys();
+      if (!ks.length) return;
+      if (stateKey === "allOn") {
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = true;
+        }
+        return;
+      }
+      if (stateKey === "allOff") {
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = false;
+        }
+        return;
+      }
+      if (stateKey === "snapshot") {
+        const snap = mavolLastManualSnapshot.value || {};
+        for (const k of ks) {
+          if (!settingsDraftVol.mavolForm[k])
+            settingsDraftVol.mavolForm[k] = {};
+          settingsDraftVol.mavolForm[k].enabled = !!snap[k];
+        }
+        return;
+      }
+    }
+    function mavolGlobalUi() {
+      const cur = getCurrentMavolCombination();
+      return {
+        checked: isAllMavolOn(cur),
+        indeterminate: !isAllMavolOn(cur) && !isAllMavolOff(cur),
+      };
+    }
+    function onMavolGlobalToggle() {
+      const states = mavolStatesForGlobalToggle();
+      const key = states[mavolGlobalCycleIndex.value % states.length];
+      withSnapshotSuppressed("mavol-global", () => applyMavolGlobalState(key));
+      mavolGlobalCycleIndex.value =
+        (mavolGlobalCycleIndex.value + 1) % states.length;
+    }
+    function updateMavolSnapshotFromCurrent() {
+      if (!shouldUpdateSnapshot()) return;
+      mavolLastManualSnapshot.value = getCurrentMavolCombination();
+      mavolGlobalCycleIndex.value = 0;
+    }
+
+    // “全部恢复默认”后刷新 MAVOL 快照与循环指针
+    watch(resetAllTickVol, () => {
+      try {
+        mavolLastManualSnapshot.value = getCurrentMavolCombination();
+        mavolGlobalCycleIndex.value = 0;
+      } catch {}
+    });
+
+    return () =>
+      h("div", { key: `vol-settings-root-${draftRev.value}` }, [
+        // 量额柱
+        h("div", { class: "std-row" }, [
+          hName("量额柱"),
+          hItem(
+            "柱宽%",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 10,
+              max: 100,
+              step: 1,
+              value: Number(settingsDraftVol.volBar.barPercent ?? 100),
+              onInput: (e) =>
+                (settingsDraftVol.volBar.barPercent = Math.max(
+                  10,
+                  Math.min(100, Math.round(+e.target.value || 100))
+                )),
+            })
+          ),
+          hItem(
+            "阳线颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.volBar.upColor ||
+                DEFAULT_VOL_SETTINGS.volBar.upColor,
+              onInput: (e) =>
+                (settingsDraftVol.volBar.upColor = String(
+                  e.target.value || DEFAULT_VOL_SETTINGS.volBar.upColor
+                )),
+            })
+          ),
+          hItem(
+            "阴线颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.volBar.downColor ||
+                DEFAULT_VOL_SETTINGS.volBar.downColor,
+              onInput: (e) =>
+                (settingsDraftVol.volBar.downColor = String(
+                  e.target.value || DEFAULT_VOL_SETTINGS.volBar.downColor
+                )),
+            })
+          ),
+          h("div"),
+          h("div"),
+          h("div", { class: "std-check" }),
+          hReset(() => {
+            Object.assign(settingsDraftVol.volBar, DEFAULT_VOL_SETTINGS.volBar);
+            draftRev.value++;
+          }),
+        ]),
+
+        // === 新增：均线总控（三态复选框，位于“量额柱”之后） ===
+        (() => {
+          const ui = mavolGlobalUi();
+          return h(
+            "div",
+            { class: "std-row", key: `mavol-global-${draftRev.value}` },
+            [
+              hName("均线总控"),
+              h("div"),
+              h("div"),
+              h("div"),
+              h("div"),
+              h("div"),
+              triCheckCell({
+                checked: ui.checked,
+                indeterminate: ui.indeterminate,
+                onToggle: onMavolGlobalToggle,
+              }),
+              h("div"),
+            ]
+          );
+        })(),
+
+        // MAVOL 三条线
+        ...Object.entries(settingsDraftVol.mavolForm).map(([k, conf]) =>
+          h("div", { class: "std-row", key: `mrow-${k}-${draftRev.value}` }, [
+            hName(`MAVOL${conf.period}`),
+            hItem(
+              "线宽",
+              h("input", {
+                class: "input num",
+                type: "number",
+                min: 0.5,
+                max: 4,
+                step: 0.5,
+                value: Number(conf.width ?? 1),
+                onInput: (e) =>
+                  (settingsDraftVol.mavolForm[k].width = Number(
+                    e.target.value || 1
+                  )),
+              })
+            ),
+            hItem(
+              "颜色",
+              h("input", {
+                class: "input color",
+                type: "color",
+                value:
+                  conf.color ||
+                  DEFAULT_VOL_SETTINGS.mavolStyles[k]?.color ||
+                  DEFAULT_VOL_SETTINGS.mavolStyles.MAVOL5.color,
+                onInput: (e) =>
+                  (settingsDraftVol.mavolForm[k].color = String(
+                    e.target.value
+                  )),
+              })
+            ),
+            hItem(
+              "线型",
+              h(
+                "select",
+                {
+                  class: "input",
+                  value: conf.style || "solid",
+                  onChange: (e) =>
+                    (settingsDraftVol.mavolForm[k].style = String(
+                      e.target.value
+                    )),
+                },
+                [
+                  h("option", { value: "solid" }, "实线"),
+                  h("option", { value: "dashed" }, "虚线"),
+                  h("option", { value: "dotted" }, "点线"),
+                ]
+              )
+            ),
+            hItem(
+              "周期",
+              h("input", {
+                class: "input num",
+                type: "number",
+                min: 1,
+                step: 1,
+                value: Number(conf.period ?? 5),
+                onInput: (e) =>
+                  (settingsDraftVol.mavolForm[k].period = Math.max(
+                    1,
+                    parseInt(e.target.value || 5, 10)
+                  )),
+              })
+            ),
+            h("div"),
+            // 勾选：启用 + 更新快照
+            h("div", { class: "std-check" }, [
+              h("input", {
+                type: "checkbox",
+                checked: !!conf.enabled,
+                onChange: (e) => {
+                  settingsDraftVol.mavolForm[k].enabled = !!e.target.checked;
+                  updateMavolSnapshotFromCurrent();
+                },
+              }),
+            ]),
+            hReset(() => {
+              const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
+              if (def) {
+                settingsDraftVol.mavolForm[k] = { ...def };
+                draftRev.value++;
+                // 单项重置后也刷新“均线总控”快照
+                updateMavolSnapshotFromCurrent();
+              }
+            }),
+          ])
+        ),
+        // 放量标记
+        h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
+          hName("放量标记"),
+          hItem(
+            "形状",
+            h(
+              "select",
+              {
+                class: "input",
+                value:
+                  settingsDraftVol.markerPump.shape ||
+                  DEFAULT_VOL_SETTINGS.markerPump.shape,
+                onChange: (e) =>
+                  (settingsDraftVol.markerPump.shape = String(e.target.value)),
+              },
+              [
+                h("option", "triangle"),
+                h("option", "diamond"),
+                h("option", "circle"),
+                h("option", "rect"),
+              ]
+            )
+          ),
+          hItem(
+            "颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.markerPump.color ||
+                DEFAULT_VOL_SETTINGS.markerPump.color,
+              onInput: (e) =>
+                (settingsDraftVol.markerPump.color = String(e.target.value)),
+            })
+          ),
+          hItem(
+            "阈值",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.1,
+              step: 0.1,
+              value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
+                ? +settingsDraftVol.markerPump.threshold
+                : DEFAULT_VOL_SETTINGS.markerPump.threshold,
+              onInput: (e) =>
+                (settingsDraftVol.markerPump.threshold = Math.max(
+                  0.1,
+                  Number(
+                    e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold
+                  )
+                )),
+            })
+          ),
+          h("div"),
+          h("div"),
+          hCheck(
+            !!settingsDraftVol.markerPump.enabled,
+            (e) => (settingsDraftVol.markerPump.enabled = !!e.target.checked)
+          ),
+          hReset(() => {
+            settingsDraftVol.markerPump = {
+              ...DEFAULT_VOL_SETTINGS.markerPump,
+            };
+            draftRev.value++;
+          }),
+        ]),
+        // 缩量标记
+        h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
+          hName("缩量标记"),
+          hItem(
+            "形状",
+            h(
+              "select",
+              {
+                class: "input",
+                value:
+                  settingsDraftVol.markerDump.shape ||
+                  DEFAULT_VOL_SETTINGS.markerDump.shape,
+                onChange: (e) =>
+                  (settingsDraftVol.markerDump.shape = String(e.target.value)),
+              },
+              [
+                h("option", "triangle"),
+                h("option", "diamond"),
+                h("option", "circle"),
+                h("option", "rect"),
+              ]
+            )
+          ),
+          hItem(
+            "颜色",
+            h("input", {
+              class: "input color",
+              type: "color",
+              value:
+                settingsDraftVol.markerDump.color ||
+                DEFAULT_VOL_SETTINGS.markerDump.color,
+              onInput: (e) =>
+                (settingsDraftVol.markerDump.color = String(e.target.value)),
+            })
+          ),
+          hItem(
+            "阈值",
+            h("input", {
+              class: "input num",
+              type: "number",
+              min: 0.1,
+              step: 0.1,
+              value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
+                ? +settingsDraftVol.markerDump.threshold
+                : DEFAULT_VOL_SETTINGS.markerDump.threshold,
+              onInput: (e) =>
+                (settingsDraftVol.markerDump.threshold = Math.max(
+                  0.1,
+                  Number(
+                    e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold
+                  )
+                )),
+            })
+          ),
+          h("div"),
+          h("div"),
+          hCheck(
+            !!settingsDraftVol.markerDump.enabled,
+            (e) => (settingsDraftVol.markerDump.enabled = !!e.target.checked)
+          ),
+          hReset(() => {
+            settingsDraftVol.markerDump = {
+              ...DEFAULT_VOL_SETTINGS.markerDump,
+            };
+            draftRev.value++;
+          }),
+        ]),
+      ]);
+  },
+});
+
+function openVolSettingsDialog() {
+  const vs = settings.volSettings.value || {};
+  // 量柱
+  Object.assign(settingsDraftVol.volBar, {
+    barPercent: Math.max(
+      10,
+      Math.min(
+        100,
+        Math.round(
+          +(vs?.volBar?.barPercent ?? DEFAULT_VOL_SETTINGS.volBar.barPercent)
+        )
+      )
+    ),
+    upColor: vs?.volBar?.upColor || DEFAULT_VOL_SETTINGS.volBar.upColor,
+    downColor: vs?.volBar?.downColor || DEFAULT_VOL_SETTINGS.volBar.downColor,
   });
+  // MAVOL
+  const form = {};
+  ["MAVOL5", "MAVOL10", "MAVOL20"].forEach((key) => {
+    const d = DEFAULT_VOL_SETTINGS.mavolStyles[key];
+    const v = (vs.mavolStyles && vs.mavolStyles[key]) || {};
+    form[key] = {
+      enabled: key in (vs.mavolStyles || {}) ? !!v.enabled : d.enabled,
+      width: Number.isFinite(+v.width) ? +v.width : d.width,
+      style: v.style || d.style,
+      color: v.color || d.color,
+      period: Math.max(1, parseInt(v.period != null ? v.period : d.period, 10)),
+    };
+  });
+  settingsDraftVol.mavolForm = form;
+  // 放/缩量
+  Object.assign(settingsDraftVol.markerPump, {
+    enabled: (vs?.markerPump?.enabled ?? true) === true,
+    shape: vs?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
+    color: vs?.markerPump?.color || DEFAULT_VOL_SETTINGS.markerPump.color,
+    threshold: Number.isFinite(+vs?.markerPump?.threshold)
+      ? +vs.markerPump.threshold
+      : DEFAULT_VOL_SETTINGS.markerPump.threshold,
+  });
+  Object.assign(settingsDraftVol.markerDump, {
+    enabled: (vs?.markerDump?.enabled ?? true) === true,
+    shape: vs?.markerDump?.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
+    color: vs?.markerDump?.color || DEFAULT_VOL_SETTINGS.markerDump.color,
+    threshold: Number.isFinite(+vs?.markerDump?.threshold)
+      ? +vs.markerDump.threshold
+      : DEFAULT_VOL_SETTINGS.markerDump.threshold,
+  });
+  draftRev.value++;
+
   dialogManager.open({
-    title: `${String(kindLocal.value).toUpperCase()} 指标设置`,
-    contentComponent: IndicatorSettingsContent,
+    title: "量窗设置",
+    contentComponent: VolumeSettingsContent,
+    props: {},
+    onResetAll: () => {
+      try {
+        settingsDraftVol.volBar = { ...DEFAULT_VOL_SETTINGS.volBar };
+        settingsDraftVol.mavolForm = JSON.parse(
+          JSON.stringify(DEFAULT_VOL_SETTINGS.mavolStyles)
+        );
+        settingsDraftVol.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
+        settingsDraftVol.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
+        resetAllTickVol.value++;
+        draftRev.value++;
+      } catch (e) {
+        console.error("resetAll (Volume) failed:", e);
+      }
+    },
     onSave: () => {
-      // MOD: 保存后立即触发刷新（即使当前无可编辑项，保持一致的即时重绘行为）
+      // 保存样式与标记，不改变全局 mode（由下拉 VOL/AMOUNT 控制）
+      const vs0 = settings.volSettings.value || {};
+      settings.setVolSettings({
+        ...vs0,
+        volBar: { ...settingsDraftVol.volBar },
+        mavolStyles: { ...settingsDraftVol.mavolForm },
+        markerPump: { ...settingsDraftVol.markerPump },
+        markerDump: { ...settingsDraftVol.markerDump },
+        mode: vs0.mode, // 不改动
+      });
       hub.execute("Refresh", {});
       dialogManager.close();
     },
     onClose: () => dialogManager.close(),
   });
 }
-function onKindChange() {
-  emit("update:kind", kindLocal.value);
-  // 渲染由 renderHub 快照驱动，无需主动 render
-}
 
+// dataZoom：会后承接
 let dzIdleTimer = null;
 const dzIdleDelayMs = 180;
 
-/** 指标窗作为交互源：ECharts-first + idle-commit 会后承接 */
+// NEW: 拖移会话鼠标状态（仅鼠标未抬起时不结束交互）
+let isMouseDown = false;
+let zrMouseDownHandler = () => { isMouseDown = true; };
+let zrMouseUpHandler = () => {
+  isMouseDown = false;
+  try { renderHub.endInteraction(`indicator:${props.id}`); } catch {} 
+};
+let winMouseUpHandler = () => {
+  isMouseDown = false;
+  try { renderHub.endInteraction(`indicator:${props.id}`); } catch {} 
+};
+
 function onDataZoom(params) {
   try {
+    // NEW: 仅对“当前激活的副窗实例”处理 dataZoom；其他实例直接忽略
+    const isActive = renderHub.getActiveChart?.() === chart;
+    if (!isActive && !isMouseDown) return;
+
     const info = (params && params.batch && params.batch[0]) || params || {};
     const arr = vm.candles.value || [];
     const len = arr.length;
     if (!len) return;
-
     let sIdx, eIdx;
     if (
       typeof info.startValue !== "undefined" &&
@@ -226,7 +862,6 @@ function onDataZoom(params) {
     sIdx = Math.max(0, sIdx);
     eIdx = Math.min(len - 1, eIdx);
 
-    // NEW: 广播预览范围（主窗顶栏实时更新）
     try {
       window.dispatchEvent(
         new CustomEvent("chan:preview-range", {
@@ -240,7 +875,8 @@ function onDataZoom(params) {
       );
     } catch {}
 
-    renderHub.beginInteraction("indicator");
+    // 交互开始：带上“实例级源键”（indicator:${id}），避免被其它副窗误终止
+    renderHub.beginInteraction(`indicator:${props.id}`);
     if (dzIdleTimer) {
       clearTimeout(dzIdleTimer);
       dzIdleTimer = null;
@@ -270,7 +906,10 @@ function onDataZoom(params) {
           }
         }
       } finally {
-        renderHub.endInteraction("indicator");
+        // 仅在鼠标已抬起时才结束交互；保持拖移不中断
+        if (!isMouseDown) {
+          renderHub.endInteraction(`indicator:${props.id}`);
+        }
       }
     }, dzIdleDelayMs);
   } catch {}
@@ -289,23 +928,29 @@ onMounted(async () => {
     echarts.connect("ct-sync");
   } catch {}
 
-  // NEW: 注册指标窗 chart，并在鼠标进入指标窗时设置为激活面板
+  // NEW: 用“实例级键”注册与设为激活，避免多副窗互相覆盖
   try {
-    renderHub.registerChart("indicator", chart);
+    renderHub.registerChart(`indicator:${props.id}`, chart);
     el.addEventListener("mouseenter", () => {
-      renderHub.setActivePanel("indicator");
+      renderHub.setActivePanel(`indicator:${props.id}`);
     });
   } catch {}
 
-  chart.getZr().on("mousemove", (e) => {});
+  chart.getZr().on("mousemove", (_e) => {});
 
-  // REPLACED: 更稳的索引提取 + 持久化 lastFocusTs（鼠标/组联动移动都算数）
+  // NEW: 监听画布与窗口鼠标抬起/按下，维护拖移会话不被超时中断
+  try {
+    const zr = chart.getZr();
+    zr.on("mousedown", zrMouseDownHandler);
+    zr.on("mouseup", zrMouseUpHandler);
+    window.addEventListener("mouseup", winMouseUpHandler);
+  } catch {}
+
   chart.on("updateAxisPointer", (params) => {
     try {
       const len = (vm.candles.value || []).length;
       if (!len) return;
 
-      // MOD: 移除所有 setOption 逻辑
       let idx = -1;
       const sd = Array.isArray(params?.seriesData)
         ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
@@ -323,7 +968,6 @@ onMounted(async () => {
         }
       }
       if (idx < 0 || idx >= len) return;
-
       const tsVal = vm.candles.value[idx]?.t
         ? Date.parse(vm.candles.value[idx].t)
         : null;
@@ -333,10 +977,9 @@ onMounted(async () => {
     } catch {}
   });
 
-  // 已有：指标窗作为交互源
   chart.on("dataZoom", onDataZoom);
 
-  // ResizeObserver 与首帧 safeResize（此前已补齐）
+  // ResizeObserver 与首帧 safeResize
   try {
     ro = new ResizeObserver(() => {
       safeResize();
@@ -350,28 +993,64 @@ onMounted(async () => {
   updateHeaderFromCurrent();
 });
 
-// 订阅上游渲染：交互期间避免 notMerge 重绘
+// 订阅上游渲染：根据 kind 渲染 VOL/AMOUNT 或指标
 const unsubId = renderHub.onRender((snapshot) => {
   try {
     if (!chart) return;
     const mySeq = ++renderSeq;
-    if (String(kindLocal.value).toUpperCase() === "OFF") {
+
+    const kind = String(kindLocal.value || "").toUpperCase();
+    if (kind === "OFF") {
       chart.clear();
       return;
     }
-    const option = renderHub.getIndicatorOption(kindLocal.value);
-    if (!option) return;
-    const notMerge = !renderHub.isInteracting(); // ECharts-first：交互期禁止 notMerge 重绘
-    chart.setOption(option, { notMerge, silent: true }); // MOD: 增加 silent: true
+
+    const notMerge = !renderHub.isInteracting();
+
+    if (kind === "VOL" || kind === "AMOUNT") {
+      // 局部构建量窗 option（覆写 mode 为当前下拉选择）
+      const candles =
+        snapshot?.indicatorsBase?.candles || vm.candles.value || [];
+      const indicators =
+        snapshot?.indicatorsBase?.indicators || vm.indicators.value || {};
+      const freq = snapshot?.indicatorsBase?.freq || vm.freq.value || "1d";
+      const volCfg = {
+        ...(settings.volSettings.value || {}),
+        mode: kind === "AMOUNT" ? "amount" : "vol",
+      };
+      const vis = Math.max(1, snapshot?.core?.barsCount || 1);
+      const option = buildVolumeOption(
+        {
+          candles,
+          indicators,
+          freq,
+          volCfg,
+          volEnv: {
+            hostWidth: host.value?.clientWidth || 0,
+            visCount: vis,
+            overrideMarkWidth: snapshot?.core?.markerWidthPx,
+          },
+        },
+        {
+          initialRange: snapshot?.volume?.range || snapshot?.main?.range,
+          tooltipPositioner: renderHub.getTipPositioner(),
+          isHovered: snapshot?.indicatorsBase?.isHovered,
+        }
+      );
+      chart.setOption(option, { notMerge, silent: true });
+    } else {
+      const option = renderHub.getIndicatorOption(kindLocal.value);
+      if (!option) return;
+      chart.setOption(option, { notMerge, silent: true });
+    }
   } catch (e) {
-    console.error("Indicator renderHub onRender error:", e);
+    console.error("Unified indicator panel onRender error:", e);
   }
 });
 
 onBeforeUnmount(() => {
   renderHub.offRender(unsubId);
 
-  // NEW: 断开 ResizeObserver（一致性与防泄漏）
   if (ro) {
     try {
       ro.disconnect();
@@ -388,15 +1067,16 @@ onBeforeUnmount(() => {
   try {
     renderHub.unregisterChart("indicator");
   } catch {}
+  // NEW: 解除鼠标事件监听
+  try {
+    const zr = chart && chart.getZr ? chart.getZr() : null;
+    zr && zr.off && zr.off("mousedown", zrMouseDownHandler);
+    zr && zr.off && zr.off("mouseup", zrMouseUpHandler);
+    window.removeEventListener("mouseup", winMouseUpHandler);
+  } catch {}
 });
 
-watch(
-  () => [vm.candles.value, vm.indicators.value, vm.freq.value, kindLocal.value],
-  () => {
-    // 渲染由 renderHub 快照驱动，无需主动 render
-  },
-  { deep: true }
-);
+// 监听元信息变化以刷新左上标题
 watch(
   () => vm.meta.value,
   async () => {
@@ -406,7 +1086,18 @@ watch(
   { deep: true }
 );
 
-// NEW: 底部拖拽实现（与量窗一致）
+// 右侧拖动把手：向父发出 drag 事件
+function onDragHandleStart(e) {
+  try {
+    e.dataTransfer && e.dataTransfer.setData("text/plain", String(props.id));
+  } catch {}
+  emit("dragstart");
+}
+function onDragHandleEnd() {
+  emit("dragend");
+}
+
+// 底部拖拽高度
 let dragging = false,
   startY = 0,
   startH = 0;
@@ -452,7 +1143,13 @@ function onResizeHandleUp() {
   align-items: center;
   gap: 8px;
   padding: 0 8px;
-  z-index: 2;
+  z-index: 5;
+  background: linear-gradient(
+    to bottom,
+    rgba(17, 17, 17, 0.85),
+    rgba(17, 17, 17, 0.35),
+    rgba(17, 17, 17, 0)
+  );
 }
 .sel-kind {
   height: 22px;
@@ -478,25 +1175,78 @@ function onResizeHandleUp() {
   padding: 0;
   cursor: pointer;
 }
+
+/* 画布区域 */
 .canvas-host {
   position: absolute;
   left: 0;
   right: 0;
   top: 28px;
-  bottom: 8px; /* MOD: 统一底部留白为 8px，与量窗一致 */
+  bottom: 8px;
 }
+
+/* 底部高度拖拽条 */
 .bottom-strip {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 8px; /* MOD: 统一拖拽条高度为 8px，与量窗一致 */
+  height: 8px;
   background: transparent;
 }
-/* MOD: 统一拖拽提示样式（与量窗一致） */
 .bottom-strip:hover {
   cursor: ns-resize;
 }
+
+/* 右侧悬浮拖动把手（仅在悬停 chart 时显示） */
+.drag-handle {
+  position: absolute;
+  top: 28px;
+  bottom: 8px;
+  right: 0;
+  width: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(
+    to left,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0)
+  );
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chart:hover .drag-handle {
+  opacity: 1;
+}
+
+.drag-handle:hover {
+  cursor: grab;
+  background: linear-gradient(
+    to left,
+    rgba(255, 255, 255, 0.14),
+    rgba(255, 255, 255, 0)
+  );
+  border-left-color: rgba(255, 255, 255, 0.12);
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.drag-handle .grip {
+  width: 4px;
+  height: 40%;
+  border-radius: 2px;
+  background-image: radial-gradient(#bfbfbf 1px, transparent 1px);
+  background-size: 4px 6px;
+  background-position: center;
+  opacity: 0.7;
+}
+
+/* 指标设置占位提示 */
 .settings-hint {
   color: #bbb;
   font-size: 13px;

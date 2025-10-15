@@ -1,4 +1,5 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
+<!-- ============================== -->
 <!-- 说明：主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
      本次仅适配 useChan 输出的新键；覆盖层 series 的构造保持原方法与时序，
      仅在 recomputeChan() 与 buildOverlaySeriesForOption() 内消费新键，不改变其余流程/顺序。
@@ -2627,6 +2628,12 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
 let dzIdleTimer = null;
 const dzIdleDelayMs = 100; // 建议 100–200ms，避免频繁承接
 
+// NEW: 拖移会话鼠标状态（仅鼠标未抬起时不结束交互）
+let isMouseDown = false;
+let zrMouseDownHandler = () => { isMouseDown = true; };
+let zrMouseUpHandler = () => { isMouseDown = false; try { renderHub.endInteraction("main"); } catch {} };
+let winMouseUpHandler = () => { isMouseDown = false; try { renderHub.endInteraction("main"); } catch {} };
+
 /* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 function onDataZoom(params) {
   try {
@@ -2709,7 +2716,10 @@ function onDataZoom(params) {
           }
         }
       } finally {
+        // NEW: 仅在鼠标已抬起时才结束交互；鼠标未抬起保持拖移会话
+        if (!isMouseDown) {
         renderHub.endInteraction("main");
+        }
       }
     }, dzIdleDelayMs);
   } catch {}
@@ -2909,12 +2919,12 @@ onMounted(() => {
     echarts.connect("ct-sync");
   } catch {}
 
-  // NEW: 注册主窗 chart，并在鼠标进入主窗时设置为“激活面板”
+  // NEW: 监听画布与窗口鼠标抬起/按下，维护拖移会话不被超时中断
   try {
-    renderHub.registerChart("main", chart);
-    el.addEventListener("mouseenter", () => {
-      renderHub.setActivePanel("main");
-    });
+    const zr = chart.getZr();
+    zr.on("mousedown", zrMouseDownHandler);
+    zr.on("mouseup", zrMouseUpHandler);
+    window.addEventListener("mouseup", winMouseUpHandler);
   } catch {}
 
   chart.on("updateAxisPointer", (params) => {
@@ -2999,6 +3009,13 @@ onBeforeUnmount(() => {
   // ADD-BEGIN [组件卸载时取消权威订阅]
   try {
     hub.offChange(hubSubForInline);
+  } catch {}
+  // NEW: 解除鼠标事件监听
+  try {
+    const zr = chart && chart.getZr ? chart.getZr() : null;
+    zr && zr.off && zr.off("mousedown", zrMouseDownHandler);
+    zr && zr.off && zr.off("mouseup", zrMouseUpHandler);
+    window.removeEventListener("mouseup", winMouseUpHandler);
   } catch {}
 });
 
