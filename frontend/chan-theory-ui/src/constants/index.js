@@ -345,6 +345,7 @@ export const PENS_DEFAULTS = {
 // - 元线段为直线折线（端点相连），默认明黄色、线宽 3、实线。
 // ------------------------------
 export const SEGMENT_DEFAULTS = {
+  enabled: false, // 是否显示画线段
   color: "#FFD700", // 明黄色
   lineWidth: 3, // 线宽 3
   lineStyle: "solid", // 实线
@@ -353,7 +354,6 @@ export const SEGMENT_DEFAULTS = {
 // ------------------------------
 // 连续性屏障（全局参数 · 统一管理）
 // - 用于在价格突变（gap）处分岛处理，所有连续性元素不跨屏障。
-// - 更正：动态阈值 basePct=11%，相邻两合并K的原始K索引差值为 n，则阈值为 (1+basePct)^n - 1。
 // ------------------------------
 export const CONTINUITY_BARRIER = {
   enabled: true,
@@ -361,6 +361,22 @@ export const CONTINUITY_BARRIER = {
   lineColor: "#ffdd00",
   lineWidth: 1.2,
   lineStyle: "solid", // solid | dashed | dotted
+};
+
+// ------------------------------
+// 笔中枢默认（矩形框） —— NEW
+// - 归口名称：CHAN_PEN_PIVOT_DEFAULTS（专指“笔中枢”，便于后续区分“线段中枢”）。
+// - 边框线颜色：上涨/下跌两种；矩形填充颜色直接引用边框颜色但按透明度淡显（默认 5%）。
+// - z：渲染层级（z-index），默认 7（屏障 8、线段 6、笔 4）。
+// ------------------------------
+export const CHAN_PEN_PIVOT_DEFAULTS = {
+  enabled: true,
+  upColor: "#FF0000",
+  downColor: "#00FF00",
+  lineWidth: 1.5,
+  lineStyle: "solid", // solid | dashed | dotted
+  alphaPercent: 5, // 填充透明度（百分比），默认 5%（与边框颜色一致）
+  z: 7, // 渲染层级（z-index）
 };
 
 // ------------------------------

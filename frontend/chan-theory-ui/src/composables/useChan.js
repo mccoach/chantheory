@@ -5,11 +5,10 @@
 // - computeFractals：分型识别（非重叠扫描），输出 k1/k2/k3 新命名；横轴统一用 k2_idx_orig；分岛（seq_id）。
 // - computePens（重写）：按“先修极值、再验三条、首尾相连、净距≥3（rid差≥4）、相等不视更大、不跨屏障”规则，仅返回最终笔序列。
 // - computeSegments：识别元线段（不跨屏障）。
-//
+// - NEW: computePenPivots：识别“笔中枢”（矩形）——滑动 P1~P4 判定形成，随后向右延续，直至遇到完全在外的第一笔。
 // 兼容层：为不影响现有覆盖层渲染，computePens 返回 { confirmed: pens, provisional: null, all: pens }。
-//
-// 备注：屏障阈值采用“动态阈值”口径：thr = (1+basePct)^n - 1，n = 相邻两合并K覆盖的原始K索引差（至少为1）；
-//       屏障检测仅在“新合并K将入栈（非包含）”时执行；触发则从该合并K开启新 seq_id，barrier_after_prev_bool=true。
+// 备注：屏障阈值采用“静态阈值”口径：thr = basePct；仅在 i>=10 时生效；零厚度中枢不成立（upper>lower 为必要条件）。
+
 import { CONTINUITY_BARRIER } from "@/constants";
 
 // [REPLACE] useChan.js 内部屏障检测函数 —— 改为“相邻原始K + 静态阈值 + 前10日豁免”
@@ -36,7 +35,6 @@ function _detectContinuityBarriers(candles, basePct) {
   for (let i = 1; i < n; i++) {
     // 前10个交易日视为连续（从第11个开始比对）
     if (i < 10) continue;
-
     const prevC = C(i - 1);
     const thisH = H(i);
     const thisL = L(i);
@@ -932,4 +930,116 @@ export function computeSegments(pensConfirmed) {
   }
 
   return segs;
+}
+
+// ==============================
+// NEW: 识别“笔中枢”（矩形）
+// 说明：按每个 seq_id（岛）独立扫描；以 P1~P4 滑窗：
+//   - upper = min(P2.high, P4.high)，lower = max(P2.low, P4.low)
+//   - 必须 upper > lower（零厚度不成立）
+//   - P1“外部性”：P1.start_y_pri < lower 或 P1.start_y_pri > upper（严格不等）
+//   - 中枢方向：暂按 P1.dir_enum 决定（按你的要求）
+//   - 延续：从 P5 开始，若“完全在外”（start/end 同在上沿之上或同在下沿之下）则结束，否则延续；右沿取“完全在外的第一笔”的 start_idx_orig；若未遇到完全在外，右沿取本岛最后一笔的 end_idx_orig。
+// 返回：[{ seq_id, left_idx_orig, right_idx_orig, upper, lower, dir_enum }]
+// ==============================
+export function computePenPivots(pensConfirmed) {
+  const pivots = [];
+  const pens = Array.isArray(pensConfirmed) ? pensConfirmed : [];
+  if (!pens.length) return pivots;
+
+  // 按岛分组并按时间顺序排序（以 start_idx_orig）
+  const bySeq = new Map();
+  for (const p of pens) {
+    const sid = Number(p?.seq_id || 1);
+    if (!bySeq.has(sid)) bySeq.set(sid, []);
+    bySeq.get(sid).push(p);
+  }
+  for (const [sid, arr] of bySeq.entries()) {
+    const seqPens = (arr || []).slice().sort((a, b) => a.start_idx_orig - b.start_idx_orig);
+    if (seqPens.length < 4) continue;
+
+    // 取单笔的“高/低”：采用最终笔端点输出（唯一真相源），避免中间推导
+    const penHigh = (p) => Math.max(Number(p.start_y_pri), Number(p.end_y_pri));
+    const penLow = (p) => Math.min(Number(p.start_y_pri), Number(p.end_y_pri));
+
+    let i = 0;
+    while (i + 3 < seqPens.length) {
+      const P1 = seqPens[i];
+      const P2 = seqPens[i + 1];
+      const P3 = seqPens[i + 2];
+      const P4 = seqPens[i + 3];
+
+      // 上下沿（零厚度不成立）
+      const upper = Math.min(penHigh(P2), penHigh(P4));
+      const lower = Math.max(penLow(P2), penLow(P4));
+      if (!(Number.isFinite(upper) && Number.isFinite(lower))) {
+        i += 1;
+        continue;
+      }
+      if (!(upper > lower)) {
+        i += 1;
+        continue; // 零厚度不成立
+      }
+
+      // P1“外部性”：严格不等（不允许等于）
+      const p1Start = Number(P1.start_y_pri);
+      if (!Number.isFinite(p1Start) || !(p1Start < lower || p1Start > upper)) {
+        i += 1;
+        continue;
+      }
+
+      // 成立：记录左沿与方向（方向按 P1）
+      const left_idx_orig = Number(P1.end_idx_orig);
+      const dir_enum = String(P1?.dir_enum || "").toUpperCase(); // 'UP'|'DOWN'
+      let right_idx_orig = null;
+
+      // 延续：从 P5 开始
+      let j = i + 4;
+      let endedByOutside = false;
+      while (j < seqPens.length) {
+        const Pk = seqPens[j];
+        const sY = Number(Pk.start_y_pri);
+        const eY = Number(Pk.end_y_pri);
+        if (!Number.isFinite(sY) || !Number.isFinite(eY)) {
+          j += 1;
+          continue;
+        }
+        // “完全在外”：起止两端都在上沿之上，或都在下沿之下（严格不等）
+        const bothAbove = sY > upper && eY > upper;
+        const bothBelow = sY < lower && eY < lower;
+        if (bothAbove || bothBelow) {
+          right_idx_orig = Number(Pk.start_idx_orig); // 右沿 = 第一根完全在外笔的“起点”
+          endedByOutside = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!endedByOutside) {
+        // 未遇到完全在外：以本岛最后一笔的“终点”作为右沿（与规则的“外第一笔起点”保持一致语义上最右覆盖）
+        const lastPen = seqPens[seqPens.length - 1];
+        right_idx_orig = Number(lastPen?.end_idx_orig ?? left_idx_orig);
+      }
+
+      // 写入中枢
+      pivots.push({
+        seq_id: sid,
+        left_idx_orig,
+        right_idx_orig,
+        upper,
+        lower,
+        dir_enum, // 'UP'|'DOWN'
+      });
+
+      // 下一次扫描从“完全在外”的那一笔（或末尾）作为新的 P1
+      if (endedByOutside) {
+        // i 跳到 j（该笔作为新的 P1）
+        i = j;
+      } else {
+        // 已到岛末尾
+        break;
+      }
+    }
+  }
+
+  return pivots;
 }

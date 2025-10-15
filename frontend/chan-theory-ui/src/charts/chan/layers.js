@@ -6,6 +6,7 @@
 // - 画笔/线段：x=*_idx_orig；y=*_y_pri；样式取默认配置。
 //   本版：线段与笔采用“段落式 series”，不使用 null 分段，彻底避免跨断档连接。
 // - 连续性屏障（竖线）：在 gap 两侧紧邻原始 K 处绘制贯穿主窗的竖线（markLine）。
+// - NEW：笔中枢（矩形框）：markArea 透明填充 + markLine 四边框，颜色与填充一致，填充按透明度淡显。
 // ==============================
 import {
   CHAN_MARKER_PRESETS, // 视觉预设集合
@@ -13,7 +14,8 @@ import {
   FRACTAL_DEFAULTS, // 分型默认（包含样式与间距）
   PENS_DEFAULTS, // 画笔默认方案（线宽/颜色/线型/开关）
   SEGMENT_DEFAULTS, // 线段默认样式
-  CONTINUITY_BARRIER, // NEW: 连续性屏障全局参数
+  CONTINUITY_BARRIER, // 连续性屏障全局参数
+  CHAN_PEN_PIVOT_DEFAULTS, // NEW: 笔中枢默认
 } from "@/constants";
 
 import { useUserSettings } from "@/composables/useUserSettings";
@@ -386,10 +388,10 @@ export function buildPenLines(pensObj, env = {}) {
 
   // 将笔采样为若干段（每段为单独 series）
   function samplePenToChunks(p) {
-      const x1 = Number(p.start_idx_orig);
-      const y1 = Number(p.start_y_pri);
-      const x2 = Number(p.end_idx_orig);
-      const y2 = Number(p.end_y_pri);
+    const x1 = Number(p.start_idx_orig);
+    const y1 = Number(p.start_y_pri);
+    const x2 = Number(p.end_idx_orig);
+    const y2 = Number(p.end_y_pri);
     if (![x1, y1, x2, y2].every((v) => Number.isFinite(v))) return [];
 
     const xa = Math.min(x1, x2);
@@ -428,42 +430,46 @@ export function buildPenLines(pensObj, env = {}) {
     const chunks = samplePenToChunks(p);
     for (let k = 0; k < chunks.length; k++) {
       const data = chunks[k];
-    series.push({
-        id: `CHAN_PEN_CONF_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
-      name: "CHAN_PENS_CONFIRMED",
-      type: "line",
-      yAxisIndex: 0,
+      series.push({
+        id: `CHAN_PEN_CONF_${p.start_idx_orig}_${
+          p.end_idx_orig
+        }_${k}_${seqCounter++}`,
+        name: "CHAN_PENS_CONFIRMED",
+        type: "line",
+        yAxisIndex: 0,
         data,
-      showSymbol: false,
-      smooth: false,
-      lineStyle: { color: baseColor, width: lineW, type: confirmedStyle },
-      z: 4,
-      connectNulls: false, // 片段间断开，便于裁切后“只显示可见部分”
-      tooltip: { show: false },
-      emphasis: { disabled: true },
-    });
-  }
+        showSymbol: false,
+        smooth: false,
+        lineStyle: { color: baseColor, width: lineW, type: confirmedStyle },
+        z: 4,
+        connectNulls: false, // 片段间断开，便于裁切后“只显示可见部分”
+        tooltip: { show: false },
+        emphasis: { disabled: true },
+      });
+    }
   }
 
   for (const p of provisional) {
     const chunks = samplePenToChunks(p);
     for (let k = 0; k < chunks.length; k++) {
       const data = chunks[k];
-    series.push({
-        id: `CHAN_PEN_PROV_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
-      name: "CHAN_PENS_PROVISIONAL",
-      type: "line",
-      yAxisIndex: 0,
+      series.push({
+        id: `CHAN_PEN_PROV_${p.start_idx_orig}_${
+          p.end_idx_orig
+        }_${k}_${seqCounter++}`,
+        name: "CHAN_PENS_PROVISIONAL",
+        type: "line",
+        yAxisIndex: 0,
         data,
-      showSymbol: false,
-      smooth: false,
-      lineStyle: { color: baseColor, width: lineW, type: provisionalStyle },
-      z: 3,
-      connectNulls: false,
-      tooltip: { show: false },
-      emphasis: { disabled: true },
-    });
-  }
+        showSymbol: false,
+        smooth: false,
+        lineStyle: { color: baseColor, width: lineW, type: provisionalStyle },
+        z: 3,
+        connectNulls: false,
+        tooltip: { show: false },
+        emphasis: { disabled: true },
+      });
+    }
   }
 
   return { series };
@@ -471,10 +477,34 @@ export function buildPenLines(pensObj, env = {}) {
 
 // 元线段（每段 series）
 // 不跨断档：每个 segment 独立 series，不使用 null。
+
 export function buildSegmentLines(segments, env = {}) {
-  if (!Array.isArray(segments) || !segments.length) {
+  // NEW: 引入用户设置，并与默认值合并
+  const settings = useUserSettings();
+  const segCfg = Object.assign(
+    {},
+    SEGMENT_DEFAULTS,
+    (settings.chanSettings &&
+      settings.chanSettings.value &&
+      settings.chanSettings.value.segment) ||
+      {}
+  );
+
+  // 无数据或显式禁用 → 不渲染
+  if (
+    !Array.isArray(segments) ||
+    !segments.length ||
+    segCfg.enabled === false
+  ) {
     return { series: [] };
   }
+
+  // 取绘制样式（用户设置优先，缺失回退默认）
+  const color = segCfg.color || SEGMENT_DEFAULTS.color;
+  const lineWidth = Number.isFinite(+segCfg.lineWidth)
+    ? +segCfg.lineWidth
+    : SEGMENT_DEFAULTS.lineWidth;
+  const lineStyle = String(segCfg.lineStyle || SEGMENT_DEFAULTS.lineStyle);
 
   const barrierIdxSet = new Set(
     Array.isArray(env.barrierIdxList) ? env.barrierIdxList.map((x) => +x) : []
@@ -491,7 +521,6 @@ export function buildSegmentLines(segments, env = {}) {
     const x0 = Math.min(xStart, xEnd);
     const x1 = Math.max(xStart, xEnd);
 
-    // 按原端点计算斜率（兼容 xStart>xEnd 的情况）
     const dx = xEnd - xStart;
     const dy = yEnd - yStart;
     const slope = dx !== 0 ? dy / dx : 0;
@@ -519,24 +548,24 @@ export function buildSegmentLines(segments, env = {}) {
     for (let k = 0; k < chunks.length; k++) {
       const data = chunks[k];
       out.push({
-        id: `CHAN_SEG_${s.start_idx_orig}_${s.end_idx_orig}_${k}_${seqCounter++}`,
-    name: "CHAN_SEGMENTS",
-    type: "line",
-    yAxisIndex: 0,
-    data,
-    showSymbol: false,
-    smooth: false,
-    lineStyle: {
-      color: SEGMENT_DEFAULTS.color,
-      width: Number.isFinite(+SEGMENT_DEFAULTS.lineWidth)
-        ? +SEGMENT_DEFAULTS.lineWidth
-        : 3,
-      type: SEGMENT_DEFAULTS.lineStyle || "solid",
-    },
-    z: 6, // 略高于笔与分型确认线，便于观察
-    connectNulls: false, // 断档处不连线（稳定不显示）
-    tooltip: { show: false },
-    emphasis: { disabled: true },
+        id: `CHAN_SEG_${s.start_idx_orig}_${
+          s.end_idx_orig
+        }_${k}_${seqCounter++}`,
+        name: "CHAN_SEGMENTS",
+        type: "line",
+        yAxisIndex: 0,
+        data,
+        showSymbol: false,
+        smooth: false,
+        lineStyle: {
+          color, // 使用用户配置颜色
+          width: lineWidth, // 使用用户配置线宽
+          type: lineStyle, // 使用用户配置线型
+        },
+        z: 6,
+        connectNulls: false,
+        tooltip: { show: false },
+        emphasis: { disabled: true },
       });
     }
   }
@@ -579,4 +608,189 @@ export function buildBarrierLines(barrierIdxList) {
     emphasis: { disabled: true },
   };
   return { series: [series] };
+}
+
+// ==============================
+// NEW: 十六进制 → RGBA（用于矩形填充淡显）
+// ==============================
+function _hexToRgba(hex, alpha = 1.0) {
+  try {
+    const h = String(hex || "").replace("#", "");
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    const a = Math.max(0, Math.min(1, Number(alpha || 1)));
+    return `rgba(${r},${g},${b},${a})`;
+  } catch {
+    return hex || "#999";
+  }
+}
+
+// ==============================
+// NEW: 笔中枢矩形绘制（markArea + markLine 四边）
+// - 每个中枢使用一个独立 series 以便设置独立颜色与 z。
+// - 边框颜色与填充颜色一致，填充透明度按 alphaPercent。
+// - buildPenPivotAreas 改为“静态框线”绘制（保留 markArea 填充；新增四条边以 line series 绘制；传入 sIdx/eIdx 限定显示范围）
+// ==============================
+export function buildPenPivotAreas(pivots, env = {}) {
+  const settings = useUserSettings();
+  const pvCfg = Object.assign(
+    {},
+    CHAN_PEN_PIVOT_DEFAULTS,
+    (settings.chanSettings &&
+      settings.chanSettings.value &&
+      settings.chanSettings.value.penPivot) ||
+      {}
+  );
+  if (!(pvCfg.enabled ?? true)) return { series: [] };
+
+  const z = Number.isFinite(+pvCfg.z) ? +pvCfg.z : CHAN_PEN_PIVOT_DEFAULTS.z;
+  const lineWidth = Number.isFinite(+pvCfg.lineWidth)
+    ? +pvCfg.lineWidth
+    : CHAN_PEN_PIVOT_DEFAULTS.lineWidth;
+  const lineStyle = String(
+    pvCfg.lineStyle || CHAN_PEN_PIVOT_DEFAULTS.lineStyle
+  );
+  const alpha =
+    Math.max(0, Math.min(100, Number(pvCfg.alphaPercent || CHAN_PEN_PIVOT_DEFAULTS.alphaPercent))) /
+    100;
+
+  // 与简笔折线一致：遇屏障分段 + 稠密点列（逐索引采点） + 不使用 null 分段
+  const barrierIdxSet = new Set(
+    Array.isArray(env.barrierIdxList) ? env.barrierIdxList.map((x) => +x) : []
+  );
+
+  // 顶/底边按 x 从 left..right 逐一采点；遇屏障断开为独立 series
+  function sampleEdgeToChunks(left, right, yConst) {
+    const chunks = [];
+    let curr = [];
+    const xa = Math.min(left, right);
+    const xb = Math.max(left, right);
+    for (let xi = xa; xi <= xb; xi++) {
+      // 屏障处分段（不包含屏障点）
+      if (barrierIdxSet.has(xi)) {
+        if (curr.length >= 2) chunks.push(curr);
+        curr = [];
+        continue;
+      }
+      curr.push([xi, yConst]);
+    }
+    if (curr.length >= 2) chunks.push(curr);
+    return chunks;
+  }
+
+  const out = [];
+  let seqCounter = 0;
+
+  for (let idx = 0; idx < (pivots || []).length; idx++) {
+    const p = pivots[idx];
+    const left = Number(p.left_idx_orig);
+    const right = Number(p.right_idx_orig);
+    const upper = Number(p.upper);
+    const lower = Number(p.lower);
+    if (![left, right, upper, lower].every((v) => Number.isFinite(v))) continue;
+    if (!(upper > lower)) continue; // 零厚度不呈现
+
+    const isUp = String(p.dir_enum || "").toUpperCase() === "UP";
+    const color = isUp
+      ? pvCfg.upColor || CHAN_PEN_PIVOT_DEFAULTS.upColor
+      : pvCfg.downColor || CHAN_PEN_PIVOT_DEFAULTS.downColor;
+
+    // 保留内部填充（淡显），注意两端均在视窗外时 markArea 可能不显示
+    out.push({
+      id: `CHAN_PIVOT_AREA_${p.seq_id}_${left}_${right}_${idx}`,
+      name: "CHAN_PIVOT_AREA",
+      type: "line",
+      yAxisIndex: 0,
+      data: [],
+      markArea: {
+        silent: true,
+        itemStyle: { color: _hexToRgba(color, alpha) },
+        label: { show: false },
+        data: [[{ xAxis: left, yAxis: upper }, { xAxis: right, yAxis: lower }]],
+      },
+      z,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+
+    // 顶边：段落式折线（与简笔折线相同的“段落式 series”）
+    const topChunks = sampleEdgeToChunks(left, right, upper);
+    for (let k = 0; k < topChunks.length; k++) {
+      const data = topChunks[k];
+    out.push({
+        id: `CHAN_PIVOT_TOP_${p.seq_id}_${left}_${right}_${k}_${seqCounter++}`,
+        name: "CHAN_PIVOT_TOP",
+      type: "line",
+      yAxisIndex: 0,
+        data,
+      showSymbol: false,
+      smooth: false,
+        // 不使用 null 分段（每段独立 series）
+        connectNulls: false,
+        lineStyle: { color, width: lineWidth, type: lineStyle },
+      z,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+    }
+
+    // 底边：段落式折线
+    const bottomChunks = sampleEdgeToChunks(left, right, lower);
+    for (let k = 0; k < bottomChunks.length; k++) {
+      const data = bottomChunks[k];
+    out.push({
+        id: `CHAN_PIVOT_BOTTOM_${p.seq_id}_${left}_${right}_${k}_${seqCounter++}`,
+        name: "CHAN_PIVOT_BOTTOM",
+      type: "line",
+      yAxisIndex: 0,
+        data,
+      showSymbol: false,
+      smooth: false,
+        connectNulls: false,
+        lineStyle: { color, width: lineWidth, type: lineStyle },
+      z,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+    }
+
+    // 垂直边（左/右）：段落式不适用，中枢垂直边用两点线段即可（与简笔技术路线一致的 line series）
+    out.push({
+      id: `CHAN_PIVOT_LEFT_${p.seq_id}_${left}_${seqCounter++}`,
+      name: "CHAN_PIVOT_LEFT",
+      type: "line",
+      yAxisIndex: 0,
+      data: [
+        [left, lower],
+        [left, upper],
+      ],
+      showSymbol: false,
+      smooth: false,
+      connectNulls: false,
+      lineStyle: { color, width: lineWidth, type: lineStyle },
+      z,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+    // 右边（垂直）——静态全高
+    out.push({
+      id: `CHAN_PIVOT_RIGHT_${p.seq_id}_${right}_${seqCounter++}`,
+      name: "CHAN_PIVOT_RIGHT",
+      type: "line",
+      yAxisIndex: 0,
+      data: [
+        [right, lower],
+        [right, upper],
+      ],
+      showSymbol: false,
+      smooth: false,
+      connectNulls: false,
+      lineStyle: { color, width: lineWidth, type: lineStyle },
+      z,
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+  }
+  return { series: out };
 }

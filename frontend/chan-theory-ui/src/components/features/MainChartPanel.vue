@@ -2,6 +2,10 @@
 <!-- 说明：主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
      本次仅适配 useChan 输出的新键；覆盖层 series 的构造保持原方法与时序，
      仅在 recomputeChan() 与 buildOverlaySeriesForOption() 内消费新键，不改变其余流程/顺序。
+     NEW: 接入“笔中枢”：
+       - 计算：computePenPivots()
+       - 渲染：buildPenPivotAreas()
+       - 设置：在“缠论标记”页的“简笔”行下方新增“笔中枢”设置行
 -->
 <template>
   <!-- 顶部两行两列布局 -->
@@ -379,6 +383,8 @@ import {
   FRACTAL_FILLS,
   WINDOW_PRESETS,
   PENS_DEFAULTS,
+  SEGMENT_DEFAULTS,
+  CHAN_PEN_PIVOT_DEFAULTS,
 } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
@@ -387,6 +393,7 @@ import {
   computeFractals,
   computePens,
   computeSegments,
+  computePenPivots, // NEW: 计算笔中枢
 } from "@/composables/useChan"; // 新增：computeSegments
 import { vSelectAll } from "@/utils/inputBehaviors";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
@@ -397,6 +404,7 @@ import {
   buildPenLines,
   buildSegmentLines,
   buildBarrierLines, // NEW: 屏障竖线
+  buildPenPivotAreas, // NEW: 渲染笔中枢
 } from "@/charts/chan/layers"; // 新增：buildSegmentLines
 
 /* 双跳脱调度，避免主流程期 setOption/resize */
@@ -543,7 +551,7 @@ function getCurrentZoomIndexRange() {
 const settingsDraft = reactive({
   kForm: { ...DEFAULT_KLINE_STYLE },
   maForm: {},
-  chanForm: { ...CHAN_DEFAULTS },
+  chanForm: { ...CHAN_DEFAULTS, pen: { ...PENS_DEFAULTS }, penPivot: { ...CHAN_PEN_PIVOT_DEFAULTS } }, // NEW: 默认并入
   fractalForm: { ...FRACTAL_DEFAULTS },
   adjust: DEFAULT_APP_PREFERENCES.adjust,
 });
@@ -572,9 +580,20 @@ function openSettingsDialog() {
       JSON.stringify({
         ...CHAN_DEFAULTS,
         ...(settings.chanSettings.value || {}),
+        // 笔设置
         pen: {
           ...PENS_DEFAULTS,
           ...((settings.chanSettings.value || {}).pen || {}),
+        },
+        // 线段设置（默认 + 用户覆盖）
+        segment: {
+          ...SEGMENT_DEFAULTS,
+          ...((settings.chanSettings.value || {}).segment || {}),
+        },
+        // 笔中枢
+        penPivot: {
+          ...CHAN_PEN_PIVOT_DEFAULTS,
+          ...((settings.chanSettings.value || {}).penPivot || {}),
         },
       })
     );
@@ -657,8 +676,18 @@ function openSettingsDialog() {
 
         // —— 分型总开关快照与循环逻辑（仅针对四项 enabled） —— //
         const ff = settingsDraft.fractalForm;
-        const lastManualSnapshot = ref(getCurrentFractalCombination(ff)); // 只在四项 enabled 改变时更新
+        const lastManualSnapshot = ref(getCurrentFractalCombination(ff)); // 分型总控（初始化判定，当各分项全选时首击应切至全关）
         const globalCycleIndex = ref(0); // 总开关循环指针
+
+        // NEW: 初始化根据当前组合预置循环指针（全选→首击到全关；其他→保持默认）
+        function primeFractalGlobalCycle() {
+          const snap = lastManualSnapshot.value || { strong:false, standard:false, weak:false, confirm:false };
+          const allOnNow = !!(snap.strong && snap.standard && snap.weak && snap.confirm);
+          // 全选时，将循环指针置 1，使第一次点击进入 allOff
+          globalCycleIndex.value = allOnNow ? 1 : 0;
+        }
+        // 初始化时调用一次
+        primeFractalGlobalCycle();
 
         // —— 快照更新抑制（分型/均线总控共用） —— //
         const snapshotSuppressKeys = new Set();
@@ -793,6 +822,16 @@ function openSettingsDialog() {
         }
         const maLastManualSnapshot = ref(getCurrentMACombination());
         const maGlobalCycleIndex = ref(0);
+
+        // NEW: 初始化根据当前组合预置循环指针（所有 MA 全选→首击到全关）
+        function primeMAGlobalCycle() {
+          const snap = maLastManualSnapshot.value || {};
+          const ks = getMAKeys();
+          const allOnNow = ks.length > 0 && ks.every((k) => !!snap[k]);
+          maGlobalCycleIndex.value = allOnNow ? 1 : 0;
+        }
+        // 初始化时调用一次
+        primeMAGlobalCycle();
 
         function isAllMAOn(combo) {
           const ks = getMAKeys();
@@ -1227,7 +1266,7 @@ function openSettingsDialog() {
           return rows;
         };
 
-        // 缠论设置（分型与画笔）——仅更新草稿；保存时持久化
+        // 缠论设置（分型/画笔/笔中枢）
         const renderChan = () => {
           const cf = settingsDraft.chanForm;
           const rows = [];
@@ -2050,6 +2089,201 @@ function openSettingsDialog() {
             ])
           );
 
+          // NEW: 线段设置行（插入于“简笔”与“笔中枢”之间）
+          {
+            const sg = (cf.segment =
+              cf.segment ||
+              Object.assign({}, SEGMENT_DEFAULTS, { enabled: true }));
+            rows.push(
+              h("div", { class: "std-row" }, [
+                nameCell("线段"),
+                // 线宽
+                itemCell(
+                  "线宽",
+                  h("input", {
+                    class: "input num",
+                    type: "number",
+                    min: 0.5,
+                    max: 6,
+                    step: 0.5,
+                    value: Number.isFinite(+sg.lineWidth)
+                      ? +sg.lineWidth
+                      : SEGMENT_DEFAULTS.lineWidth,
+                    onInput: (e) => {
+                      const v = Math.max(
+                        0.5,
+                        Math.min(6, Number(e.target.value || sg.lineWidth || 3))
+                      );
+                      cf.segment = Object.assign({}, sg, { lineWidth: v });
+                    },
+                  })
+                ),
+                // 颜色
+                itemCell(
+                  "颜色",
+                  h("input", {
+                    class: "input color",
+                    type: "color",
+                    value: sg.color || SEGMENT_DEFAULTS.color,
+                    onInput: (e) => {
+                      cf.segment = Object.assign({}, sg, {
+                        color: String(e.target.value || SEGMENT_DEFAULTS.color),
+                      });
+                    },
+                  })
+                ),
+                // 线型
+                itemCell(
+                  "线型",
+                  h(
+                    "select",
+                    {
+                      class: "input",
+                      value: sg.lineStyle || SEGMENT_DEFAULTS.lineStyle,
+                      onChange: (e) => {
+                        cf.segment = Object.assign({}, sg, {
+                          lineStyle: String(e.target.value),
+                        });
+                      },
+                    },
+                    [
+                      h("option", { value: "solid" }, "实线"),
+                      h("option", { value: "dashed" }, "虚线"),
+                      h("option", { value: "dotted" }, "点线"),
+                    ]
+                  )
+                ),
+                // 空列占位（第4/5列）
+                h("div"),
+                h("div"),
+                // 勾选：启用
+                simpleCheckCell(!!(sg.enabled ?? SEGMENT_DEFAULTS.enabled), (e) => {
+                  cf.segment = Object.assign({}, sg, {
+                    enabled: !!e.target.checked,
+                  });
+                }),
+                // 重置
+                resetBtn(() => {
+                  settingsDraft.chanForm.segment = JSON.parse(
+                    JSON.stringify(SEGMENT_DEFAULTS)
+                  );
+                }),
+              ])
+            );
+          };
+
+          // NEW: 笔中枢设置行（紧随“简笔”行之后）
+          const pv = cf.penPivot || CHAN_PEN_PIVOT_DEFAULTS;
+          rows.push(
+            h("div", { class: "std-row" }, [
+              nameCell("笔中枢"),
+              itemCell(
+                "线宽",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0.5,
+                  max: 6,
+                  step: 0.1,
+                  value: Number.isFinite(+pv.lineWidth)
+                    ? +pv.lineWidth
+                    : CHAN_PEN_PIVOT_DEFAULTS.lineWidth,
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0.5,
+                      Math.min(6, Number(e.target.value || 1.5))
+                    );
+                    cf.penPivot = Object.assign({}, pv, { lineWidth: v });
+                  },
+                })
+              ),
+              itemCell(
+                "线型",
+                h(
+                  "select",
+                  {
+                    class: "input",
+                    value: pv.lineStyle || CHAN_PEN_PIVOT_DEFAULTS.lineStyle,
+                    onChange: (e) => {
+                      cf.penPivot = Object.assign({}, pv, {
+                        lineStyle: String(e.target.value),
+                      });
+                    },
+                  },
+                  [
+                    h("option", { value: "solid" }, "实线"),
+                    h("option", { value: "dashed" }, "虚线"),
+                    h("option", { value: "dotted" }, "点线"),
+                  ]
+                )
+              ),
+              itemCell(
+                "上涨颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: pv.upColor || CHAN_PEN_PIVOT_DEFAULTS.upColor,
+                  onInput: (e) => {
+                    cf.penPivot = Object.assign({}, pv, {
+                      upColor:
+                        String(e.target.value) || CHAN_PEN_PIVOT_DEFAULTS.upColor,
+                    });
+                  },
+                })
+              ),
+              itemCell(
+                "下跌颜色",
+                h("input", {
+                  class: "input color",
+                  type: "color",
+                  value: pv.downColor || CHAN_PEN_PIVOT_DEFAULTS.downColor,
+                  onInput: (e) => {
+                    cf.penPivot = Object.assign({}, pv, {
+                      downColor:
+                        String(e.target.value) ||
+                        CHAN_PEN_PIVOT_DEFAULTS.downColor,
+                    });
+                  },
+                })
+              ),
+              itemCell(
+                "透明度%",
+                h("input", {
+                  class: "input num",
+                  type: "number",
+                  min: 0,
+                  max: 100,
+                  step: 1,
+                  value: Number.isFinite(+pv.alphaPercent)
+                    ? +pv.alphaPercent
+                    : CHAN_PEN_PIVOT_DEFAULTS.alphaPercent,
+                  onInput: (e) => {
+                    const v = Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        Number(
+                          e.target.value || CHAN_PEN_PIVOT_DEFAULTS.alphaPercent
+                        )
+                      )
+                    );
+                    cf.penPivot = Object.assign({}, pv, { alphaPercent: v });
+                  },
+                })
+              ),
+              simpleCheckCell(!!(pv.enabled ?? true), (e) => {
+                cf.penPivot = Object.assign({}, pv, {
+                  enabled: !!e.target.checked,
+                });
+              }),
+              resetBtn(() => {
+                settingsDraft.chanForm.penPivot = JSON.parse(
+                  JSON.stringify(CHAN_PEN_PIVOT_DEFAULTS)
+                );
+              }),
+            ])
+          );
+
           return rows;
         };
 
@@ -2068,7 +2302,7 @@ function openSettingsDialog() {
         { key: "display", label: "行情显示" },
         { key: "chan", label: "缠论标记" },
       ],
-      activeTab: "display",
+      activeTab: "chan",
       // 全部恢复默认（统一合并表达式，pen 与其他项一致）
       onResetAll: () => {
         try {
@@ -2084,6 +2318,8 @@ function openSettingsDialog() {
             JSON.stringify({
               ...CHAN_DEFAULTS,
               pen: { ...PENS_DEFAULTS },
+              segment: { ...SEGMENT_DEFAULTS },
+              penPivot: { ...CHAN_PEN_PIVOT_DEFAULTS },
             })
           );
 
@@ -2104,7 +2340,8 @@ function openSettingsDialog() {
           // 数据持久化
           settings.setKlineStyle(settingsDraft.kForm);
           settings.setMaConfigs(settingsDraft.maForm);
-          settings.setChanSettings({ ...settingsDraft.chanForm });
+          // NEW: penPivot 一并写入
+          settings.setChanSettings({ ...(settingsDraft.chanForm || {}) });
           settings.setFractalSettings({ ...settingsDraft.fractalForm });
 
           const nextAdjust = String(settingsDraft.adjust || "none");
@@ -2159,7 +2396,7 @@ function focusWrap() {
   } catch {}
 }
 
-/* 缠论/分型/笔/线段/屏障缓存 —— 统一在 recomputeChan 中构建 */
+/* 缠论/分型/笔/线段/屏障缓存/笔中枢 —— 统一在 recomputeChan 中构建 */
 const chanCache = ref({
   reduced: [],
   map: [],
@@ -2168,6 +2405,7 @@ const chanCache = ref({
   pens: { confirmed: [], provisional: null, all: [] },
   segments: [], // 新增：元线段缓存
   barriersIndices: [], // NEW: 屏障竖线位置（原始K索引，含左右各一）
+  pivots: [], // NEW: 笔中枢
 });
 function recomputeChan() {
   try {
@@ -2181,6 +2419,7 @@ function recomputeChan() {
         pens: { confirmed: [], provisional: null, all: [] },
         segments: [],
         barriersIndices: [],
+        pivots: [], // 笔中枢
       };
       return;
     }
@@ -2218,6 +2457,9 @@ function recomputeChan() {
       }
     }
 
+    // NEW: 计算“笔中枢”
+    const pivots = computePenPivots(pens.confirmed || []);
+
     chanCache.value = {
       reduced: res.reducedBars || [],
       map: res.mapOrigToReduced || [],
@@ -2225,7 +2467,8 @@ function recomputeChan() {
       fractals: fr || [],
       pens: pens || { confirmed: [], provisional: null, all: [] },
       segments: segments || [],
-      barriersIndices: barrierIdxList, // NEW
+      barriersIndices: barrierIdxList || [],
+      pivots, // 保存“笔中枢”
     };
   } catch {
     chanCache.value = {
@@ -2236,6 +2479,7 @@ function recomputeChan() {
       pens: { confirmed: [], provisional: null, all: [] },
       segments: [],
       barriersIndices: [],
+      pivots: [],
     };
   }
 }
@@ -2258,6 +2502,7 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
   };
   const segments = chanCache.value.segments || [];
   const barrierIdxList = chanCache.value.barriersIndices || [];
+  const pivots = chanCache.value.pivots || []; // NEW: 笔中枢
 
   // 屏障竖线（优先叠加，z 更高）
   if (barrierIdxList.length) {
@@ -2367,6 +2612,12 @@ function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
   if ((segments || []).length) {
     const segLayer = buildSegmentLines(segments, { barrierIdxList });
     out.push(...(segLayer.series || []));
+  }
+
+  // NEW: 笔中枢（矩形框，静态框线）
+  if ((pivots || []).length) {
+    const pvLayer = buildPenPivotAreas(pivots, { barrierIdxList });
+    out.push(...(pvLayer.series || []));
   }
 
   return out;
@@ -2526,6 +2777,8 @@ function doSinglePassRender(snapshot) {
     const bars = Math.max(1, snapshot.core?.barsCount || 1);
     const hostW = host.value ? host.value.clientWidth : 800;
     const markerW = snapshot.core?.markerWidthPx || 8;
+
+    // 修改：传入 sIdx/eIdx，供覆盖层“笔中枢框线”静态绘制使用
     const overlaySeries = buildOverlaySeriesForOption({
       hostW,
       visCount: bars,

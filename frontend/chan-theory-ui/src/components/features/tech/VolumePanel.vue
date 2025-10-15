@@ -242,6 +242,16 @@ const VolumeSettingsContent = defineComponent({
     const mavolLastManualSnapshot = ref(getCurrentMavolCombination());
     const mavolGlobalCycleIndex = ref(0);
 
+    // NEW: 初始化根据当前组合预置循环指针（全部开启→首击全关）
+    function primeMavolGlobalCycle() {
+      const snap = mavolLastManualSnapshot.value || {};
+      const ks = getMavolKeys();
+      const allOnNow = ks.length > 0 && ks.every((k) => !!snap[k]);
+      mavolGlobalCycleIndex.value = allOnNow ? 1 : 0;
+    }
+    // 初始化时调用一次
+    primeMavolGlobalCycle();
+
     function isAllMavolOn(combo) {
       const ks = getMavolKeys();
       return ks.length > 0 && ks.every((k) => combo[k] === true);
