@@ -17,6 +17,7 @@ import {
   buildMacdOption,
   buildKdjOrRsiOption,
   createFixedTooltipPositioner, // MOD: 引入固定定位器
+  buildBollOption, // NEW: 导入 BOLL 指标窗构造器
 } from "@/charts/options";
 
 let _singleton = null;

@@ -4,9 +4,10 @@
      - 统一右上角关闭按钮（沿用原指标窗）
      - 统一左上角下拉选择（在指标项之前插入 成交量、成交额）
      - 右侧边悬浮拖动把手（仅悬停显示，拖动可排序；向父级发出 dragstart/dragend）
-     - 双击打开设置窗：VOL/AMOUNT → 原量窗设置；其余指标 → 原指标占位设置
+     - 双击打开设置窗：VOL/AMOUNT → 量窗设置；MACD/KDJ/RSI/BOLL → 统一指标设置（使用 SettingsGrid）
      - 统一顶栏标题：标的名称/代码/频率/来源/复权（参照主窗）
      - 保持与 ECharts 组联动（ct-sync）、横轴竖线对齐、dataZoom 交互会后承接
+     - NEW: 使用 SettingsGrid 实现指标窗设置 UI（参照 MainChartSettingsContent 的写法）
 -->
 <template>
   <div
@@ -113,7 +114,8 @@ import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { buildVolumeOption } from "@/charts/options";
-import { DEFAULT_VOL_SETTINGS } from "@/constants";
+import { DEFAULT_VOL_SETTINGS, STYLE_PALETTE } from "@/constants";
+import SettingsGrid from "@/components/ui/SettingsGrid.vue"; // NEW: 统一设置网格
 
 // props / emits
 const props = defineProps({
@@ -274,48 +276,7 @@ const resetAllTickVol = ref(0);
 
 const VolumeSettingsContent = defineComponent({
   setup() {
-    const hName = (t) => h("div", { class: "std-name" }, t);
-    const hItem = (label, input) =>
-      h("div", { class: "std-item" }, [
-        h("div", { class: "std-item-label" }, label),
-        h("div", { class: "std-item-input" }, [input]),
-      ]);
-    const hCheck = (checked, onChange) =>
-      h("div", { class: "std-check" }, [
-        h("input", { type: "checkbox", checked, onChange }),
-      ]);
-    const hReset = (onClick) =>
-      h("div", { class: "std-reset" }, [
-        h("button", {
-          class: "btn icon",
-          title: "恢复默认",
-          onClick,
-          type: "button",
-        }),
-      ]);
-
-    // === 新增 开始：均线总控（三态）与快照逻辑（完全参照原 VolumePanel.vue） ===
-    // tri-state checkbox（通过 vnode 钩子设置 indeterminate）
-    const triCheckCell = ({ checked, indeterminate, onToggle }) =>
-      h("div", { class: "std-check" }, [
-        h("input", {
-          type: "checkbox",
-          checked,
-          onChange: onToggle,
-          onVnodeMounted(vnode) {
-            try {
-              vnode.el && (vnode.el.indeterminate = !!indeterminate);
-            } catch {}
-          },
-          onVnodeUpdated(vnode) {
-            try {
-              vnode.el && (vnode.el.indeterminate = !!indeterminate);
-            } catch {}
-          },
-        }),
-      ]);
-
-    // 快照更新抑制（总控批量变更时阻止快照被覆盖）
+    // ========== 保留：快照与三态逻辑（均线总控） ========== //
     const snapshotSuppressKeys = new Set();
     function withSnapshotSuppressed(key, fn) {
       try {
@@ -329,7 +290,6 @@ const VolumeSettingsContent = defineComponent({
       return snapshotSuppressKeys.size === 0;
     }
 
-    // 读取当前 MAVOL 组合（仅 enabled）
     function getMavolKeys() {
       return Object.keys(settingsDraftVol.mavolForm || {});
     }
@@ -343,7 +303,6 @@ const VolumeSettingsContent = defineComponent({
     const mavolLastManualSnapshot = ref(getCurrentMavolCombination());
     const mavolGlobalCycleIndex = ref(0);
 
-    // 初始化循环指针（全部开启→首击全关）
     function primeMavolGlobalCycle() {
       const snap = mavolLastManualSnapshot.value || {};
       const ks = getMavolKeys();
@@ -372,16 +331,14 @@ const VolumeSettingsContent = defineComponent({
       if (!ks.length) return;
       if (stateKey === "allOn") {
         for (const k of ks) {
-          if (!settingsDraftVol.mavolForm[k])
-            settingsDraftVol.mavolForm[k] = {};
+          if (!settingsDraftVol.mavolForm[k]) settingsDraftVol.mavolForm[k] = {};
           settingsDraftVol.mavolForm[k].enabled = true;
         }
         return;
       }
       if (stateKey === "allOff") {
         for (const k of ks) {
-          if (!settingsDraftVol.mavolForm[k])
-            settingsDraftVol.mavolForm[k] = {};
+          if (!settingsDraftVol.mavolForm[k]) settingsDraftVol.mavolForm[k] = {};
           settingsDraftVol.mavolForm[k].enabled = false;
         }
         return;
@@ -389,8 +346,7 @@ const VolumeSettingsContent = defineComponent({
       if (stateKey === "snapshot") {
         const snap = mavolLastManualSnapshot.value || {};
         for (const k of ks) {
-          if (!settingsDraftVol.mavolForm[k])
-            settingsDraftVol.mavolForm[k] = {};
+          if (!settingsDraftVol.mavolForm[k]) settingsDraftVol.mavolForm[k] = {};
           settingsDraftVol.mavolForm[k].enabled = !!snap[k];
         }
         return;
@@ -407,8 +363,7 @@ const VolumeSettingsContent = defineComponent({
       const states = mavolStatesForGlobalToggle();
       const key = states[mavolGlobalCycleIndex.value % states.length];
       withSnapshotSuppressed("mavol-global", () => applyMavolGlobalState(key));
-      mavolGlobalCycleIndex.value =
-        (mavolGlobalCycleIndex.value + 1) % states.length;
+      mavolGlobalCycleIndex.value = (mavolGlobalCycleIndex.value + 1) % states.length;
     }
     function updateMavolSnapshotFromCurrent() {
       if (!shouldUpdateSnapshot()) return;
@@ -416,7 +371,6 @@ const VolumeSettingsContent = defineComponent({
       mavolGlobalCycleIndex.value = 0;
     }
 
-    // “全部恢复默认”后刷新 MAVOL 快照与循环指针
     watch(resetAllTickVol, () => {
       try {
         mavolLastManualSnapshot.value = getCurrentMavolCombination();
@@ -424,313 +378,336 @@ const VolumeSettingsContent = defineComponent({
       } catch {}
     });
 
-    return () =>
-      h("div", { key: `vol-settings-root-${draftRev.value}` }, [
-        // 量额柱
-        h("div", { class: "std-row" }, [
-          hName("量额柱"),
-          hItem(
-            "柱宽%",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 10,
-              max: 100,
-              step: 1,
-              value: Number(settingsDraftVol.volBar.barPercent ?? 100),
-              onInput: (e) =>
-                (settingsDraftVol.volBar.barPercent = Math.max(
-                  10,
-                  Math.min(100, Math.round(+e.target.value || 100))
-                )),
-            })
-          ),
-          hItem(
-            "阳线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value:
-                settingsDraftVol.volBar.upColor ||
-                DEFAULT_VOL_SETTINGS.volBar.upColor,
-              onInput: (e) =>
-                (settingsDraftVol.volBar.upColor = String(
-                  e.target.value || DEFAULT_VOL_SETTINGS.volBar.upColor
-                )),
-            })
-          ),
-          hItem(
-            "阴线颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value:
-                settingsDraftVol.volBar.downColor ||
-                DEFAULT_VOL_SETTINGS.volBar.downColor,
-              onInput: (e) =>
-                (settingsDraftVol.volBar.downColor = String(
-                  e.target.value || DEFAULT_VOL_SETTINGS.volBar.downColor
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          h("div", { class: "std-check" }),
-          hReset(() => {
-            Object.assign(settingsDraftVol.volBar, DEFAULT_VOL_SETTINGS.volBar);
-            draftRev.value++;
-          }),
-        ]),
+    // ========== 构造 rows（统一数据结构） ========== //
+    function buildRows() {
+      const rows = [];
 
-        // === 新增：均线总控（三态复选框，位于“量额柱”之后） ===
-        (() => {
-          const ui = mavolGlobalUi();
+      // 量额柱
+      rows.push({
+        key: "vol-bar",
+        name: "量额柱",
+        items: [
+          { key: "barPercent", label: "柱宽%" },
+          { key: "upColor", label: "阳线颜色" },
+          { key: "downColor", label: "阴线颜色" },
+        ],
+        check: { visible: false }, // 不显示复选
+        reset: { visible: true, title: "恢复默认" },
+      });
+
+      // 均线总控（三态）
+      const maUi = mavolGlobalUi();
+      rows.push({
+        key: "mavol-global",
+        name: "均线总控",
+        items: [], // 无额外项
+        check: {
+          type: "tri",
+          checked: maUi.checked,
+          indeterminate: maUi.indeterminate,
+        },
+        reset: { visible: false },
+      });
+
+      // MAVOL 三条线
+      Object.entries(settingsDraftVol.mavolForm || {}).forEach(([k, conf]) => {
+        rows.push({
+          key: `mavol-${k}`,
+          name: `MAVOL${conf.period}`,
+          items: [
+            { key: "width", label: "线宽", maKey: k },
+            { key: "color", label: "颜色", maKey: k },
+            { key: "style", label: "线型", maKey: k },
+            { key: "period", label: "周期", maKey: k },
+          ],
+          check: { type: "single", checked: !!conf.enabled },
+          reset: { visible: true, title: "恢复默认" },
+        });
+      });
+
+      // 放量标记
+      rows.push({
+        key: "marker-pump",
+        name: "放量标记",
+        items: [
+          { key: "pumpShape", label: "形状" },
+          { key: "pumpColor", label: "颜色" },
+          { key: "pumpThreshold", label: "阈值" },
+        ],
+        check: { type: "single", checked: !!settingsDraftVol.markerPump.enabled },
+        reset: { visible: true, title: "恢复默认" },
+      });
+
+      // 缩量标记
+      rows.push({
+        key: "marker-dump",
+        name: "缩量标记",
+        items: [
+          { key: "dumpShape", label: "形状" },
+          { key: "dumpColor", label: "颜色" },
+          { key: "dumpThreshold", label: "阈值" },
+        ],
+        check: { type: "single", checked: !!settingsDraftVol.markerDump.enabled },
+        reset: { visible: true, title: "恢复默认" },
+      });
+
+      return rows;
+    }
+
+    // ========== 行级事件（切换/重置） ========== //
+    function onRowToggle(row) {
+      const k = String(row.key || "");
+      if (k === "mavol-global") {
+        onMavolGlobalToggle();
+        return;
+      }
+      if (k.startsWith("mavol-")) {
+        const mk = k.slice(6); // 'mavol-MAVOL5' -> 'MAVOL5'
+        const conf = settingsDraftVol.mavolForm[mk];
+        if (conf) {
+          conf.enabled = !conf.enabled;
+          updateMavolSnapshotFromCurrent();
+        }
+        return;
+      }
+      if (k === "marker-pump") {
+        settingsDraftVol.markerPump.enabled = !settingsDraftVol.markerPump.enabled;
+        return;
+      }
+      if (k === "marker-dump") {
+        settingsDraftVol.markerDump.enabled = !settingsDraftVol.markerDump.enabled;
+      }
+    }
+
+    function onRowReset(row) {
+      const k = String(row.key || "");
+      if (k === "vol-bar") {
+        Object.assign(settingsDraftVol.volBar, DEFAULT_VOL_SETTINGS.volBar);
+        draftRev.value++;
+        return;
+      }
+      if (k.startsWith("mavol-")) {
+        const mk = k.slice(6);
+        const def = DEFAULT_VOL_SETTINGS.mavolStyles[mk];
+        if (def) {
+          settingsDraftVol.mavolForm[mk] = { ...def };
+          updateMavolSnapshotFromCurrent();
+          draftRev.value++;
+        }
+        return;
+      }
+      if (k === "marker-pump") {
+        settingsDraftVol.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
+        draftRev.value++;
+        return;
+      }
+      if (k === "marker-dump") {
+        settingsDraftVol.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
+        draftRev.value++;
+      }
+    }
+
+    // ========== 控件槽位渲染（renderControl） ========== //
+    function renderControl({ row, item }) {
+      const k = String(row.key || "");
+      const id = String(item.key || "");
+
+      // 量额柱
+      if (k === "vol-bar") {
+        if (id === "barPercent") {
+          return h("input", {
+            class: "input num",
+            type: "number",
+            min: 10,
+            max: 100,
+            step: 1,
+            value: Number(settingsDraftVol.volBar.barPercent ?? 100),
+            onInput: (e) =>
+              (settingsDraftVol.volBar.barPercent = Math.max(
+                10,
+                Math.min(100, Math.round(+e.target.value || 100))
+              )),
+          });
+        }
+        if (id === "upColor") {
+          return h("input", {
+            class: "input color",
+            type: "color",
+            value: settingsDraftVol.volBar.upColor || DEFAULT_VOL_SETTINGS.volBar.upColor,
+            onInput: (e) => (settingsDraftVol.volBar.upColor = String(e.target.value)),
+          });
+        }
+        if (id === "downColor") {
+          return h("input", {
+            class: "input color",
+            type: "color",
+            value: settingsDraftVol.volBar.downColor || DEFAULT_VOL_SETTINGS.volBar.downColor,
+            onInput: (e) => (settingsDraftVol.volBar.downColor = String(e.target.value)),
+          });
+        }
+      }
+
+      // MAVOL 行
+      if (k.startsWith("mavol-")) {
+        const mk = k.slice(6);
+        const conf = settingsDraftVol.mavolForm[mk] || {};
+        if (id === "width") {
+          return h("input", {
+            class: "input num",
+            type: "number",
+            min: 0.5,
+            max: 4,
+            step: 0.5,
+            value: Number(conf.width ?? 1),
+            onInput: (e) => (settingsDraftVol.mavolForm[mk].width = Number(e.target.value || 1)),
+          });
+        }
+        if (id === "color") {
+          return h("input", {
+            class: "input color",
+            type: "color",
+            value: conf.color || DEFAULT_VOL_SETTINGS.mavolStyles[mk]?.color,
+            onInput: (e) => (settingsDraftVol.mavolForm[mk].color = String(e.target.value)),
+          });
+        }
+        if (id === "style") {
           return h(
-            "div",
-            { class: "std-row", key: `mavol-global-${draftRev.value}` },
+            "select",
+            {
+              class: "input",
+              value: conf.style || "solid",
+              onChange: (e) => (settingsDraftVol.mavolForm[mk].style = String(e.target.value)),
+            },
             [
-              hName("均线总控"),
-              h("div"),
-              h("div"),
-              h("div"),
-              h("div"),
-              h("div"),
-              triCheckCell({
-                checked: ui.checked,
-                indeterminate: ui.indeterminate,
-                onToggle: onMavolGlobalToggle,
-              }),
-              h("div"),
+              h("option", { value: "solid" }, "实线"),
+              h("option", { value: "dashed" }, "虚线"),
+              h("option", { value: "dotted" }, "点线"),
             ]
           );
-        })(),
+        }
+        if (id === "period") {
+          return h("input", {
+            class: "input num",
+            type: "number",
+            min: 1,
+            step: 1,
+            value: Number(conf.period ?? 5),
+            onInput: (e) =>
+              (settingsDraftVol.mavolForm[mk].period = Math.max(
+                1,
+                parseInt(e.target.value || 5, 10)
+              )),
+          });
+        }
+      }
 
-        // MAVOL 三条线
-        ...Object.entries(settingsDraftVol.mavolForm).map(([k, conf]) =>
-          h("div", { class: "std-row", key: `mrow-${k}-${draftRev.value}` }, [
-            hName(`MAVOL${conf.period}`),
-            hItem(
-              "线宽",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 0.5,
-                max: 4,
-                step: 0.5,
-                value: Number(conf.width ?? 1),
-                onInput: (e) =>
-                  (settingsDraftVol.mavolForm[k].width = Number(
-                    e.target.value || 1
-                  )),
-              })
-            ),
-            hItem(
-              "颜色",
-              h("input", {
-                class: "input color",
-                type: "color",
-                value:
-                  conf.color ||
-                  DEFAULT_VOL_SETTINGS.mavolStyles[k]?.color ||
-                  DEFAULT_VOL_SETTINGS.mavolStyles.MAVOL5.color,
-                onInput: (e) =>
-                  (settingsDraftVol.mavolForm[k].color = String(
-                    e.target.value
-                  )),
-              })
-            ),
-            hItem(
-              "线型",
-              h(
-                "select",
-                {
-                  class: "input",
-                  value: conf.style || "solid",
-                  onChange: (e) =>
-                    (settingsDraftVol.mavolForm[k].style = String(
-                      e.target.value
-                    )),
-                },
-                [
-                  h("option", { value: "solid" }, "实线"),
-                  h("option", { value: "dashed" }, "虚线"),
-                  h("option", { value: "dotted" }, "点线"),
-                ]
-              )
-            ),
-            hItem(
-              "周期",
-              h("input", {
-                class: "input num",
-                type: "number",
-                min: 1,
-                step: 1,
-                value: Number(conf.period ?? 5),
-                onInput: (e) =>
-                  (settingsDraftVol.mavolForm[k].period = Math.max(
-                    1,
-                    parseInt(e.target.value || 5, 10)
-                  )),
-              })
-            ),
-            h("div"),
-            // 勾选：启用 + 更新快照
-            h("div", { class: "std-check" }, [
-              h("input", {
-                type: "checkbox",
-                checked: !!conf.enabled,
-                onChange: (e) => {
-                  settingsDraftVol.mavolForm[k].enabled = !!e.target.checked;
-                  updateMavolSnapshotFromCurrent();
-                },
-              }),
-            ]),
-            hReset(() => {
-              const def = DEFAULT_VOL_SETTINGS.mavolStyles[k];
-              if (def) {
-                settingsDraftVol.mavolForm[k] = { ...def };
-                draftRev.value++;
-                // 单项重置后也刷新“均线总控”快照
-                updateMavolSnapshotFromCurrent();
-              }
-            }),
-          ])
-        ),
-        // 放量标记
-        h("div", { class: "std-row", key: `pump-${draftRev.value}` }, [
-          hName("放量标记"),
-          hItem(
-            "形状",
-            h(
-              "select",
-              {
-                class: "input",
-                value:
-                  settingsDraftVol.markerPump.shape ||
-                  DEFAULT_VOL_SETTINGS.markerPump.shape,
-                onChange: (e) =>
-                  (settingsDraftVol.markerPump.shape = String(e.target.value)),
-              },
-              [
-                h("option", "triangle"),
-                h("option", "diamond"),
-                h("option", "circle"),
-                h("option", "rect"),
-              ]
-            )
-          ),
-          hItem(
-            "颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value:
-                settingsDraftVol.markerPump.color ||
-                DEFAULT_VOL_SETTINGS.markerPump.color,
-              onInput: (e) =>
-                (settingsDraftVol.markerPump.color = String(e.target.value)),
-            })
-          ),
-          hItem(
-            "阈值",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0.1,
-              step: 0.1,
-              value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
-                ? +settingsDraftVol.markerPump.threshold
-                : DEFAULT_VOL_SETTINGS.markerPump.threshold,
-              onInput: (e) =>
-                (settingsDraftVol.markerPump.threshold = Math.max(
-                  0.1,
-                  Number(
-                    e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold
-                  )
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          hCheck(
-            !!settingsDraftVol.markerPump.enabled,
-            (e) => (settingsDraftVol.markerPump.enabled = !!e.target.checked)
-          ),
-          hReset(() => {
-            settingsDraftVol.markerPump = {
-              ...DEFAULT_VOL_SETTINGS.markerPump,
-            };
-            draftRev.value++;
-          }),
-        ]),
-        // 缩量标记
-        h("div", { class: "std-row", key: `dump-${draftRev.value}` }, [
-          hName("缩量标记"),
-          hItem(
-            "形状",
-            h(
-              "select",
-              {
-                class: "input",
-                value:
-                  settingsDraftVol.markerDump.shape ||
-                  DEFAULT_VOL_SETTINGS.markerDump.shape,
-                onChange: (e) =>
-                  (settingsDraftVol.markerDump.shape = String(e.target.value)),
-              },
-              [
-                h("option", "triangle"),
-                h("option", "diamond"),
-                h("option", "circle"),
-                h("option", "rect"),
-              ]
-            )
-          ),
-          hItem(
-            "颜色",
-            h("input", {
-              class: "input color",
-              type: "color",
-              value:
-                settingsDraftVol.markerDump.color ||
-                DEFAULT_VOL_SETTINGS.markerDump.color,
-              onInput: (e) =>
-                (settingsDraftVol.markerDump.color = String(e.target.value)),
-            })
-          ),
-          hItem(
-            "阈值",
-            h("input", {
-              class: "input num",
-              type: "number",
-              min: 0.1,
-              step: 0.1,
-              value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
-                ? +settingsDraftVol.markerDump.threshold
-                : DEFAULT_VOL_SETTINGS.markerDump.threshold,
-              onInput: (e) =>
-                (settingsDraftVol.markerDump.threshold = Math.max(
-                  0.1,
-                  Number(
-                    e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold
-                  )
-                )),
-            })
-          ),
-          h("div"),
-          h("div"),
-          hCheck(
-            !!settingsDraftVol.markerDump.enabled,
-            (e) => (settingsDraftVol.markerDump.enabled = !!e.target.checked)
-          ),
-          hReset(() => {
-            settingsDraftVol.markerDump = {
-              ...DEFAULT_VOL_SETTINGS.markerDump,
-            };
-            draftRev.value++;
-          }),
-        ]),
-      ]);
+      // 放量标记
+      if (k === "marker-pump") {
+        if (id === "pumpShape") {
+          return h(
+            "select",
+            {
+              class: "input",
+              value: settingsDraftVol.markerPump.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
+              onChange: (e) => (settingsDraftVol.markerPump.shape = String(e.target.value)),
+            },
+            [
+              h("option", { value: "triangle" }, "triangle"),
+              h("option", { value: "diamond" }, "diamond"),
+              h("option", { value: "circle" }, "circle"),
+              h("option", { value: "rect" }, "rect"),
+            ]
+          );
+        }
+        if (id === "pumpColor") {
+          return h("input", {
+            class: "input color",
+            type: "color",
+            value: settingsDraftVol.markerPump.color || DEFAULT_VOL_SETTINGS.markerPump.color,
+            onInput: (e) => (settingsDraftVol.markerPump.color = String(e.target.value)),
+          });
+        }
+        if (id === "pumpThreshold") {
+          return h("input", {
+            class: "input num",
+            type: "number",
+            min: 0.1,
+            step: 0.1,
+            value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
+              ? +settingsDraftVol.markerPump.threshold
+              : DEFAULT_VOL_SETTINGS.markerPump.threshold,
+            onInput: (e) =>
+              (settingsDraftVol.markerPump.threshold = Math.max(
+                0.1,
+                Number(e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold)
+              )),
+          });
+        }
+      }
+
+      // 缩量标记
+      if (k === "marker-dump") {
+        if (id === "dumpShape") {
+          return h(
+            "select",
+            {
+              class: "input",
+              value: settingsDraftVol.markerDump.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
+              onChange: (e) => (settingsDraftVol.markerDump.shape = String(e.target.value)),
+            },
+            [
+              h("option", { value: "triangle" }, "triangle"),
+              h("option", { value: "diamond" }, "diamond"),
+              h("option", { value: "circle" }, "circle"),
+              h("option", { value: "rect" }, "rect"),
+            ]
+          );
+        }
+        if (id === "dumpColor") {
+          return h("input", {
+            class: "input color",
+            type: "color",
+            value: settingsDraftVol.markerDump.color || DEFAULT_VOL_SETTINGS.markerDump.color,
+            onInput: (e) => (settingsDraftVol.markerDump.color = String(e.target.value)),
+          });
+        }
+        if (id === "dumpThreshold") {
+          return h("input", {
+            class: "input num",
+            type: "number",
+            min: 0.1,
+            step: 0.1,
+            value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
+              ? +settingsDraftVol.markerDump.threshold
+              : DEFAULT_VOL_SETTINGS.markerDump.threshold,
+            onInput: (e) =>
+              (settingsDraftVol.markerDump.threshold = Math.max(
+                0.1,
+                Number(e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold)
+              )),
+          });
+        }
+      }
+
+      return null;
+    }
+
+    // ========== 渲染函数（使用 SettingsGrid） ========== //
+    return () => {
+      const rows = buildRows();
+      return h(
+        SettingsGrid,
+        {
+          rows,
+          itemsPerRow: 5,
+          onRowToggle,
+          onRowReset,
+        },
+        {
+          control: (slotProps) => renderControl(slotProps),
+        }
+      );
+    };
   },
 });
 
