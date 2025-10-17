@@ -913,8 +913,6 @@ onMounted(async () => {
     });
   } catch {}
 
-  chart.getZr().on("mousemove", (_e) => {});
-
   // NEW: 监听画布与窗口鼠标抬起/按下，维护拖移会话不被超时中断
   try {
     const zr = chart.getZr();
