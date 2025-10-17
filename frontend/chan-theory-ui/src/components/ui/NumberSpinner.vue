@@ -33,7 +33,7 @@
 
 <script setup>
 import { computed, ref } from "vue";
-import { vSelectAll } from "@/utils/inputBehaviors";
+import { clampNumber } from "@/utils/numberUtils";
 
 const props = defineProps({
   modelValue: { type: [Number, String], required: true },
@@ -43,20 +43,14 @@ const props = defineProps({
   disabled: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
 });
-defineOptions({ directives: { selectAll: vSelectAll } });
 
 const emit = defineEmits(["update:modelValue", "blur"]);
 const inp = ref(null);
 const displayValue = computed(() => String(props.modelValue ?? ""));
 
-function clampInt(n, min, max) {
-  const v = parseInt(n, 10);
-  if (isNaN(v)) return min;
-  return Math.max(min, Math.min(max, v));
-}
 function onInput(e) {
   if (props.disabled) return;
-  const next = clampInt(e.target.value, props.min, props.max);
+  const next = clampNumber(e.target.value, { min: props.min, max: props.max, integer: true });
   emit("update:modelValue", next);
 }
 function onKeydown(e) {
@@ -76,13 +70,13 @@ function onWheel(e) {
 }
 function stepBy(delta) {
   if (props.disabled) return;
-  const curr = clampInt(props.modelValue, props.min, props.max);
-  const next = clampInt(curr + delta, props.min, props.max);
+  const curr = clampNumber(props.modelValue, { min: props.min, max: props.max, integer: true });
+  const next = clampNumber(curr + delta, { min: props.min, max: props.max, integer: true });
   if (next !== curr) emit("update:modelValue", next);
 }
 function onBlur() {
   if (props.disabled) return;
-  const curr = clampInt(props.modelValue, props.min, props.max);
+  const curr = clampNumber(props.modelValue, { min: props.min, max: props.max, integer: true });
   emit("update:modelValue", curr);
   emit("blur");
 }
@@ -120,7 +114,7 @@ function onFocus() {
   padding: 0 6px;
   outline: none;
   text-align: center;
-  -moz-appearance: textfield;
+  appearance: textfield;
 }
 .numspin-input::-webkit-outer-spin-button,
 .numspin-input::-webkit-inner-spin-button {

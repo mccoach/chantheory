@@ -84,9 +84,6 @@ export const DEFAULT_KLINE_STYLE = {
     fillFadePercent: 0, // 填充淡显（0~100；仅作用填充，轮廓线始终100%）
     displayOrder: "first", // 显示层级：'first'（先）|'after'（后）；默认先
   },
-
-  // 保留旧字段兼容（不再使用）
-  subType: "candlestick",
 };
 
 // ------------------------------

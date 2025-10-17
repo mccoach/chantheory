@@ -19,7 +19,7 @@ import {
 } from "@/constants";
 
 import { useUserSettings } from "@/composables/useUserSettings";
-
+import { hexToRgba } from "@/utils/colorUtils";
 // 涨跌标记：横坐标 = anchor_idx_orig（承载点的原始索引），绑定隐藏 yAxis=1
 export function buildUpDownMarkers(reducedBars, env = {}) {
   const settings = useUserSettings();

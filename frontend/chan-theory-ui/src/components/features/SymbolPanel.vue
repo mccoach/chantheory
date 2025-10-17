@@ -264,14 +264,11 @@
 
 <script setup>
 import { inject, ref, computed, onMounted, onBeforeUnmount } from "vue";
-import { vSelectAll } from "@/utils/inputBehaviors";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import * as historyApi from "@/services/historyService"; // NEW: 历史入库服务
-
-defineOptions({ directives: { selectAll: vSelectAll } });
 
 const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);

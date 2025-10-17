@@ -1,7 +1,10 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options.js
 // ==============================
 // 说明：ECharts 选项生成（主/量/指标 · 逐行注释 · 全量文件）
-// 本版适配“新命名系统”：
+// 本版适配“新命名系统”与通用数字/颜色工具归口：
+// - 数字格式：统一使用 formatNumberScaled（自动位数/万级缩放/百分比/业务后缀）
+// - 颜色透明：统一使用 hexToRgba（0→transparent 空心）
+// - 时间格式：统一使用 fmtTimeByFreq / makeAxisLabelFormatter
 // - 合并K：使用 g_pri/d_pri/dir_int/anchor_idx_orig 等；
 // - 原始→合并K映射：mapOrigToReduced 项键为 {reduced_idx, role_str}；
 // - 主图 tooltip 的合并K极值与方向读取新键；其余逻辑不变。
@@ -11,12 +14,18 @@
  * 主题读取与默认常量
  * ============================= */
 import { getChartTheme } from "@/charts/theme"; // 读取 CSS 变量映射到的 ECharts 主题颜色
+import { hexToRgba } from "@/utils/colorUtils"; // 通用颜色处理工具
+import { formatNumberScaled } from "@/utils/numberUtils"; // 通用数字处理工具
 import {
   STYLE_PALETTE, // 颜色调色板（线条、柱子）
   DEFAULT_VOL_SETTINGS, // 量窗默认设置（用于阈值/颜色等兜底）
   DEFAULT_VOL_MARKER_SIZE, // 量窗标记（放/缩量）尺寸与偏移默认值
   DEFAULT_KLINE_STYLE, // 主图K线默认（新增：原始/合并K线控制）
 } from "@/constants"; // 集中默认（不含本文件内的 UI 常量）
+import {
+  fmtTimeByFreq, // 统一：tooltip 与 slider label 使用
+  makeAxisLabelFormatter, // 统一：xAxis.axisLabel.formatter 使用
+} from "@/utils/timeFormat";
 
 /* =============================
  * 工具：固定 tooltip 定位器
@@ -78,7 +87,7 @@ const LAYOUT = {
 };
 
 /* =============================
- * 小工具：时间/单位/数组等
+ * 小工具：数组/指标容错
  * ============================= */
 
 // 安全返回数组
@@ -89,88 +98,6 @@ function asArray(x) {
 // 安全返回对象
 function asIndicators(x) {
   return x && typeof x === "object" ? x : {};
-}
-
-// 保留 3 位小数格式
-function fmt3(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toFixed(3) : "";
-}
-
-// 是否分钟族（以 freq 后缀 m 判断）
-function isMinuteFreq(freq) {
-  return typeof freq === "string" && /m$/.test(freq);
-}
-
-// 两位补零
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-
-/**
- * 将 ISO8601 时间（可能带时区）格式化为“无时区短文本”
- * - 分钟族：YYYY-MM-DD HH:MM
- * - 日/周/月：YYYY-MM-DD
- */
-function fmtTimeByFreq(freq, isoVal) {
-  try {
-    const d = new Date(isoVal); // 浏览器本地解析
-    if (Number.isNaN(d.getTime())) return String(isoVal || "");
-    const Y = d.getFullYear();
-    const M = pad2(d.getMonth() + 1);
-    const D = pad2(d.getDate());
-    const h = pad2(d.getHours());
-    const m = pad2(d.getMinutes());
-    return isMinuteFreq(freq) ? `${Y}-${M}-${D} ${h}:${m}` : `${Y}-${M}-${D}`;
-  } catch {
-    return String(isoVal || "");
-  }
-}
-
-/**
- * 返回横轴标签格式化函数（依频率输出短文本）
- */
-function makeAxisLabelFormatter(freq) {
-  return (val) => fmtTimeByFreq(freq, val);
-}
-
-/**
- * 量/额的单位选择器（亿/万/无）
- */
-function pickUnitDivider(maxAbs, isAmount) {
-  // NEW: 增加“万亿”层级（用于金额超大时缩短标签宽度）
-  if (isAmount && maxAbs >= 1e12)
-    return { div: 1e12, lab: "万亿" + (isAmount ? "元" : "") };
-  if (maxAbs >= 1e8) return { div: 1e8, lab: "亿" + (isAmount ? "元" : "") };
-  if (maxAbs >= 1e4) return { div: 1e4, lab: "万" + (isAmount ? "元" : "") };
-  return { div: 1, lab: isAmount ? "元" : "" };
-}
-
-/**
- * 应用单位（带自动小数位）
- */
-function fmtUnit(val, unit) {
-  const n = Number(val);
-  if (!Number.isFinite(n)) return "-";
-  const x = n / (unit?.div || 1);
-  const digits = Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2;
-  return x.toFixed(digits) + (unit?.lab || "");
-}
-
-/* =============================
- * 新增小工具：hex 转 rgba（用于合并K线淡显/空心/轮廓）
- * ============================= */
-function hexToRgba(hex, alpha = 1.0) {
-  try {
-    const h = String(hex || "").replace("#", "");
-    const r = parseInt(h.slice(0, 2), 16);
-    const g = parseInt(h.slice(2, 4), 16);
-    const b = parseInt(h.slice(4, 6), 16);
-    const a = Math.max(0, Math.min(1, Number(alpha || 1)));
-    return `rgba(${r},${g},${b},${a})`;
-  } catch {
-    return hex || "#999";
-  }
 }
 
 /* =============================
@@ -417,13 +344,15 @@ function makeMainTooltipFormatter({
       }
     } catch {}
     rows.push(
-      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>G: ${fmt3(
-        G
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>G: ${formatNumberScaled(
+        G,
+        { digits: 3, allowEmpty: true }
       )}</div>`
     );
     rows.push(
-      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>D: ${fmt3(
-        D
+      `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${mergedDotStyle}"></span>D: ${formatNumberScaled(
+        D,
+        { digits: 3, allowEmpty: true }
       )}</div>`
     );
 
@@ -436,32 +365,37 @@ function makeMainTooltipFormatter({
         : KS.downColor || DEFAULT_KLINE_STYLE.downColor;
       const origDotStyle = `background:${origDotColor};border-radius:50%;`;
 
-      // O 行（有颜色圆点）
+      // O/H/L/C 行
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>O: ${fmt3(
-          k.o
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>O: ${formatNumberScaled(
+          k.o,
+          { digits: 3, allowEmpty: true }
         )}</div>`
       );
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>H: ${fmt3(
-          k.h
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>H: ${formatNumberScaled(
+          k.h,
+          { digits: 3, allowEmpty: true }
         )}</div>`
       );
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>L: ${fmt3(
-          k.l
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>L: ${formatNumberScaled(
+          k.l,
+          { digits: 3, allowEmpty: true }
         )}</div>`
       );
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>C: ${fmt3(
-          k.c
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;${origDotStyle}"></span>C: ${formatNumberScaled(
+          k.c,
+          { digits: 3, allowEmpty: true }
         )}</div>`
       );
     } else {
       // 折线模式（仅 Close）
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:#03a9f4;"></span>Close: ${fmt3(
-          k.c
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:#03a9f4;"></span>Close: ${formatNumberScaled(
+          k.c,
+          { digits: 3, allowEmpty: true }
         )}</div>`
       );
     }
@@ -475,7 +409,10 @@ function makeMainTooltipFormatter({
         rows.push(
           `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
             p.color
-          };"></span>${p.seriesName}: ${fmt3(val)}</div>`
+          };"></span>${p.seriesName}: ${formatNumberScaled(val, {
+            digits: 3,
+            allowEmpty: true,
+          })}</div>`
         );
       }
     }
@@ -489,11 +426,12 @@ function makeMainTooltipFormatter({
 
 /**
  * 量窗 tooltip：时间 + 当前量/额 + MAVOL 若有 + 换手率（如有）
+ * - 单位缩放与位数统一使用 formatNumberScaled（无“元”，数量/金额均为万级缩放）
+ * - 业务后缀由 suffix 参数控制（如数量的“手”）
  */
 function makeVolumeTooltipFormatter({
   candles, // 蜡烛数组（取时间/涨跌/换手率）
   freq, // 频率（决定时间短文本）
-  unitInfo, // 单位（亿/万）
   baseName, // VOL/AMOUNT
   mavolMap, // n -> 序列值
 }) {
@@ -511,14 +449,16 @@ function makeVolumeTooltipFormatter({
     const baseDotColor = isUp
       ? STYLE_PALETTE.bars.volume.up
       : STYLE_PALETTE.bars.volume.down;
-    // 当前柱值
+    // 当前柱值（bar 系列）
     const bar = params.find(
       (x) => (x.seriesType || "").toLowerCase() === "bar"
     );
     const baseRawVal = Array.isArray(bar?.value)
       ? bar.value[bar.value.length - 1]
       : bar?.value;
-    const baseValText = fmtUnit(baseRawVal, unitInfo);
+    const baseValText = formatNumberScaled(baseRawVal, {
+      minIntDigitsToScale: 5,
+    });
     // 放/缩量标签（若有散点叠加）
     const hasPump = params.some((pp) => pp.seriesName === "放量标记");
     const hasDump = params.some((pp) => pp.seriesName === "缩量标记");
@@ -548,37 +488,38 @@ function makeVolumeTooltipFormatter({
       const dotColor = lineParam?.color || "#ccc";
       const labelPrefix = isVolMode ? "量MA" : "额MA";
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>${labelPrefix}${n}: ${fmtUnit(
-          +mv,
-          unitInfo
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${dotColor};"></span>${labelPrefix}${n}: ${formatNumberScaled(
+          mv,
+          { minIntDigitsToScale: 5 }
         )}</div>`
       );
     }
     // 换手率（如有）
     if (typeof k.tr === "number") {
       rows.push(
-        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>换手率: ${fmt3(
-          k.tr
-        )}%</div>`
+        `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>换手率: ${formatNumberScaled(
+          k.tr,
+          { digits: 2, percent: { base: 1 }, allowEmpty: true }
+        )}</div>`
       );
     }
-    // 额/量的互补输出
+    // 额/量的互补输出（按 base 模式）
     if (isVolMode) {
       if (typeof k.a === "number") {
         rows.push(
-          `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>成交额: ${fmtUnit(
+          `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>成交额: ${formatNumberScaled(
             k.a,
-            pickUnitDivider(Math.abs(k.a || 0), true)
+            { minIntDigitsToScale: 5 }
           )}</div>`
         );
       }
     } else {
       if (typeof k.v === "number") {
         rows.push(
-          `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>成交量: ${fmtUnit(
+          `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;"></span>成交量: ${formatNumberScaled(
             k.v,
-            pickUnitDivider(Math.abs(k.v || 0), false)
-          )}手</div>`
+            { minIntDigitsToScale: 5, suffix: "手" }
+          )}</div>`
         );
       }
     }
@@ -626,7 +567,7 @@ export function buildMainChartOption(
   // 系列集合
   const series = [];
 
-  // —— 新增：显示控制（原始/合并）以及层级（z） —— //
+  // —— 显示控制（原始/合并）以及层级（z） —— //
   const ks = klineStyle || DEFAULT_KLINE_STYLE || {};
   const MK = ks.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
   const showOriginal = (ks.originalEnabled ?? true) === true;
@@ -674,8 +615,7 @@ export function buildMainChartOption(
 
     // 合并K线（HL 柱）
     if (showMerged && Array.isArray(reducedBars) && reducedBars.length) {
-      const outlineW = Math.max(0.1, Number(MK.outlineWidth || 1.2));
-      // 根因修复：默认颜色回退到 DEFAULT_KLINE_STYLE.mergedK.*（集中收口 index.js）
+      const outlineW = Math.max(0.1, Number(MK.outlineWidth));
       const fallbackUp = DEFAULT_KLINE_STYLE.mergedK.upColor;
       const fallbackDn = DEFAULT_KLINE_STYLE.mergedK.downColor;
       const upC = MK.upColor || fallbackUp;
@@ -804,14 +744,14 @@ export function buildMainChartOption(
     axisPointer: {
       show: !!ui?.isHovered,
       label: {
-        show: !!ui?.isHovered, // 标签（气泡）的显示也与悬浮状态绑定
+        show: !!ui?.isHovered, // 标签显示与悬浮状态绑定
         formatter: function (params) {
-          // 确保价格显示为两位小数
+          // NOTE: 使用通用价格格式化，非法值返回空串（保持现有行为一致）
           const val =
             typeof params.value === "object" && params.value !== null
               ? params.value.value
               : params.value;
-          return Number.isFinite(val) ? Number(val).toFixed(2) : "";
+          return formatNumberScaled(val, { digits: 2, allowEmpty: true });
         },
       },
     },
@@ -837,7 +777,7 @@ export function buildMainChartOption(
     axisPointer: {
       link: [{ xAxisIndex: "all" }],
     },
-    // 统一 tooltip（恢复“聚焦竖线 + 信息浮窗”）
+    // 统一 tooltip（聚焦竖线 + 信息浮窗）
     tooltip: {
       // 触发：按轴触发（显示竖线和多系列信息）
       trigger: "axis",
@@ -922,7 +862,6 @@ export function buildVolumeOption(
     (m, x) => (Number.isFinite(+x) ? Math.max(m, Math.abs(+x)) : m),
     0
   );
-  const unitInfo = pickUnitDivider(baseMaxAbs, baseMode === "amount");
 
   // 柱系列
   const series = [];
@@ -1008,7 +947,6 @@ export function buildVolumeOption(
   // 放/缩量标记尺寸估算（按可视柱宽）
   const hostW = Math.max(1, Number(volEnv?.hostWidth || 0));
   const visCount = Math.max(1, Number(volEnv?.visCount || baseScaled.length));
-  // 新增：全局覆写优先（统一宽度源）
   const overrideW = Number(volEnv?.overrideMarkWidth);
   const approxBarWidthPx =
     hostW > 1 && visCount > 0
@@ -1127,7 +1065,6 @@ export function buildVolumeOption(
       formatter: makeVolumeTooltipFormatter({
         candles: list,
         freq,
-        unitInfo,
         baseName,
         mavolMap,
       }),
@@ -1142,22 +1079,16 @@ export function buildVolumeOption(
   option.yAxis = {
     min: 0,
     scale: true,
-      // NEW: 左轴标签统一显示压缩单位（万/亿/万亿），缩短宽度但保留单位信息
+    // 左轴标签统一显示压缩单位（万/亿/万亿），缩短宽度但保留单位信息；
+    // 使用通用格式化：单位缩放 + 自动位数；不满足缩放条件则原样显示
     axisLabel: {
       color: theme.axisLabelColor,
       align: "right",
-      formatter: (val) => {
-        const n = Number(val);
-        if (!Number.isFinite(n)) return "";
-        const div = unitInfo?.div || 1;
-        const x = n / div;
-        const digits = Math.abs(x) >= 100 ? 0 : Math.abs(x) >= 10 ? 1 : 2;
-          const lab = unitInfo?.lab || ""; // 例：'万'/'亿'/'万亿' + '元'
-          return `${x.toFixed(digits)}${lab}`;
-      },
+      // 使用通用格式化：单位缩放 + 自动位数；不满足缩放条件则原样显示
+      formatter: (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 }),
       margin: ui?.isHovered ? 6 : 6,
     },
-    // 关键：根据 isHovered 动态开关 y 轴指示器，且永不显示 label
+    // 根据 isHovered 动态开关 y 轴指示器
     axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
   };
   option.series = series;
@@ -1173,7 +1104,7 @@ export function buildVolumeOption(
       isMain: false, // 量窗
       extraBottomPx, // 底部额外空间（腾给标记）
       xAxisLabelMargin, // 横轴标签 margin（略为增大）
-      leftPx: 72, // NEW: 固定左侧标签宽度（与主窗一致）
+      leftPx: 72, // 固定左侧标签宽度（与主窗一致）
     },
     { dates, freq }
   );
@@ -1263,13 +1194,19 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
             rows.push(
               `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${color};"></span>${
                 p.seriesName
-              }: ${fmt3(val)}</div>`
+              }: ${formatNumberScaled(val, {
+                digits: 3,
+                allowEmpty: true,
+              })}</div>`
             );
           } else {
             rows.push(
               `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
                 p.color
-              };"></span>${p.seriesName || ""}: ${fmt3(val)}</div>`
+              };"></span>${p.seriesName || ""}: ${formatNumberScaled(val, {
+                digits: 3,
+                allowEmpty: true,
+              })}</div>`
             );
           }
         }
@@ -1370,11 +1307,16 @@ export function buildBollOption({ candles, indicators, freq }, ui) {
         const timeLabel = fmtTimeByFreq(freq, rawLabel);
         const rows = [`<div style="margin-bottom:4px;">${timeLabel}</div>`];
         for (const p of params) {
-          const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+          const val = Array.isArray(p.value)
+            ? p.value[p.value.length - 1]
+            : p.value;
           rows.push(
             `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
               p.color
-            };"></span>${p.seriesName || ""}: ${fmt3(val)}</div>`
+            };"></span>${p.seriesName || ""}: ${formatNumberScaled(val, {
+              digits: 3,
+              allowEmpty: true,
+            })}</div>`
           );
         }
         return rows.join("");
@@ -1392,6 +1334,8 @@ export function buildBollOption({ candles, indicators, freq }, ui) {
     axisLabel: {
       color: theme.axisLabelColor,
       align: "right",
+      // 使用通用单位格式化（自动缩放 + 自动位数），避免重复逻辑
+      formatter: (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 }),
       margin: ui?.isHovered ? 6 : 6,
     },
     axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
@@ -1421,14 +1365,18 @@ export function buildBollOption({ candles, indicators, freq }, ui) {
 
 /**
  * 生成 KDJ/RSI 窗 option（同一容器复用）
+ * - 与 numberUtils 对齐：
+ *   * tooltip 数值统一用 formatNumberScaled（digits: 3, allowEmpty: true）
+ *   * yAxis.axisLabel 使用 formatNumberScaled（digits: 2，避免缩放：minIntDigitsToScale=5）
+ * - 修复：移除未定义的 extraBottomPx/xAxisLabelMargin 引用，改为默认值 0/12
  */
 export function buildKdjOrRsiOption(
   { candles, indicators, freq, useKDJ = false, useRSI = false },
   ui
 ) {
   const theme = getChartTheme();
-  const list = asArray(candles);
-  const inds = asIndicators(indicators);
+  const list = Array.isArray(candles) ? candles : [];
+  const inds = indicators && typeof indicators === "object" ? indicators : {};
   const dates = list.map((d) => d.t);
   const series = [];
 
@@ -1509,7 +1457,10 @@ export function buildKdjOrRsiOption(
           rows.push(
             `<div><span style="display:inline-block;margin-right:6px;width:8px;height:8px;border-radius:50%;background:${
               p.color
-            };"></span>${p.seriesName || ""}: ${fmt3(val)}</div>`
+            };"></span>${p.seriesName || ""}: ${formatNumberScaled(val, {
+              digits: 3,
+              allowEmpty: true,
+            })}</div>`
           );
         }
         return rows.join("");
@@ -1527,6 +1478,8 @@ export function buildKdjOrRsiOption(
     axisLabel: {
       color: theme.axisLabelColor,
       align: "right",
+      // 使用通用数值格式化：KDJ/RSI 典型范围 0–100，不触发“万级缩放”（minIntDigitsToScale=5）
+      formatter: (val) => formatNumberScaled(val, { digits: 2, allowEmpty: true, minIntDigitsToScale: 5 }),
       margin: ui?.isHovered ? 6 : 6,
     },
     axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },

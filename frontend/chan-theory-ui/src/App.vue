@@ -6,7 +6,7 @@
     <SymbolPanel />
     <MainChartPanel />
     <TechPanels />
-    <StorageManager v-if="backendReady" />
+    <!-- <StorageManager v-if="backendReady" /> -->
 
     <!-- 全局唯一设置弹窗外壳：新增 tabs/activeTab 透传与 tab-change 处理 -->
     <ModalDialog
@@ -52,7 +52,7 @@ import TopTitle from "./components/features/TopTitle.vue";
 import SymbolPanel from "./components/features/SymbolPanel.vue";
 import MainChartPanel from "./components/features/MainChartPanel.vue";
 import TechPanels from "./components/features/TechPanels.vue";
-import StorageManager from "@/components/features/StorageManager.vue";
+// import StorageManager from "@/components/features/StorageManager.vue";
 import ModalDialog from "@/components/ui/ModalDialog.vue";
 
 import { useUserSettings } from "./composables/useUserSettings";

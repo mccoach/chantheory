@@ -396,7 +396,6 @@ import {
   computeSegments,
   computePenPivots, // NEW: 计算笔中枢
 } from "@/composables/useChan"; // 新增：computeSegments
-import { vSelectAll } from "@/utils/inputBehaviors";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import {
@@ -408,6 +407,12 @@ import {
   buildPenPivotAreas, // NEW: 渲染笔中枢
 } from "@/charts/chan/layers"; // 新增：buildSegmentLines
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
+
+import {
+  pad2,                 // 两位补零（用于输入框与日期拼装）
+  fmtShort,             // 预览短文本（按 freq 输出）
+  isMinuteFreq as isMinuteFreqFmt, // 分钟族判断
+} from "@/utils/timeFormat";
 
 /* 双跳脱调度，避免主流程期 setOption/resize */
 function schedule(fn) {
@@ -526,27 +531,6 @@ function safeResize() {
       }
     } catch {}
   });
-}
-
-/* 读取当前 dataZoom 范围（保持原逻辑） */
-function getCurrentZoomIndexRange() {
-  try {
-    if (!chart) return null;
-    const opt = chart.getOption?.();
-    const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
-    if (!dz.length) return null;
-    const z = dz.find(
-      (x) =>
-        typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined"
-    );
-    const len = (vm.candles.value || []).length;
-    if (z && len > 0) {
-      const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
-      const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
-      return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
-    }
-  } catch {}
-  return null;
 }
 
 /* 设置弹窗（草稿加载 + pen 合并表达式统一） */
@@ -2099,32 +2083,11 @@ function doSinglePassRender(snapshot) {
     previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
   } catch {}
 }
-
-/* 预览显示 */
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-function fmtShort(iso) {
-  if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "";
-    const Y = d.getFullYear(),
-      M = pad2(d.getMonth() + 1),
-      D = pad2(d.getDate());
-    if (/m$/.test(String(vm.freq.value || ""))) {
-      const h = pad2(d.getHours()),
-        m = pad2(d.getMinutes());
-      return `${Y}-${M}-${D} ${h}:${m}`;
-    }
-    return `${Y}-${M}-${D}`;
-  } catch {
-    return "";
-  }
-}
 const previewStartStr = ref("");
 const previewEndStr = ref("");
 const previewBarsCount = ref(0);
+
+// >>> 改：formattedStart/End 调用统一 fmtShort（传入当前 freq），保持行为一致 <<<
 const formattedStart = computed(() => {
   return (
     (previewStartStr.value && fmtShort(previewStartStr.value)) ||
@@ -2134,8 +2097,8 @@ const formattedStart = computed(() => {
 });
 const formattedEnd = computed(() => {
   return (
-    (previewEndStr.value && fmtShort(previewEndStr.value)) ||
-    fmtShort(vm.visibleRange.value.endStr) ||
+    (previewEndStr.value && fmtShort(previewEndStr.value, vm.freq.value)) ||
+    fmtShort(vm.visibleRange.value.endStr, vm.freq.value) ||
     "-"
   );
 });
@@ -2417,7 +2380,7 @@ function onTwoDigitInput(group, key, ev, min, max) {
     const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
     if (Number.isNaN(n)) return;
     const v = Math.max(min, Math.min(max, n));
-    const pad2v = String(v).padStart(2, "0");
+    const pad2v = pad2(v); // >>> 改：使用统一 pad2 <<<
     if (group === "start") {
       startFields[key] = pad2v;
     } else {

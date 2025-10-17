@@ -21,7 +21,7 @@
       </div>
     </div>
     <div class="row" style="text-align: left">
-      <div>数据库大小：{{ prettyBytes(usage.size_bytes || 0) }}</div>
+      <div>数据库大小：{{ formatDbSize(usage.size_bytes || 0) }}</div>
     </div>
     <div class="row" style="text-align: left">
       <div>
@@ -119,6 +119,11 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { useStorageManager } from "@/composables/useStorageManager";
+import {
+  chooseUnit,
+  getByteUnits,
+  formatNumberScaled,
+} from "@/utils/numberUtils";
 
 const sm = useStorageManager();
 const usage = sm.usage;
@@ -160,15 +165,12 @@ async function cleanup() {
   });
 }
 
-function prettyBytes(n) {
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0,
-    x = Number(n || 0);
-  while (x >= 1024 && i < u.length - 1) {
-    x /= 1024;
-    i++;
-  }
-  return `${x.toFixed(2)} ${u[i]}`;
+function formatDbSize(bytes) {
+  const unit = chooseUnit(bytes, {
+    unitLevels: getByteUnits({ si: true }),
+    minIntDigitsToScale: 1,
+  });
+  return formatNumberScaled(bytes, { unit, digits: 2 });
 }
 
 onMounted(() => {
