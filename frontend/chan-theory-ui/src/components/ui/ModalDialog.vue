@@ -34,7 +34,9 @@
 
       <div class="foot">
         <div style="flex: 1"></div>
-        <button class="btn" @click="resetAll" type="button">全部恢复默认</button>
+        <button class="btn" @click="resetAll" type="button">
+          全部恢复默认
+        </button>
         <button class="btn ok" @click="save" type="button">保存并关闭</button>
         <button class="btn" @click="close" type="button">取消</button>
       </div>
@@ -62,6 +64,7 @@ function resetAll() {
 </script>
 
 <style scoped>
+/* 基础弹窗外观 */
 .modal-mask {
   position: fixed;
   inset: 0;
@@ -163,7 +166,15 @@ function resetAll() {
   color: #fff;
 }
 
-/* 标准网格样式（设置窗内容复用） */
+/* ============================= */
+/* 统一设置行的唯一有效样式（集中在 ModalDialog）
+   说明：
+   - 不再在其他组件重复定义 .std-* 或数字框样式，避免冲突；
+   - 列宽严格遵循：第1列 90px；第2~6列每列 140px（标签60 + 输入80）；倒数2列各30px；
+   - 数字输入（含上下箭头）整体宽度固定 80px（在 .std-item-input 内实现）。 */
+/* ============================= */
+
+/* 每行栅格（90）+ 5*(140) +（30）+（30） */
 :deep(.std-row) {
   display: grid;
   grid-template-columns: 90px repeat(5, 140px) 30px 30px;
@@ -172,24 +183,33 @@ function resetAll() {
   column-gap: 8px;
   min-height: 36px;
 }
+
+/* 第1列：行名 */
 :deep(.std-name) {
   justify-self: start;
   font-weight: 600;
 }
+
+/* 第2~6列：每列 140px，由标签 60 + 输入 80 构成；不要在子项再规定宽度 */
 :deep(.std-item) {
-  width: 150px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0; /* 关键：60 + 80 = 140，gap 必须为 0 */
 }
+
+/* 标签固定 60px */
 :deep(.std-item-label) {
-  width: 60px;
+  width: 70px;
   text-align: right;
   color: #bbb;
   font-size: 12px;
+  padding-right: 4px;
+  box-sizing: border-box;
 }
+
+/* 输入容器固定 80px（数字输入整体宽度=80，含箭头） */
 :deep(.std-item-input) {
-  width: 80px;
+  width: 70px;
   display: flex;
   align-items: center;
 }
@@ -202,6 +222,83 @@ function resetAll() {
   border: 1px solid #333;
   border-radius: 4px;
   padding: 4px 6px;
+}
+
+/* ===== NEW: 数字输入框悬浮箭头样式 ===== */
+:deep(.std-item-input .numspin) {
+  display: inline-flex;
+  align-items: center;
+  width: 100%; /* 占满 .std-item-input（80px） */
+  height: 28px;
+  background: #0f0f0f;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  box-sizing: border-box; /* 边框计入宽度，保证总宽 80 */
+  /* overflow: hidden;       /* 防止内部溢出 */
+}
+:deep(.std-item-input .numspin.disabled) {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+:deep(.std-item-input .numspin .numspin-input) {
+  flex-grow: 1; /* 占据剩余空间 */
+  width: 1px;
+  height: 100%;
+  background: transparent; /* 背景设为透明，以显示外层容器的背景 */
+  color: #ddd;
+  border: none; /* 移除原生边框，这是最关键的一步 */
+  outline: none; /* 移除聚焦时的轮廓 */
+  padding: 0px 0px 0px 10px;
+  box-sizing: border-box;
+  text-align: left; /* 文本居中 */
+}
+/* 箭头容器默认隐藏，悬浮时显示 */
+:deep(.std-item-input .numspin .numspin-arrows) {
+  display: flex;
+  flex-direction: column;
+  width: 18px; /* 固定宽度，避免布局跳动 */
+  height: 100%;
+  flex-shrink: 0;
+  opacity: 0; /* 默认透明 */
+  visibility: hidden; /* 默认不可见 */
+  transition: opacity 120ms ease;
+}
+:deep(.std-item-input .numspin:hover .numspin-arrows) {
+  opacity: 1; /* 悬浮时显示 */
+  visibility: visible;
+}
+:deep(.std-item-input .numspin .arrow) {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+:deep(.std-item-input .numspin .arrow.disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+:deep(.std-item-input .numspin .arrow:hover) {
+  background-color: #333;
+}
+/* 使用伪元素绘制箭头形状 */
+:deep(.std-item-input .numspin .arrow.up::before) {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 5px solid #aaa;
+}
+:deep(.std-item-input .numspin .arrow.down::before) {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #aaa;
 }
 
 /* 统一复选框外观 */
@@ -243,13 +340,13 @@ function resetAll() {
 
 /* === 新增：部分选中（indeterminate）状态样式，呈现第三种视觉 === */
 :deep(.std-check input[type="checkbox"]:indeterminate) {
-  background: #7f8c8d;       /* 灰色背景与选中区分 */
+  background: #7f8c8d; /* 灰色背景与选中区分 */
   border-color: #95a5a6;
 }
 :deep(.std-check input[type="checkbox"]:indeterminate::after) {
   content: "";
   position: absolute;
-  left: 2px;                 /* 在方框中居中显示短横线 */
+  left: 2px; /* 在方框中居中显示短横线 */
   top: 6px;
   width: 10px;
   height: 2px;
@@ -277,7 +374,7 @@ function resetAll() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden; /* 防止 ::before 溢出 */
+  /* overflow: hidden; /* 防止 ::before 溢出 */
 }
 :deep(.std-reset > .btn.icon:hover) {
   border-color: #5b7fb3;

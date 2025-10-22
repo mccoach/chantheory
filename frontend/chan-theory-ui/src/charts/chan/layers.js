@@ -611,22 +611,6 @@ export function buildBarrierLines(barrierIdxList) {
 }
 
 // ==============================
-// NEW: 十六进制 → RGBA（用于矩形填充淡显）
-// ==============================
-function _hexToRgba(hex, alpha = 1.0) {
-  try {
-    const h = String(hex || "").replace("#", "");
-    const r = parseInt(h.slice(0, 2), 16);
-    const g = parseInt(h.slice(2, 4), 16);
-    const b = parseInt(h.slice(4, 6), 16);
-    const a = Math.max(0, Math.min(1, Number(alpha || 1)));
-    return `rgba(${r},${g},${b},${a})`;
-  } catch {
-    return hex || "#999";
-  }
-}
-
-// ==============================
 // NEW: 笔中枢矩形绘制（markArea + markLine 四边）
 // - 每个中枢使用一个独立 series 以便设置独立颜色与 z。
 // - 边框颜色与填充颜色一致，填充透明度按 alphaPercent。
@@ -705,7 +689,7 @@ export function buildPenPivotAreas(pivots, env = {}) {
       data: [],
       markArea: {
         silent: true,
-        itemStyle: { color: _hexToRgba(color, alpha) },
+        itemStyle: { color: hexToRgba(color, alpha) },
         label: { show: false },
         data: [[{ xAxis: left, yAxis: upper }, { xAxis: right, yAxis: lower }]],
       },

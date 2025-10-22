@@ -309,7 +309,7 @@ export const FRACTAL_DEFAULTS = {
   },
 };
 
-// 设置窗下拉：符号备选
+// 设置窗下拉：符号备选（通用形状选项源，可复用到涨跌标记/分型符号）
 export const FRACTAL_SHAPES = [
   { v: "triangle", label: "▲" }, // 三角
   { v: "diamond", label: "◆" }, // 菱形
@@ -319,7 +319,7 @@ export const FRACTAL_SHAPES = [
   { v: "arrow", label: "⬇" }, // 箭头
 ];
 
-// 设置窗下拉：填充方式
+// 设置窗下拉：填充方式（通用填充选项源）
 export const FRACTAL_FILLS = [
   { v: "solid", label: "实心" },
   { v: "hollow", label: "空心" },
@@ -377,6 +377,33 @@ export const CHAN_PEN_PIVOT_DEFAULTS = {
 };
 
 // ------------------------------
+// 输入数值边界与兜底（统一归口 · 供设置面板与输入控件使用） —— NEW
+// ------------------------------
+export const UI_LIMITS = {
+  // 通用线宽（笔/线段/中枢）
+  seriesLineWidth: { min: 0.5, max: 6 },
+
+  // MAVOL 线宽（量窗均线）
+  mavolLineWidth: { min: 0.5, max: 4 },
+
+  // MA 周期最小值
+  maPeriod: { min: 1 },
+
+  // 矩形填充透明度（百分比）
+  alphaPercent: { min: 0, max: 100 },
+
+  // 量柱宽度百分比
+  barPercent: { min: 10, max: 100 },
+
+  // 分型判定阈值下限（显著度）
+  fractalMinTickCount: { min: 0 },
+  fractalMinPct: { min: 0, max: 100 },
+
+  // 放/缩量阈值下限
+  markerThreshold: { min: 0.1 },
+};
+
+// ------------------------------
 // 导出与交互控制（不可见但具“设置”性质的参数）
 // - HTML/图片快照时的背景与像素比，是否内嵌数据的默认选择。
 // ------------------------------
@@ -396,6 +423,47 @@ export const DEFAULT_VOL_MARKER_SIZE = {
   markerHeightPx: 10, // 标记基准高度像素
   markerYOffsetPx: 2, // 标记尺寸与极值偏移
 };
+
+// ------------------------------
+// 通用选项源（新增 · 统一 Settings 下拉选项来源）
+// - 仅用作“选项源”，不改变原有默认值与业务语义；保证设置面板回归一致。
+// ------------------------------
+
+// 线型枚举（通用）
+export const LINE_STYLES = ["solid", "dashed", "dotted"];
+
+// 复权选项（通用）
+export const ADJUST_OPTIONS = [
+  { v: "none", label: "不复权" },
+  { v: "qfq", label: "前复权" },
+  { v: "hfq", label: "后复权" },
+];
+
+// 缠论承载点策略（通用）
+export const ANCHOR_POLICY_OPTIONS = [
+  { v: "right", label: "右端" },
+  { v: "extreme", label: "极值" },
+];
+
+// 合并K显示层级（通用）
+export const DISPLAY_ORDER_OPTIONS = [
+  { v: "first", label: "先" },
+  { v: "after", label: "后" },
+];
+
+// 分型显著度条件（通用）
+export const MIN_COND_OPTIONS = [
+  { v: "or", label: "或" },
+  { v: "and", label: "与" },
+];
+
+// 标记类图形常见形状（量窗/标记通用；与 FRACTAL_SHAPES 正交使用场景一致）
+export const MARKER_SHAPE_OPTIONS = [
+  { v: "triangle", label: "triangle" },
+  { v: "diamond", label: "diamond" },
+  { v: "circle", label: "circle" },
+  { v: "rect", label: "rect" },
+];
 
 // ------------------------------
 // 预设 → barsCount 映射工具（以“原始 K 根数”为单位；ALL = totalBars）

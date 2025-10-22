@@ -3,17 +3,16 @@
   <div
     class="numspin"
     :class="{ compact, disabled }"
-    @wheel.passive.prevent="onWheel"
+    @wheel.prevent="onWheel"
   >
     <input
       ref="inp"
-      type="number"
+      type="text"
       class="numspin-input"
-      :min="min"
-      :max="max"
-      :step="step"
       :value="displayValue"
       :disabled="disabled"
+      inputmode="numeric"
+      :pattern="integer ? '^-?\\d*$' : '^-?\\d*(?:\\.\\d*)?$'"
       v-select-all
       @focus="onFocus"
       @input="onInput"
@@ -22,11 +21,7 @@
     />
     <div class="numspin-arrows">
       <div class="arrow up" @click="stepBy(+step)" :class="{ disabled }"></div>
-      <div
-        class="arrow down"
-        @click="stepBy(-step)"
-        :class="{ disabled }"
-      ></div>
+      <div class="arrow down" @click="stepBy(-step)" :class="{ disabled }"></div>
     </div>
   </div>
 </template>
@@ -42,16 +37,89 @@ const props = defineProps({
   step: { type: Number, default: 1 },
   disabled: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
+  integer: { type: Boolean, default: false },
+  fracDigits: { type: Number, default: -1 }, // -1=不控制；>=0 固定位数
+  padDigits: { type: Number, default: 0 },   // 0=不控制；>0 整数位左补零
 });
 
 const emit = defineEmits(["update:modelValue", "blur"]);
 const inp = ref(null);
-const displayValue = computed(() => String(props.modelValue ?? ""));
+
+// NEW: 稳定舍入，避免 0.30000000000000004
+function roundTo(n, d) {
+  if (!Number.isFinite(n)) return n;
+  if (!Number.isFinite(d) || d < 0) return n;
+  const f = Math.pow(10, d);
+  // 使用 Number.EPSILON 提升稳定性
+  return Math.round((n + Number.EPSILON) * f) / f;
+}
+
+// NEW: 将任意输入字符串解析为数值并按规则裁剪
+function normalizeNumber(str) {
+  const t = String(str ?? "").trim();
+  if (t === "" || t === "-" || t === "." || t === "-.") return null; // 编辑中间态
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+  const rounded = dEff >= 0 ? roundTo(n, dEff) : n;
+  const clamped = clampNumber(rounded, {
+    min: props.min,
+    max: props.max,
+    integer: props.integer,
+  });
+  return dEff >= 0 ? roundTo(clamped, dEff) : clamped;
+}
+
+// NEW: 显示层格式化（整数补零 + 小数固定位数）
+function formatWithPadAndFrac(val) {
+  // 先转为字符串（保持外部数值）
+  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+  let n = Number(val);
+  if (!Number.isFinite(n)) {
+    const raw = String(val ?? "");
+    return raw;
+  }
+  if (dEff >= 0) n = roundTo(n, dEff);
+  let s =
+    dEff >= 0
+      ? n.toFixed(dEff)             // 固定小数位展示
+      : String(n);
+
+  // 前导零：仅作用整数部分
+  const digits = Number.isFinite(props.padDigits) ? Math.max(0, Math.floor(props.padDigits)) : 0;
+  if (digits <= 0) return s;
+
+  let sign = "";
+  if (s.startsWith("-")) {
+    sign = "-";
+    s = s.slice(1);
+  }
+  let intPart = s;
+  let fracPart = "";
+  const dotIdx = s.indexOf(".");
+  if (dotIdx >= 0) {
+    intPart = s.slice(0, dotIdx);
+    fracPart = s.slice(dotIdx + 1);
+  }
+
+  // 仅在整数/小数部分都是数字时进行填充，避免用户输入阶段被干扰
+  if (!/^\d*$/.test(intPart) || (fracPart && !/^\d*$/.test(fracPart))) {
+    return (sign + s); // 异常时原样返回
+  }
+  const padded = intPart.length >= digits ? intPart : "0".repeat(digits - intPart.length) + intPart;
+  return sign + (fracPart ? `${padded}.${fracPart}` : padded);
+}
+
+const displayValue = computed(() => formatWithPadAndFrac(props.modelValue));
 
 function onInput(e) {
   if (props.disabled) return;
-  const next = clampNumber(e.target.value, { min: props.min, max: props.max, integer: true });
-  emit("update:modelValue", next);
+  const t = String(e.target.value ?? "");
+  // 编辑中间态不触发修改，避免抖动
+  if (t === "" || t === "-" || t === "." || t === "-.") return;
+  const n = normalizeNumber(t);
+  if (n == null) return;
+  emit("update:modelValue", n);
 }
 function onKeydown(e) {
   if (props.disabled) return;
@@ -70,83 +138,29 @@ function onWheel(e) {
 }
 function stepBy(delta) {
   if (props.disabled) return;
-  const curr = clampNumber(props.modelValue, { min: props.min, max: props.max, integer: true });
-  const next = clampNumber(curr + delta, { min: props.min, max: props.max, integer: true });
+  const base = normalizeNumber(props.modelValue);
+  const curr = base == null ? 0 : base;
+  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+  let next = curr + delta;
+  if (dEff >= 0) next = roundTo(next, dEff);
+  next = clampNumber(next, {
+    min: props.min,
+    max: props.max,
+    integer: props.integer,
+  });
+  if (dEff >= 0) next = roundTo(next, dEff);
   if (next !== curr) emit("update:modelValue", next);
 }
 function onBlur() {
   if (props.disabled) return;
-  const curr = clampNumber(props.modelValue, { min: props.min, max: props.max, integer: true });
-  emit("update:modelValue", curr);
+  const n = normalizeNumber(props.modelValue);
+  if (n != null) emit("update:modelValue", n);
   emit("blur");
 }
 function onFocus() {
-  // 有指令兜底，这里保留一次保险选中
-  try {
-    setTimeout(() => inp.value && inp.value.select(), 0);
-  } catch {}
+  try { setTimeout(() => inp.value && inp.value.select(), 0); } catch {}
 }
 </script>
 
-<style scoped>
-/* 保持之前样式，无改动（略） */
-.numspin {
-  display: inline-flex;
-  align-items: center;
-  background: #0f0f0f;
-  border: 1px solid #333;
-  border-radius: 4px;
-  overflow: hidden;
-}
-.numspin.compact {
-  background: transparent;
-  border: none;
-}
-.numspin.disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
-.numspin-input {
-  width: 68px;
-  background: transparent;
-  color: #ddd;
-  border: none;
-  padding: 0 6px;
-  outline: none;
-  text-align: center;
-  appearance: textfield;
-}
-.numspin-input::-webkit-outer-spin-button,
-.numspin-input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-.numspin-arrows {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  border-left: 1px solid #333;
-  padding: 0 6px;
-}
-.numspin.compact .numspin-arrows {
-  border-left: 1px solid #444;
-}
-.arrow {
-  width: 0;
-  height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  cursor: pointer;
-  margin: 3px 0;
-}
-.arrow.up {
-  border-bottom: 6px solid #bbb;
-}
-.arrow.down {
-  border-top: 6px solid #bbb;
-}
-.arrow.disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
-</style>
+<!-- 删除样式：NumberSpinner 不再定义任何样式；业务侧自行统一外观 -->
+<!-- (style block removed) -->

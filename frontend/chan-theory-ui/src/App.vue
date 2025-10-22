@@ -25,7 +25,7 @@
           :is="dialogManager.activeDialog.value.contentComponent"
           v-bind="dialogManager.activeDialog.value.props"
           :activeTab="dialogManager.activeDialog.value.activeTab"
-          :ref="dialogBodyRef"
+          ref="dialogBodyRef"
         />
       </template>
 
@@ -68,6 +68,7 @@ import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 const settings = useUserSettings();
+provide("userSettings", settings); // 提供给深层组件
 const vm = useMarketView({ autoStart: false }); // 关键变更：延迟首刷
 provide("marketView", vm);
 
@@ -100,10 +101,6 @@ if (hotkeys) {
         dialogManager.open({
           title: "快捷键设置",
           contentComponent: mod.default,
-          onSave: () => {
-            handleModalClose();
-          },
-          onClose: () => handleModalClose(),
         });
       });
     },
@@ -144,14 +141,19 @@ watch(
 );
 
 function handleModalSave() {
-  const dlg = dialogManager.activeDialog.value;
-  if (dlg && typeof dlg.onSave === "function") {
+  const body = dialogBodyRef.value;
+  // NEW: 调用内容组件暴露的 save 方法
+  if (body && typeof body.save === "function") {
     try {
-      dlg.onSave();
+      body.save();
     } catch (e) {
-      console.error(e);
+      console.error("handleModalSave direct call error:", e);
     }
+  } else {
+      console.warn("handleModalSave: 'save' method not found on dialog body component.");
   }
+  // NEW: 保存后立即关闭设置窗口（满足“保存并关闭”）
+  try { dialogManager.close(); } catch {}
 }
 function handleModalClose() {
   const dlg = dialogManager.activeDialog.value;
@@ -165,31 +167,22 @@ function handleModalClose() {
     dialogManager.close();
   }
 }
+// NEW: 重写“全部恢复默认”逻辑，直接调用内容组件的 resetAll 方法
 function handleModalResetAll() {
-  const dlg = dialogManager.activeDialog.value;
-  try {
-    // 优先：内容组件自带重置回调（内容组件内部负责“写入持久化 + 决定是否需要 reload”）
-    if (dlg && typeof dlg.onResetAll === "function") {
-      dlg.onResetAll();
-      // —— 仅做前端刷新，不触发后端 —— //
-      try { if (hub && typeof hub.execute === "function") hub.execute("Refresh", {}); } catch {}
-      return;
-    }
-    // 次选：内容组件若暴露 resetAll()
-    const body = dialogBodyRef.value;
-    if (body && typeof body.resetAll === "function") {
+  const body = dialogBodyRef.value;
+  if (body && typeof body.resetAll === "function") {
+    try {
       body.resetAll();
-      try { if (hub && typeof hub.execute === "function") hub.execute("Refresh", {}); } catch {}
-      return;
+    } catch (e) {
+      console.error("handleModalResetAll direct call error:", e);
     }
-    console.warn("当前设置窗未提供 onResetAll 或 resetAll，忽略重置命令。");
-  } catch (e) {
-    console.error("handleModalResetAll error:", e);
+  } else {
+      console.warn("handleModalResetAll: 'resetAll' method not found on dialog body component.");
   }
 }
 
-// —— openSettingsDialog 内对“保存并应用”与“重置”的实现位于 MainChartPanel.vue —— //
-// 这里不再做任何 reload；由内容组件决定“是否需要后端请求”（例如 adjust ���化）并自行调用 vm.reload。
+// —— openSettingsDialog 内对“保存并应用”与“重置”的实现位于 MainChartSettingsShell.vue —— //
+// 这里不再做任何 reload；由内容组件决定“是否需要后端请求”（例如 adjust 化）并自行调用 vm.reload。
 onMounted(async () => {
   const alive = await waitBackendAlive({ timeoutMs: 10000, intervalMs: 600 });
   backendReady.value = !!alive;
