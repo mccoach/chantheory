@@ -365,27 +365,16 @@ import {
   ref,
   watch,
   computed,
-  defineComponent,
-  h,
   reactive,
 } from "vue";
 import * as echarts from "echarts";
 import {
   buildMainChartOption,
-  createFixedTooltipPositioner,
 } from "@/charts/options";
 import {
-  DEFAULT_MA_CONFIGS,
   CHAN_DEFAULTS,
-  DEFAULT_KLINE_STYLE,
-  DEFAULT_APP_PREFERENCES,
-  FRACTAL_DEFAULTS,
-  FRACTAL_SHAPES,
-  FRACTAL_FILLS,
   WINDOW_PRESETS,
   PENS_DEFAULTS,
-  SEGMENT_DEFAULTS,
-  CHAN_PEN_PIVOT_DEFAULTS,
 } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
@@ -394,8 +383,8 @@ import {
   computeFractals,
   computePens,
   computeSegments,
-  computePenPivots, // NEW: 计算笔中枢
-} from "@/composables/useChan"; // 新增：computeSegments
+  computePenPivots,
+} from "@/composables/useChan";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import {
@@ -403,15 +392,14 @@ import {
   buildFractalMarkers,
   buildPenLines,
   buildSegmentLines,
-  buildBarrierLines, // NEW: 屏障竖线
-  buildPenPivotAreas, // NEW: 渲染笔中枢
-} from "@/charts/chan/layers"; // 新增：buildSegmentLines
+  buildBarrierLines,
+  buildPenPivotAreas,
+} from "@/charts/chan/layers";
 import { openMainChartSettings } from "@/settings/mainShell";
 
 import {
-  pad2,                 // 两位补零（用于输入框与日期拼装）
-  fmtShort,             // 预览短文本（按 freq 输出）
-  isMinuteFreq as isMinuteFreqFmt, // 分钟族判断
+  pad2,
+  fmtShort,
 } from "@/utils/timeFormat";
 
 /* 双跳脱调度，避免主流程期 setOption/resize */

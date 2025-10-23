@@ -25,8 +25,6 @@ import UiNumberBox from "@/components/ui/UiNumberBox.vue";
 import {
   CHAN_DEFAULTS,
   FRACTAL_DEFAULTS,
-  FRACTAL_SHAPES,
-  FRACTAL_FILLS,
   LINE_STYLES,
   ANCHOR_POLICY_OPTIONS,
   MIN_COND_OPTIONS,
@@ -34,13 +32,14 @@ import {
   SEGMENT_DEFAULTS,
   PENS_DEFAULTS,
   UI_LIMITS,
+  MARKER_SHAPE_OPTIONS,
+  FILL_OPTIONS,
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
 
 // 通过 inject 获取共享的草稿状态
-const chanDraft = inject('chanDraft');
-const fractalDraft = inject('fractalDraft');
-
+const chanDraft = inject("chanDraft");
+const fractalDraft = inject("fractalDraft");
 
 // 分型总控（强/标/弱/确认）
 const frTri = useTriMasterToggle({
@@ -259,11 +258,15 @@ function onRowReset(row) {
   if (key.startsWith("fr-kind-")) {
     const kind = key.slice("fr-kind-".length);
     if (kind === "confirm") {
-      ff.confirmStyle = JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.confirmStyle));
+      ff.confirmStyle = JSON.parse(
+        JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)
+      );
       frTri.updateSnapshot();
       return;
     }
-    const def = JSON.parse(JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[kind]));
+    const def = JSON.parse(
+      JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[kind])
+    );
     const s = ff.styleByStrength || {};
     s[kind] = def;
     ff.styleByStrength = s;
@@ -306,7 +309,12 @@ function renderControl(row, item) {
       return defineComponent({
         setup() {
           const val = () => cf[k] || CHAN_DEFAULTS[k];
-          return () => makeSelect( val(), (e) => (cf[k] = String(e.target.value)), FRACTAL_SHAPES );
+          return () =>
+            makeSelect(
+              val(),
+              (e) => (cf[k] = String(e.target.value)),
+              MARKER_SHAPE_OPTIONS
+            );
         },
       });
     }
@@ -314,12 +322,13 @@ function renderControl(row, item) {
       const k = id;
       return defineComponent({
         setup() {
-          return () => h("input", {
-            class: "input color",
-            type: "color",
-            value: cf[k] || CHAN_DEFAULTS[k],
-            onInput: (e) => (cf[k] = String(e.target.value)),
-          });
+          return () =>
+            h("input", {
+              class: "input color",
+              type: "color",
+              value: cf[k] || CHAN_DEFAULTS[k],
+              onInput: (e) => (cf[k] = String(e.target.value)),
+            });
         },
       });
     }
@@ -327,7 +336,12 @@ function renderControl(row, item) {
       return defineComponent({
         setup() {
           const val = () => cf.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
-          return () => makeSelect( val(), (e) => (cf.anchorPolicy = String(e.target.value || "extreme")), ANCHOR_POLICY_OPTIONS );
+          return () =>
+            makeSelect(
+              val(),
+              (e) => (cf.anchorPolicy = String(e.target.value || "extreme")),
+              ANCHOR_POLICY_OPTIONS
+            );
         },
       });
     }
@@ -338,16 +352,15 @@ function renderControl(row, item) {
     if (id === "fr-minTick") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.fractalMinTickCount.min;
-          return () => h(UiNumberBox, {
+          return () =>
+            h(UiNumberBox, {
               modelValue: ff.minTickCount ?? FRACTAL_DEFAULTS.minTickCount,
-              min: minV,
-              step: 1,
+              min: UI_LIMITS.nonNegativeInteger.min,
+              step: UI_LIMITS.nonNegativeInteger.step,
               compact: true,
               integer: true,
               "onUpdate:modelValue": (v) => {
-                const next = Math.max( minV, parseInt(v ?? FRACTAL_DEFAULTS.minTickCount, 10) );
-                ff.minTickCount = next;
+                ff.minTickCount = v;
               },
             });
         },
@@ -356,20 +369,16 @@ function renderControl(row, item) {
     if (id === "fr-minPct") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.fractalMinPct.min;
-          const maxV = UI_LIMITS.fractalMinPct.max;
-          return () => h(UiNumberBox, {
+          return () =>
+            h(UiNumberBox, {
               modelValue: ff.minPct ?? FRACTAL_DEFAULTS.minPct,
-              min: minV,
-              max: maxV,
-              step: 1,
+              min: UI_LIMITS.percentage.min,
+              max: UI_LIMITS.percentage.max,
+              step: UI_LIMITS.percentage.step,
               compact: true,
               integer: true,
               "onUpdate:modelValue": (v) => {
-                const next = Math.round( Math.max(minV, Math.min(maxV, Number(v ?? FRACTAL_DEFAULTS.minPct))) );
-                if (Number.isFinite(next)) {
-                  ff.minPct = next;
-                }
+                ff.minPct = v;
               },
             });
         },
@@ -378,8 +387,13 @@ function renderControl(row, item) {
     if (id === "fr-minCond") {
       return defineComponent({
         setup() {
-          const val = () => String( ff.minCond || FRACTAL_DEFAULTS.minCond );
-          return () => makeSelect( val(), (e) => (ff.minCond = String(e.target.value || "or")), MIN_COND_OPTIONS );
+          const val = () => String(ff.minCond || FRACTAL_DEFAULTS.minCond);
+          return () =>
+            makeSelect(
+              val(),
+              (e) => (ff.minCond = String(e.target.value || "or")),
+              MIN_COND_OPTIONS
+            );
         },
       });
     }
@@ -388,7 +402,8 @@ function renderControl(row, item) {
   // 分型种类
   if (row.key?.startsWith("fr-kind-")) {
     const kind = row.key.slice("fr-kind-".length);
-    const readConf = () => (kind === "confirm" ? ff.confirmStyle : ff.styleByStrength?.[kind]) || {};
+    const readConf = () =>
+      (kind === "confirm" ? ff.confirmStyle : ff.styleByStrength?.[kind]) || {};
     const writeConf = (patch) => {
       if (kind === "confirm") {
         ff.confirmStyle = { ...(ff.confirmStyle || {}), ...patch };
@@ -398,28 +413,39 @@ function renderControl(row, item) {
         ff.styleByStrength = s;
       }
     };
-    
+
     if (id.includes("Shape")) {
-        const type = id.includes("bot") ? "bottomShape" : "topShape";
-        return defineComponent({
-            setup: () => () => makeSelect(readConf()[type], (e) => writeConf({ [type]: String(e.target.value) }), FRACTAL_SHAPES),
-        });
+      const type = id.includes("bot") ? "bottomShape" : "topShape";
+      return defineComponent({
+        setup: () => () =>
+          makeSelect(
+            readConf()[type],
+            (e) => writeConf({ [type]: String(e.target.value) }),
+            MARKER_SHAPE_OPTIONS
+          ),
+      });
     }
     if (id.includes("Color")) {
-        const type = id.includes("bot") ? "bottomColor" : "topColor";
-        return defineComponent({
-            setup: () => () => h("input", {
-                class: "input color",
-                type: "color",
-                value: readConf()[type],
-                onInput: (e) => writeConf({ [type]: String(e.target.value) }),
-            }),
-        });
+      const type = id.includes("bot") ? "bottomColor" : "topColor";
+      return defineComponent({
+        setup: () => () =>
+          h("input", {
+            class: "input color",
+            type: "color",
+            value: readConf()[type],
+            onInput: (e) => writeConf({ [type]: String(e.target.value) }),
+          }),
+      });
     }
     if (id.includes("fill")) {
-        return defineComponent({
-            setup: () => () => makeSelect(readConf().fill, (e) => writeConf({ fill: String(e.target.value) }), FRACTAL_FILLS),
-        });
+      return defineComponent({
+        setup: () => () =>
+          makeSelect(
+            readConf().fill,
+            (e) => writeConf({ fill: String(e.target.value) }),
+            FILL_OPTIONS
+          ),
+      });
     }
   }
 
@@ -429,19 +455,17 @@ function renderControl(row, item) {
     if (id === "pen-lineWidth") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.seriesLineWidth.min;
-          const maxV = UI_LIMITS.seriesLineWidth.max;
           return () => h(UiNumberBox, {
               modelValue: pen.lineWidth ?? PENS_DEFAULTS.lineWidth,
-              min: minV,
-              max: maxV,
-              step: 0.5,
+              min: UI_LIMITS.lineWidth.min,
+              max: UI_LIMITS.lineWidth.max,
+              step: UI_LIMITS.lineWidth.step,
               compact: true,
               integer: false,
               "frac-digits": 1,
               "onUpdate:modelValue": (v) => {
-                const next = Math.max(minV, Math.min(maxV, Number(v ?? PENS_DEFAULTS.lineWidth)));
-                if(cf.pen) cf.pen.lineWidth = next; else cf.pen = { lineWidth: next };
+                if (cf.pen) cf.pen.lineWidth = v;
+                else cf.pen = { lineWidth: v };
               },
             });
         },
@@ -450,31 +474,47 @@ function renderControl(row, item) {
     if (id === "pen-color") {
       return defineComponent({
         setup() {
-          return () => h("input", {
-            class: "input color",
-            type: "color",
-            value: pen.color ?? PENS_DEFAULTS.color,
-            onInput: (e) => {
-              if(cf.pen) cf.pen.color = String(e.target.value || PENS_DEFAULTS.color); else cf.pen = { color: String(e.target.value || PENS_DEFAULTS.color) };
-            },
-          });
+          return () =>
+            h("input", {
+              class: "input color",
+              type: "color",
+              value: pen.color ?? PENS_DEFAULTS.color,
+              onInput: (e) => {
+                if (cf.pen)
+                  cf.pen.color = String(e.target.value || PENS_DEFAULTS.color);
+                else
+                  cf.pen = {
+                    color: String(e.target.value || PENS_DEFAULTS.color),
+                  };
+              },
+            });
         },
       });
     }
     if (id === "pen-confirmedStyle" || id === "pen-provisionalStyle") {
-      const kk = id.includes("confirmed") ? "confirmedStyle" : "provisionalStyle";
+      const kk = id.includes("confirmed")
+        ? "confirmedStyle"
+        : "provisionalStyle";
       return defineComponent({
         setup() {
           const val = () => pen[kk] ?? PENS_DEFAULTS[kk];
-          return () => h("select", {
-              class: "input",
-              value: val(),
-              onChange: (e) => {
-                if(cf.pen) cf.pen[kk] = String(e.target.value || PENS_DEFAULTS[kk]); else cf.pen = { [kk]: String(e.target.value || PENS_DEFAULTS[kk]) };
+          return () =>
+            h(
+              "select",
+              {
+                class: "input",
+                value: val(),
+                onChange: (e) => {
+                  if (cf.pen)
+                    cf.pen[kk] = String(e.target.value || PENS_DEFAULTS[kk]);
+                  else
+                    cf.pen = {
+                      [kk]: String(e.target.value || PENS_DEFAULTS[kk]),
+                    };
+                },
               },
-            },
-            LINE_STYLES.map((s) => h("option", { value: s }, s))
-          );
+              LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
+            );
         },
       });
     }
@@ -486,19 +526,17 @@ function renderControl(row, item) {
     if (id === "seg-lineWidth") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.seriesLineWidth.min;
-          const maxV = UI_LIMITS.seriesLineWidth.max;
           return () => h(UiNumberBox, {
               modelValue: sg.lineWidth ?? SEGMENT_DEFAULTS.lineWidth,
-              min: minV,
-              max: maxV,
-              step: 0.5,
+              min: UI_LIMITS.lineWidth.min,
+              max: UI_LIMITS.lineWidth.max,
+              step: UI_LIMITS.lineWidth.step,
               compact: true,
               integer: false,
               "frac-digits": 1,
               "onUpdate:modelValue": (v) => {
-                const next = Math.max(minV, Math.min(maxV, Number(v ?? SEGMENT_DEFAULTS.lineWidth)));
-                if(cf.segment) cf.segment.lineWidth = next; else cf.segment = { lineWidth: next };
+                if (cf.segment) cf.segment.lineWidth = v;
+                else cf.segment = { lineWidth: v };
               },
             });
         },
@@ -522,15 +560,27 @@ function renderControl(row, item) {
       return defineComponent({
         setup() {
           const val = () => sg.lineStyle ?? SEGMENT_DEFAULTS.lineStyle;
-          return () => h("select", {
-              class: "input",
-              value: val(),
-              onChange: (e) => {
-                if(cf.segment) cf.segment.lineStyle = String(e.target.value || SEGMENT_DEFAULTS.lineStyle); else cf.segment = { lineStyle: String(e.target.value || SEGMENT_DEFAULTS.lineStyle) };
+          return () =>
+            h(
+              "select",
+              {
+                class: "input",
+                value: val(),
+                onChange: (e) => {
+                  if (cf.segment)
+                    cf.segment.lineStyle = String(
+                      e.target.value || SEGMENT_DEFAULTS.lineStyle
+                    );
+                  else
+                    cf.segment = {
+                      lineStyle: String(
+                        e.target.value || SEGMENT_DEFAULTS.lineStyle
+                      ),
+                    };
+                },
               },
-            },
-            LINE_STYLES.map((s) => h("option", { value: s }, s))
-          );
+              LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
+            );
         },
       });
     }
@@ -542,20 +592,18 @@ function renderControl(row, item) {
     if (id === "pv-lineWidth") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.seriesLineWidth.min;
-          const maxV = UI_LIMITS.seriesLineWidth.max;
           const value = () => pv.lineWidth ?? CHAN_PEN_PIVOT_DEFAULTS.lineWidth;
           return () => h(UiNumberBox, {
               modelValue: value(),
-              min: minV,
-              max: maxV,
-              step: 0.1,
+              min: UI_LIMITS.lineWidth.min,
+              max: UI_LIMITS.lineWidth.max,
+              step: UI_LIMITS.lineWidth.step,
               compact: true,
               integer: false,
               "frac-digits": 1,
               "onUpdate:modelValue": (v) => {
-                const next = Math.max(minV, Math.min(maxV, Number(v ?? CHAN_PEN_PIVOT_DEFAULTS.lineWidth)));
-                if(cf.penPivot) cf.penPivot.lineWidth = next; else cf.penPivot = { lineWidth: next };
+                if (cf.penPivot) cf.penPivot.lineWidth = v;
+                else cf.penPivot = { lineWidth: v };
               },
             });
         },
@@ -572,7 +620,7 @@ function renderControl(row, item) {
                 if(cf.penPivot) cf.penPivot.lineStyle = String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS.lineStyle); else cf.penPivot = { lineStyle: String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS.lineStyle) };
               },
             },
-            LINE_STYLES.map((s) => h("option", { value: s }, s))
+            LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
           );
         },
       });
@@ -596,19 +644,17 @@ function renderControl(row, item) {
     if (id === "pv-alpha") {
       return defineComponent({
         setup() {
-          const minV = UI_LIMITS.alphaPercent.min;
-          const maxV = UI_LIMITS.alphaPercent.max;
           const value = () => pv.alphaPercent ?? CHAN_PEN_PIVOT_DEFAULTS.alphaPercent;
           return () => h(UiNumberBox, {
               modelValue: value(),
-              min: minV,
-              max: maxV,
-              step: 1,
+              min: UI_LIMITS.percentage.min,
+              max: UI_LIMITS.percentage.max,
+              step: UI_LIMITS.percentage.step,
               compact: true,
               integer: true,
               "onUpdate:modelValue": (v) => {
-                const next = Math.max(minV, Math.min(maxV, Number(v ?? CHAN_PEN_PIVOT_DEFAULTS.alphaPercent)));
-                if(cf.penPivot) cf.penPivot.alphaPercent = next; else cf.penPivot = { alphaPercent: next };
+                if (cf.penPivot) cf.penPivot.alphaPercent = v;
+                else cf.penPivot = { alphaPercent: v };
               },
             });
         },

@@ -114,8 +114,8 @@ import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { buildVolumeOption } from "@/charts/options";
-import { DEFAULT_VOL_SETTINGS, STYLE_PALETTE } from "@/constants";
-import SettingsGrid from "@/components/ui/SettingsGrid.vue"; // NEW: 统一设置网格
+import { DEFAULT_VOL_SETTINGS, UI_LIMITS, MARKER_SHAPE_OPTIONS, LINE_STYLES } from "@/constants";
+import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 
 // props / emits
 const props = defineProps({
@@ -518,14 +518,14 @@ const VolumeSettingsContent = defineComponent({
           return h("input", {
             class: "input num",
             type: "number",
-            min: 10,
-            max: 100,
-            step: 1,
+            min: UI_LIMITS.barWidthPercent.min,
+            max: UI_LIMITS.barWidthPercent.max,
+            step: UI_LIMITS.barWidthPercent.step,
             value: Number(settingsDraftVol.volBar.barPercent ?? 100),
             onInput: (e) =>
               (settingsDraftVol.volBar.barPercent = Math.max(
-                10,
-                Math.min(100, Math.round(+e.target.value || 100))
+                UI_LIMITS.barWidthPercent.min,
+                Math.min(UI_LIMITS.barWidthPercent.max, Math.round(+e.target.value || 100))
               )),
           });
         }
@@ -555,9 +555,9 @@ const VolumeSettingsContent = defineComponent({
           return h("input", {
             class: "input num",
             type: "number",
-            min: 0.5,
-            max: 4,
-            step: 0.5,
+            min: UI_LIMITS.lineWidth.min,
+            max: UI_LIMITS.lineWidth.max,
+            step: UI_LIMITS.lineWidth.step,
             value: Number(conf.width ?? 1),
             onInput: (e) => (settingsDraftVol.mavolForm[mk].width = Number(e.target.value || 1)),
           });
@@ -578,23 +578,19 @@ const VolumeSettingsContent = defineComponent({
               value: conf.style || "solid",
               onChange: (e) => (settingsDraftVol.mavolForm[mk].style = String(e.target.value)),
             },
-            [
-              h("option", { value: "solid" }, "实线"),
-              h("option", { value: "dashed" }, "虚线"),
-              h("option", { value: "dotted" }, "点线"),
-            ]
+            LINE_STYLES.map(opt => h("option", { value: opt.v }, opt.label))
           );
         }
         if (id === "period") {
           return h("input", {
             class: "input num",
             type: "number",
-            min: 1,
-            step: 1,
+            min: UI_LIMITS.positiveInteger.min,
+            step: UI_LIMITS.positiveInteger.step,
             value: Number(conf.period ?? 5),
             onInput: (e) =>
               (settingsDraftVol.mavolForm[mk].period = Math.max(
-                1,
+                UI_LIMITS.positiveInteger.min,
                 parseInt(e.target.value || 5, 10)
               )),
           });
@@ -611,12 +607,7 @@ const VolumeSettingsContent = defineComponent({
               value: settingsDraftVol.markerPump.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
               onChange: (e) => (settingsDraftVol.markerPump.shape = String(e.target.value)),
             },
-            [
-              h("option", { value: "triangle" }, "triangle"),
-              h("option", { value: "diamond" }, "diamond"),
-              h("option", { value: "circle" }, "circle"),
-              h("option", { value: "rect" }, "rect"),
-            ]
+            MARKER_SHAPE_OPTIONS.map(opt => h("option", { value: opt.v }, opt.label))
           );
         }
         if (id === "pumpColor") {
@@ -631,14 +622,14 @@ const VolumeSettingsContent = defineComponent({
           return h("input", {
             class: "input num",
             type: "number",
-            min: 0.1,
-            step: 0.1,
+            min: UI_LIMITS.nonNegativeFloat.min,
+            step: UI_LIMITS.nonNegativeFloat.step,
             value: Number.isFinite(+settingsDraftVol.markerPump.threshold)
               ? +settingsDraftVol.markerPump.threshold
               : DEFAULT_VOL_SETTINGS.markerPump.threshold,
             onInput: (e) =>
               (settingsDraftVol.markerPump.threshold = Math.max(
-                0.1,
+                UI_LIMITS.nonNegativeFloat.min,
                 Number(e.target.value || DEFAULT_VOL_SETTINGS.markerPump.threshold)
               )),
           });
@@ -655,12 +646,7 @@ const VolumeSettingsContent = defineComponent({
               value: settingsDraftVol.markerDump.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
               onChange: (e) => (settingsDraftVol.markerDump.shape = String(e.target.value)),
             },
-            [
-              h("option", { value: "triangle" }, "triangle"),
-              h("option", { value: "diamond" }, "diamond"),
-              h("option", { value: "circle" }, "circle"),
-              h("option", { value: "rect" }, "rect"),
-            ]
+            MARKER_SHAPE_OPTIONS.map(opt => h("option", { value: opt.v }, opt.label))
           );
         }
         if (id === "dumpColor") {
@@ -675,14 +661,14 @@ const VolumeSettingsContent = defineComponent({
           return h("input", {
             class: "input num",
             type: "number",
-            min: 0.1,
-            step: 0.1,
+            min: UI_LIMITS.nonNegativeFloat.min,
+            step: UI_LIMITS.nonNegativeFloat.step,
             value: Number.isFinite(+settingsDraftVol.markerDump.threshold)
               ? +settingsDraftVol.markerDump.threshold
               : DEFAULT_VOL_SETTINGS.markerDump.threshold,
             onInput: (e) =>
               (settingsDraftVol.markerDump.threshold = Math.max(
-                0.1,
+                UI_LIMITS.nonNegativeFloat.min,
                 Number(e.target.value || DEFAULT_VOL_SETTINGS.markerDump.threshold)
               )),
           });
