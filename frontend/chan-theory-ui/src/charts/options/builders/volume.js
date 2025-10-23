@@ -4,6 +4,7 @@
 // - 柱 + MAVOL + 放/缩量标记（尺寸来源 DEFAULT_VOL_MARKER_SIZE）
 // - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
 // - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+// - FIX: 精确控制双Y轴的 axisPointer 可见性，实现“悬浮窗十字，其余竖线”效果。
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -67,6 +68,7 @@ export function buildVolumeOption(
   // MAVOL 线
   const namePrefixCN = baseMode === "amount" ? "额MA" : "量MA";
   const mstyles = volCfg?.mavolStyles || {};
+  // `periods` 仅用于渲染显示的均线
   const periods = Object.keys(mstyles)
     .map((k) => mstyles[k])
     .filter(
@@ -147,9 +149,25 @@ export function buildVolumeOption(
   const offsetDownPx = Math.round(markerH + markerYOffset);
   const symbolOffsetBelow = [0, offsetDownPx];
 
+  // 1. 从所有已配置的均线中（无论是否启用）找到周期最小的一条作为标记计算的基准。
+  const allConfiguredPeriods = Object.values(volCfg?.mavolStyles || {})
+      .filter(s => s && Number.isFinite(+s.period) && +s.period > 0)
+      .sort((a, b) => +a.period - +b.period);
+  
+  const primPeriodForMarkers = allConfiguredPeriods.length ? +allConfiguredPeriods[0].period : null;
+
+  // 2. 独立计算这条基准均线的SMA序列，仅用于标记判断。
+  let primSeriesForMarkers = null;
+  if (primPeriodForMarkers) {
+      // 如果该均线已被启用并计算过，直接复用；否则，单独计算一次。
+      if (mavolMap[primPeriodForMarkers]) {
+          primSeriesForMarkers = mavolMap[primPeriodForMarkers];
+      } else {
+          primSeriesForMarkers = sma(baseScaled, primPeriodForMarkers);
+      }
+  }
+
   // 放/缩量散点
-  const primPeriod = periods.length ? +periods[0].period : null;
-  const primSeries = primPeriod ? mavolMap[primPeriod] : null;
   const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
     ? +volCfg.markerPump.threshold
     : DEFAULT_VOL_SETTINGS.markerPump.threshold;
@@ -160,11 +178,13 @@ export function buildVolumeOption(
   const dumpEnabled = (volCfg?.markerDump?.enabled ?? true) === true;
   const pumpPts = [];
   const dumpPts = [];
-  if (primSeries) {
+
+  // FIX-1: 使用独立计算的 `primSeriesForMarkers` 作为基准，不再依赖于显示的均线。
+  if (primSeriesForMarkers) {
     if (pumpEnabled && pumpK > 0) {
       for (let i = 0; i < baseScaled.length; i++) {
         const v = baseScaled[i],
-          m = primSeries[i];
+          m = primSeriesForMarkers[i];
         if (!Number.isFinite(v) || !Number.isFinite(m) || m <= 0) continue;
         if (v >= pumpK * m) pumpPts.push([i, 0]);
       }
@@ -172,7 +192,7 @@ export function buildVolumeOption(
     if (dumpEnabled && dumpK > 0) {
       for (let i = 0; i < baseScaled.length; i++) {
         const v = baseScaled[i],
-          m = primSeries[i];
+          m = primSeriesForMarkers[i];
         if (!Number.isFinite(v) || !Number.isFinite(m) || m <= 0) continue;
         if (v <= dumpK * m) dumpPts.push([i, 0]);
       }
@@ -183,6 +203,7 @@ export function buildVolumeOption(
       id: "VOL_PUMP_MARK",
       type: "scatter",
       name: "放量标记",
+      yAxisIndex: 1, // 绑定到第二Y轴
       data: pumpPts,
       symbol: volCfg?.markerPump?.shape || "triangle",
       symbolSize: () => [markerW, markerH],
@@ -191,6 +212,7 @@ export function buildVolumeOption(
         color:
           volCfg?.markerPump?.color || DEFAULT_VOL_SETTINGS.markerPump.color,
       },
+      silent: true,
       z: 4,
     });
   }
@@ -199,14 +221,17 @@ export function buildVolumeOption(
       id: "VOL_DUMP_MARK",
       type: "scatter",
       name: "缩量标记",
+      yAxisIndex: 1, // 绑定到第二Y轴
       data: dumpPts,
       symbol: volCfg?.markerDump?.shape || "diamond",
+      symbolRotate: 180, // 缩量标记符号旋转180度
       symbolSize: () => [markerW, markerH],
       symbolOffset: symbolOffsetBelow,
       itemStyle: {
         color:
           volCfg?.markerDump?.color || DEFAULT_VOL_SETTINGS.markerDump.color,
       },
+      silent: true,
       z: 4,
     });
   }
@@ -240,17 +265,40 @@ export function buildVolumeOption(
       textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
     },
     xAxis: { type: "category", data: dates },
-    yAxis: {
-      min: 0,
-      scale: true,
-      axisLabel: {
-        color: theme.axisLabelColor,
-        align: "right",
-        formatter: (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 }),
-        margin: ui?.isHovered ? 6 : 6,
+    yAxis: [
+      {
+        min: 0,
+        scale: true,
+        axisLabel: {
+          color: theme.axisLabelColor,
+          align: "right",
+          formatter: (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 }),
+          margin: ui?.isHovered ? 6 : 6,
+        },
+        axisPointer: {
+          show: true, // 保持为 true, 由 link 机制统一控制
+          label: { show: !!ui?.isHovered },
+          // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
+          lineStyle: {
+            color: ui?.isHovered ? theme.axisLineColor : "transparent",
+          },
+        },
       },
-      axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
-    },
+      {
+        type: "value",
+        min: 0,
+        max: 1,
+        show: false,
+        scale: false,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        // FIX: 显式禁用第二Y轴的指针
+        axisPointer: {
+          show: false,
+        },
+      }
+    ],
     series,
   };
 

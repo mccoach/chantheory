@@ -9,7 +9,6 @@
 // - NEW：笔中枢（矩形框）：markArea 透明填充 + markLine 四边框，颜色与填充一致，填充按透明度淡显。
 // ==============================
 import {
-  CHAN_MARKER_PRESETS, // 视觉预设集合
   CHAN_DEFAULTS, // 缺省参数（包含图形/颜色/最大数量）
   FRACTAL_DEFAULTS, // 分型默认（包含样式与间距）
   PENS_DEFAULTS, // 画笔默认方案（线宽/颜色/线型/开关）
@@ -70,14 +69,11 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
   const upArr = downSample(upPoints, chan.maxVisibleMarkers);
   const dnArr = downSample(downPoints, chan.maxVisibleMarkers);
 
-  const preset =
-    CHAN_MARKER_PRESETS[chan.visualPreset] ||
-    CHAN_MARKER_PRESETS["tri-default"];
-
-  const upShape = chan.upShape || preset.up.shape;
-  const downShape = chan.downShape || preset.down.shape;
-  const upFill = chan.upColor || preset.up.fill;
-  const downFill = chan.downColor || preset.down.fill;
+  // -- 修正：直接从合并后的 chan 设置中获取形状和颜色，不再使用任何预设 --
+  const upShape = chan.upShape;
+  const downShape = chan.downShape;
+  const upFill = chan.upColor;
+  const downFill = chan.downColor;
 
   const commonScatter = {
     type: "scatter",
@@ -93,19 +89,19 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
   const upSeries = {
     ...commonScatter,
     id: "CHAN_UP",
-    name: "CHAN_UP", // 不变量：id: "CHAN_UP"
+    name: "CHAN_UP",
     data: upArr,
     symbol: upShape,
-    symbolRotate: preset.up.rotate || 0,
+    symbolRotate: 0,
     itemStyle: { color: upFill, opacity: chan.opacity },
   };
   const downSeries = {
     ...commonScatter,
     id: "CHAN_DOWN",
-    name: "CHAN_DOWN", // 不变量：id: "CHAN_DOWN"
+    name: "CHAN_DOWN",
     data: dnArr,
     symbol: downShape,
-    symbolRotate: preset.down.rotate || 180,
+    symbolRotate: 180,
     itemStyle: { color: downFill, opacity: chan.opacity },
   };
 
@@ -191,7 +187,7 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       yAxisIndex: 0, // 不变量：yAxisIndex: 0
       data,
       symbol: shape,
-      symbolRotate: shape === "triangle" ? 180 : 0,
+      symbolRotate: 180, // <-- 修正：统一旋转180度，使其向下指示高点
       symbolSize: () => [markerW, markerH],
       symbolOffset: [0, yOffTop], // NEW：宽度统一覆盖
       itemStyle: isHollow
@@ -269,7 +265,7 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         yAxisIndex: 0,
         data: topConfirmData,
         symbol: shape,
-        symbolRotate: shape === "triangle" ? 180 : 0,
+        symbolRotate: 180, // <-- 修正：统一旋转180度，使其向下指示高点
         symbolSize: () => [markerW, markerH],
         // 比常规分型再外移一个预设偏移量：markerH/2 + apexGap + extraGap
         symbolOffset: [0, -(markerH / 2 + apexGap + extraGap)],

@@ -23,10 +23,10 @@ export const DEFAULT_VOL_SETTINGS = {
     },
   },
   markerPump: {
-    enabled: true, shape: "triangle", color: "#FFFF00", threshold: 1.5,
+    enabled: true, shape: "arrow", color: "#FFFF00", threshold: 1.5,
   },
   markerDump: {
-    enabled: true, shape: "diamond", color: "#00ff00", threshold: 0.7,
+    enabled: true, shape: "arrow", color: "#00ff00", threshold: 0.7,
   },
 };
 

@@ -48,7 +48,7 @@ export const UI_LIMITS = {
   outlineWidth: {
     min: 1,
     max: 6,
-    step: 1,
+    step: 0.5,
   },
   // 通用百分比 (0-100)
   percentage: {
@@ -112,10 +112,9 @@ export const MIN_COND_OPTIONS = [
 export const MARKER_SHAPE_OPTIONS = [
   { v: "triangle", label: "▲" },
   { v: "diamond", label: "◆" },
-  { v: "rect", label: "■" },
+  { v: "rect", label: "▉" },
   { v: "circle", label: "⬤" },
-  { v: "pin", label: "📍" },
-  { v: "arrow", label: "⬇" },
+  { v: "arrow", label: "🢙" },
 ];
 
 export const FILL_OPTIONS = [

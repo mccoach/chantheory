@@ -1,12 +1,8 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ============================== -->
 <!-- 说明：主图组件（接入“上游统一渲染中枢 useViewRenderHub” · 一次订阅一次渲染）
-     本次仅适配 useChan 输出的新键；覆盖层 series 的构造保持原方法与时序，
-     仅在 recomputeChan() 与 buildOverlaySeriesForOption() 内消费新键，不改变其余流程/顺序。
-     NEW: 接入“笔中枢”：
-       - 计算：computePenPivots()
-       - 渲染：buildPenPivotAreas()
-       - 设置：在“缠论标记”页的“简笔”行下方新增“笔中枢”设置行
+     - REFACTORED: 移除所有本地的 option 构建逻辑，简化为纯粹的 option 消费者。
+     - doSinglePassRender 函数现在只从快照中获取预先构建好的 option 并 setOption。
 -->
 <template>
   <!-- 顶部两行两列布局 -->
@@ -368,39 +364,14 @@ import {
   reactive,
 } from "vue";
 import * as echarts from "echarts";
-import {
-  buildMainChartOption,
-} from "@/charts/options";
-import {
-  CHAN_DEFAULTS,
-  WINDOW_PRESETS,
-  PENS_DEFAULTS,
-} from "@/constants";
+import { WINDOW_PRESETS } from "@/constants"; // REFACTORED: 移除不再使用的常量
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
-import {
-  computeInclude,
-  computeFractals,
-  computePens,
-  computeSegments,
-  computePenPivots,
-} from "@/composables/useChan";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
-import {
-  buildUpDownMarkers,
-  buildFractalMarkers,
-  buildPenLines,
-  buildSegmentLines,
-  buildBarrierLines,
-  buildPenPivotAreas,
-} from "@/charts/chan/layers";
 import { openMainChartSettings } from "@/settings/mainShell";
 
-import {
-  pad2,
-  fmtShort,
-} from "@/utils/timeFormat";
+import { pad2, fmtShort } from "@/utils/timeFormat";
 
 /* 双跳脱调度，避免主流程期 setOption/resize */
 function schedule(fn) {
@@ -561,232 +532,7 @@ function focusWrap() {
   } catch {}
 }
 
-/* 缠论/分型/笔/线段/屏障缓存/笔中枢 —— 统一在 recomputeChan 中构建 */
-const chanCache = ref({
-  reduced: [],
-  map: [],
-  meta: null,
-  fractals: [],
-  pens: { confirmed: [], provisional: null, all: [] },
-  segments: [], // 新增：元线段缓存
-  barriersIndices: [], // NEW: 屏障竖线位置（原始K索引，含左右各一）
-  pivots: [], // NEW: 笔中枢
-});
-function recomputeChan() {
-  try {
-    const arr = vm.candles.value || [];
-    if (!arr.length) {
-      chanCache.value = {
-        reduced: [],
-        map: [],
-        meta: null,
-        fractals: [],
-        pens: { confirmed: [], provisional: null, all: [] },
-        segments: [],
-        barriersIndices: [],
-        pivots: [], // 笔中枢
-      };
-      return;
-    }
-    const policy =
-      settings.chanSettings.value.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
-    const res = computeInclude(arr, { anchorPolicy: policy });
-    const fr = computeFractals(res.reducedBars || [], {
-      minTickCount: settings.fractalSettings.value.minTickCount || 0,
-      minPct: settings.fractalSettings.value.minPct || 0,
-      minCond: String(settings.fractalSettings.value.minCond || "or"),
-    });
-
-    // NEW: 计算画笔（承载点间距 gap≥4；同步更新上一预备笔终点在同类更极值时由 useChan 实现）
-    const pens = computePens(
-      res.reducedBars || [],
-      fr || [],
-      res.mapOrigToReduced || [],
-      { minGapReduced: 4 }
-    );
-
-    // 新增：识别元线段（基于确认笔）；位置追加，不改变既有步骤顺序
-    const segments = computeSegments(pens.confirmed || []);
-
-    // NEW: 由 reducedBars 中的屏障标记计算竖线位置：gap 两侧紧邻原始K（left=end_idx_orig(prev)，right=start_idx_orig(curr)）
-    const barrierIdxList = [];
-    const rb = res.reducedBars || [];
-    for (let i = 0; i < rb.length; i++) {
-      const cur = rb[i];
-      if (cur && cur.barrier_after_prev_bool) {
-        const prev = i > 0 ? rb[i - 1] : null;
-        const left = prev ? prev.end_idx_orig : null;
-        const right = cur.start_idx_orig;
-        if (Number.isFinite(+left)) barrierIdxList.push(+left);
-        if (Number.isFinite(+right)) barrierIdxList.push(+right);
-      }
-    }
-
-    // NEW: 计算“笔中枢”
-    const pivots = computePenPivots(pens.confirmed || []);
-
-    chanCache.value = {
-      reduced: res.reducedBars || [],
-      map: res.mapOrigToReduced || [],
-      meta: res.meta || null,
-      fractals: fr || [],
-      pens: pens || { confirmed: [], provisional: null, all: [] },
-      segments: segments || [],
-      barriersIndices: barrierIdxList || [],
-      pivots, // 保存“笔中枢”
-    };
-  } catch {
-    chanCache.value = {
-      reduced: [],
-      map: [],
-      meta: null,
-      fractals: [],
-      pens: { confirmed: [], provisional: null, all: [] },
-      segments: [],
-      barriersIndices: [],
-      pivots: [],
-    };
-  }
-}
-
-/**
- * 覆盖层 series（一次性装配）
- * - 涨跌标记：anchor_idx_orig 作 x
- * - 分型：k2_idx_orig 作 x
- * - 笔/线段：*_idx_orig + *_y_pri
- * - 屏障：在 gap 两侧紧邻原始 K 处绘制竖线（markLine）
- */
-function buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
-  const out = [];
-  const reduced = chanCache.value.reduced || [];
-  const fractals = chanCache.value.fractals || [];
-  const pens = chanCache.value.pens || {
-    confirmed: [],
-    provisional: null,
-    all: [],
-  };
-  const segments = chanCache.value.segments || [];
-  const barrierIdxList = chanCache.value.barriersIndices || [];
-  const pivots = chanCache.value.pivots || []; // NEW: 笔中枢
-
-  // 屏障竖线（优先叠加，z 更高）
-  if (barrierIdxList.length) {
-    const bl = buildBarrierLines(barrierIdxList);
-    out.push(...(bl.series || []));
-  }
-
-  // 涨跌标记
-  if (settings.chanSettings.value.showUpDownMarkers && reduced.length) {
-    // 正常路径由 layers.js 的集中高度控制
-    const upDownLayer = buildUpDownMarkers(reduced, {
-      chanSettings: settings.chanSettings.value,
-      hostWidth: hostW,
-      visCount,
-      symbolWidthPx: markerW,
-    });
-    out.push(...(upDownLayer.series || []));
-  } else {
-    // 占位路径：统一从 index.js 预设取高度与偏移
-    const markerHeight = Math.max(
-      1,
-      Math.round(Number(CHAN_DEFAULTS.markerHeightPx))
-    );
-    const offsetDownPx = Math.round(
-      markerHeight + Number(CHAN_DEFAULTS.markerYOffsetPx)
-    );
-
-    out.push(
-      {
-        type: "scatter",
-        id: "CHAN_UP",
-        name: "CHAN_UP",
-        yAxisIndex: 1,
-        data: [],
-        symbol: "triangle",
-        symbolSize: () => [markerW, markerHeight],
-        symbolOffset: [0, offsetDownPx],
-        itemStyle: {
-          color: CHAN_DEFAULTS.upColor,
-          opacity: CHAN_DEFAULTS.opacity,
-        },
-        tooltip: { show: false },
-        z: 2,
-        emphasis: { scale: false },
-      },
-      {
-        type: "scatter",
-        id: "CHAN_DOWN",
-        name: "CHAN_DOWN",
-        yAxisIndex: 1,
-        data: [],
-        symbol: "triangle",
-        symbolSize: () => [markerW, markerHeight],
-        symbolOffset: [0, offsetDownPx],
-        itemStyle: {
-          color: CHAN_DEFAULTS.downColor,
-          opacity: CHAN_DEFAULTS.opacity,
-        },
-        tooltip: { show: false },
-        z: 2,
-        emphasis: { scale: false },
-      }
-    );
-  }
-
-  // 分型标记
-  const frEnabled = (settings.fractalSettings.value?.enabled ?? true) === true;
-  if (frEnabled && reduced.length && fractals.length) {
-    const frLayer = buildFractalMarkers(reduced, fractals, {
-      fractalSettings: settings.fractalSettings.value,
-      hostWidth: hostW,
-      visCount,
-      symbolWidthPx: markerW,
-    });
-    out.push(...(frLayer.series || []));
-  } else {
-    const FR_IDS = [
-      "FR_TOP_STRONG",
-      "FR_TOP_STANDARD",
-      "FR_TOP_WEAK",
-      "FR_BOT_STRONG",
-      "FR_BOT_STANDARD",
-      "FR_BOT_WEAK",
-      "FR_TOP_CONFIRM",
-      "FR_BOT_CONFIRM",
-      "FR_CONFIRM_LINKS",
-    ];
-    for (const id of FR_IDS) {
-      out.push({ id, name: id, type: "scatter", yAxisIndex: 0, data: [] });
-    }
-  }
-
-  // 画笔折线（传入屏障索引，确保在断点处分段；每段为独立 series）
-  const penEnabled =
-    (settings.chanSettings.value?.pen?.enabled ?? PENS_DEFAULTS.enabled) ===
-    true;
-  if (
-    penEnabled &&
-    reduced.length &&
-    (pens.confirmed.length || pens.provisional)
-  ) {
-    const penLayer = buildPenLines(pens, { barrierIdxList });
-    out.push(...(penLayer.series || []));
-  }
-
-  // 元线段（每段独立 series；传入屏障索引以防跨断点）
-  if ((segments || []).length) {
-    const segLayer = buildSegmentLines(segments, { barrierIdxList });
-    out.push(...(segLayer.series || []));
-  }
-
-  // NEW: 笔中枢（矩形框，静态框线）
-  if ((pivots || []).length) {
-    const pvLayer = buildPenPivotAreas(pivots, { barrierIdxList });
-    out.push(...(pvLayer.series || []));
-  }
-
-  return out;
-}
+// REFACTORED: 移除 recomputeChan 和 buildOverlaySeriesForOption
 
 /* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 let dzIdleTimer = null;
@@ -794,9 +540,21 @@ const dzIdleDelayMs = 100; // 建议 100–200ms，避免频繁承接
 
 // NEW: 拖移会话鼠标状态（仅鼠标未抬起时不结束交互）
 let isMouseDown = false;
-let zrMouseDownHandler = () => { isMouseDown = true; };
-let zrMouseUpHandler = () => { isMouseDown = false; try { renderHub.endInteraction("main"); } catch {} };
-let winMouseUpHandler = () => { isMouseDown = false; try { renderHub.endInteraction("main"); } catch {} };
+let zrMouseDownHandler = () => {
+  isMouseDown = true;
+};
+let zrMouseUpHandler = () => {
+  isMouseDown = false;
+  try {
+    renderHub.endInteraction("main");
+  } catch {}
+};
+let winMouseUpHandler = () => {
+  isMouseDown = false;
+  try {
+    renderHub.endInteraction("main");
+  } catch {}
+};
 
 /* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
 function onDataZoom(params) {
@@ -882,96 +640,28 @@ function onDataZoom(params) {
       } finally {
         // NEW: 仅在鼠标已抬起时才结束交互；鼠标未抬起保持拖移会话
         if (!isMouseDown) {
-        renderHub.endInteraction("main");
+          renderHub.endInteraction("main");
         }
       }
     }, dzIdleDelayMs);
   } catch {}
 }
 
-/* 一次性装配渲染（交互期间不做 notMerge 重绘） */
+/* REFACTORED: 一次性装配渲染（消费 hub 预构建的 option） */
 function doSinglePassRender(snapshot) {
   try {
     if (!chart || !snapshot) return;
     const mySeq = ++renderSeq;
 
-    // 先计算缠论（含分型/画笔/线段/屏障）
-    recomputeChan();
-    const reduced = chanCache.value.reduced || [];
-    const mapReduced = chanCache.value.map || [];
-
-    const initialRange = {
-      startValue: snapshot.main.range.startValue,
-      endValue: snapshot.main.range.endValue,
-    };
-    const tipPositioner = renderHub.getTipPositioner();
-
-    // 标记存在则给主图内部挤空间（完全由 CHAN_DEFAULTS 决定几何与避让量）
-    const anyMarkers =
-      (settings.chanSettings.value?.showUpDownMarkers ?? true) === true &&
-      reduced.length > 0;
-
-    // 唯一数据源：高度与偏移取自 index.js 的 CHAN_DEFAULTS
-    const markerHeight = Math.max(
-      1,
-      Math.round(Number(CHAN_DEFAULTS.markerHeightPx))
-    );
-    const markerYOffset = Math.max(
-      0,
-      Math.round(Number(CHAN_DEFAULTS.markerYOffsetPx))
-    );
-    const offsetDownPx = Math.round(markerHeight + markerYOffset);
-
-    // 主图底部空白与横轴标签避让量：与符号向下偏移量一致，避免遮挡
-    const mainBottomExtraPx = anyMarkers ? offsetDownPx : 0;
-    const xAxisLabelMargin = anyMarkers ? offsetDownPx + 12 : 12;
-
-    const rebuiltMainOption = buildMainChartOption(
-      {
-        candles: vm.candles.value || [],
-        indicators: vm.indicators.value || {},
-        chartType: vm.chartType.value || "kline",
-        maConfigs: settings.maConfigs.value,
-        freq: vm.freq.value || "1d",
-        klineStyle: settings.klineStyle.value,
-        adjust: vm.adjust.value || "none",
-        reducedBars: reduced,
-        mapOrigToReduced: mapReduced,
-      },
-      {
-        initialRange,
-        tooltipPositioner: tipPositioner,
-        mainAxisLabelSpacePx: 28,
-        xAxisLabelMargin,
-        mainBottomExtraPx,
-        isHovered: snapshot.main.isHovered, // 传入悬浮状态
-      }
-    );
-
-    const bars = Math.max(1, snapshot.core?.barsCount || 1);
-    const hostW = host.value ? host.value.clientWidth : 800;
-    const markerW = snapshot.core?.markerWidthPx || 8;
-
-    // 修改：传入 sIdx/eIdx，供覆盖层“笔中枢框线”静态绘制使用
-    const overlaySeries = buildOverlaySeriesForOption({
-      hostW,
-      visCount: bars,
-      markerW,
-    });
-
-    // 交互期间：跳过 notMerge 重绘（避免抢权）；可按需做轻量样式 patch（此处直接跳过）
     if (renderHub.isInteracting()) {
-      // 选择性样式 patch示例（如需）：chart.setOption({ /* 仅样式 */ }, { notMerge:false, silent:true, lazyUpdate:true });
       return;
     }
 
-    // 常规（非交互期）：一次性装配渲染
-    const finalOption = {
-      ...rebuiltMainOption,
-      series: [...(rebuiltMainOption.series || []), ...overlaySeries],
-    };
+    const finalOption = snapshot.main?.option;
+    if (!finalOption) return;
 
-    // 程序化 dataZoom 签名守护（仅用于避免回环；逻辑保持不变）
+    // 程序化 dataZoom 守护
+    const initialRange = snapshot.main.range;
     const guardSig = `${initialRange.startValue}:${initialRange.endValue}`;
     progZoomGuard.active = true;
     progZoomGuard.sig = guardSig;
@@ -986,14 +676,16 @@ function doSinglePassRender(snapshot) {
       progZoomGuard.active = false;
     }, 300);
 
-    // 顶栏预览文案（保持不变）
+    // 更新顶栏预览文案
     const sIdx = initialRange.startValue;
     const eIdx = initialRange.endValue;
     const arr = vm.candles.value || [];
     previewStartStr.value = arr[sIdx]?.t || "";
     previewEndStr.value = arr[eIdx]?.t || "";
     previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
-  } catch {}
+  } catch (e) {
+    console.error("MainChartPanel render error:", e);
+  }
 }
 const previewStartStr = ref("");
 const previewEndStr = ref("");
@@ -1072,30 +764,41 @@ onMounted(() => {
 
   chart.on("updateAxisPointer", (params) => {
     try {
-      const len = (vm.candles.value || []).length;
+      const list = vm.candles.value || [];
+      const len = list.length;
       if (!len) return;
 
-      // MOD: 移除所有 setOption 逻辑，仅保留 lastFocusTs 更新
       let idx = -1;
+
       const sd = Array.isArray(params?.seriesData)
         ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
         : null;
       if (sd && Number.isFinite(sd.dataIndex)) {
         idx = sd.dataIndex;
       } else {
-        const axisInfo = (params?.axesInfo && params.axesInfo[0]) || null;
-        const v = axisInfo?.value;
+        const xInfo = Array.isArray(params?.axesInfo)
+          ? params.axesInfo.find((ai) => ai && ai.axisDim === "x")
+          : null;
+        const v = xInfo?.value;
+
         if (Number.isFinite(v)) {
           idx = Math.max(0, Math.min(len - 1, Number(v)));
         } else if (typeof v === "string" && v) {
-          const dates = (vm.candles.value || []).map((d) => d.t);
+          const dates = list.map((d) => d.t);
           idx = dates.indexOf(v);
+        } else {
+          const b0 = Array.isArray(params?.batch)
+            ? params.batch.find((b) => Number.isFinite(b?.dataIndex))
+            : null;
+          if (b0 && Number.isFinite(b0.dataIndex)) {
+            idx = Math.max(0, Math.min(len - 1, Number(b0.dataIndex)));
+          }
         }
       }
+
       if (idx < 0 || idx >= len) return;
-      const tsVal = vm.candles.value[idx]?.t
-        ? Date.parse(vm.candles.value[idx].t)
-        : null;
+      const tIso = list[idx]?.t;
+      const tsVal = tIso ? Date.parse(tIso) : NaN;
       if (Number.isFinite(tsVal)) {
         settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
       }
@@ -1120,7 +823,7 @@ onMounted(() => {
     safeResize();
   });
 
-  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序��� —— //
+  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序    —— //
   // 说明：避免首帧快照在 chart 未初始化时被丢弃，导致不渲染。
   unsubId = renderHub.onRender((snapshot) => {
     doSinglePassRender(snapshot);
@@ -1333,7 +1036,7 @@ function applyInlineRangeDaily() {
     const ye = parseInt(endFields.Y, 10),
       me = parseInt(endFields.M, 10),
       de = parseInt(endFields.D, 10);
-    if (!([ys, ms, ds, ye, me, de].every(Number.isFinite))) return;
+    if (![ys, ms, ds, ye, me, de].every(Number.isFinite)) return;
 
     // 构造 YYYY-MM-DD 文本
     const toYMD = (y, m, d) =>
@@ -1384,7 +1087,7 @@ function applyInlineRangeMinute() {
       he = parseInt(endFields.h, 10),
       mine = parseInt(endFields.m, 10);
 
-    if (!([ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite)))
+    if (![ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite))
       return;
 
     // 构造本地时间的 Date（浏览器本地时区）；与 ECharts/前端解析保持一致

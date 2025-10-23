@@ -11,7 +11,7 @@ export const DEFAULT_KLINE_STYLE = {
   originalEnabled: true,
   mergedEnabled: true,
   mergedK: {
-    outlineWidth: 1.2,
+    outlineWidth: 1.5,
     upColor: "#FF0000",
     downColor: "#00ff00",
     fillFadePercent: 0,

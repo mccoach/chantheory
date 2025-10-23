@@ -1,11 +1,11 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewRenderHub.js
 // ==============================
 // 说明：统一渲染快照中枢（上游唯一源头）
-// - 责任：一次性计算并发布所有窗体所需的渲染参数（统一离散范围 sIdx/eIdx、markerWidthPx、主窗/量窗 option）。
-// - 下游：主窗/量窗/技术窗一次订阅一次渲染（不再分散监听 meta/事件、不再使用 zoomSync    chan:marker-size）。
-// - 触发：hub.onChange（两帧合并后的最终态）与 vm 数据落地（candles/indicators/meta）。
-// 说明：交互会话源保护（仅匹配同源的 endInteraction 才结束会话）
-// 原顺序不变；仅在 beginInteraction/endInteraction 内增加“源匹配”逻辑。
+// - FIX: 彻底重构为唯一的 option 生成器。
+// - `_computeAndPublish` 现在会遍历由 `TechPanels` 上报的 `_indicatorPanes` 数组。
+// - 为每个副图指标（包括主图）预先生成完整、正确的 option。
+// - 快照中包含 `indicatorOptions` 映射表，供 `IndicatorPanel` 按 ID 查找并应用。
+// - 移除了 `getIndicatorOption` 的导出，变为内部辅助函数。
 // ==============================
 
 import { ref, watch } from "vue";
@@ -16,66 +16,69 @@ import {
   buildVolumeOption,
   buildMacdOption,
   buildKdjOrRsiOption,
-  createFixedTooltipPositioner, // MOD: 引入固定定位器
-  buildBollOption, // NEW: 导入 BOLL 指标窗构造器
+  createFixedTooltipPositioner,
+  buildBollOption,
 } from "@/charts/options";
+// NEW: 引入覆盖层和缠论计算
+import {
+  computeInclude,
+  computeFractals,
+  computePens,
+  computeSegments,
+  computePenPivots,
+} from "@/composables/useChan";
+import {
+  buildUpDownMarkers,
+  buildFractalMarkers,
+  buildPenLines,
+  buildSegmentLines,
+  buildBarrierLines,
+  buildPenPivotAreas,
+} from "@/charts/chan/layers";
+import { CHAN_DEFAULTS, PENS_DEFAULTS } from "@/constants";
 
 let _singleton = null;
 
 export function useViewRenderHub() {
   if (_singleton) return _singleton;
 
+  // --- FIX: 将 settings 的初始化移入工厂函数内部，确保其在正确的 setup 上下文中执行 ---
   const hub = useViewCommandHub();
   const settings = useUserSettings();
 
-  // 上游数据句柄（由 App 注入）
   const _vmRef = { vm: null };
-
-  // 新增：当前悬浮的面板 key ('main'|'volume'|'indicator'|null)
-  const _hoveredPanelKey = ref(null); // NEW
-
-  // 订阅者
+  const _hoveredPanelKey = ref(null);
   const _subs = new Map();
   let _nextId = 1;
-
-  // 最近一次快照与序号
   const _lastSnapshot = ref(null);
   let _renderSeq = 0;
 
-  // MOD: 统一 tooltip 模式（ fixed | follow ），默认固定；提供全局事件切换
-  const tipMode = ref("follow"); // 默认固定（与现实现一致）
+  // FIX: 新增 _indicatorPanes 状态，由 TechPanels 上报
+  const _indicatorPanes = ref([]);
+
+  const tipMode = ref("follow");
   try {
     window.addEventListener("chan:set-tooltip-mode", (e) => {
       const m = String(e?.detail?.mode || "").toLowerCase();
       tipMode.value = m === "follow" ? "follow" : "fixed";
-      // 可选：立即推送一次快照，促使各窗重绘（避免等待下一次中枢状态变化）
-      try {
-        _computeAndPublish();
-      } catch {}
+      try { _computeAndPublish(); } catch {}
     });
   } catch {}
 
-  // 统一获取定位器：fixed → 返回固定器；follow → 返回 undefined（让 ECharts 跟随鼠标）
   function _getTipPositioner() {
     if (tipMode.value === "fixed") return createFixedTooltipPositioner("left");
-    return undefined; // 不设 position 即默认跟随鼠标
+    return undefined;
   }
 
-  // ==============================
-  // NEW: 交互会话锁（ECharts-first 禁止抢权）
-  // ==============================
   const _interacting = ref(false);
   let _interactionSource = null;
-
   function beginInteraction(source) {
-    // NEW: 若已处于交互中，不覆盖源；仅在开启交互时记录源
     if (!_interacting.value) {
       _interacting.value = true;
       _interactionSource = source || null;
     }
   }
   function endInteraction(source) {
-    // NEW: 仅当来源匹配当前交互源时才结束交互；否则忽略
     if (!_interacting.value) return;
     if (source && _interactionSource && source !== _interactionSource) return;
     _interacting.value = false;
@@ -85,64 +88,31 @@ export function useViewRenderHub() {
     return !!_interacting.value;
   }
 
-  // 新增：由各窗体调用，上报悬浮状态
   function setHoveredPanel(panelKey) {
     if (_hoveredPanelKey.value !== panelKey) {
       _hoveredPanelKey.value = panelKey;
     }
   }
 
-  // 新增：监听悬浮面板变化，触发一次渲染快照的重新计算与发布
   watch(_hoveredPanelKey, () => {
     _computeAndPublish();
   });
 
-  // ==============================
-  // NEW: 图表实例注册与“激活窗体”管理
-  // 用途：键盘动作/程序化驱动应作用于当前激活窗体的 chart 实例
-  // ==============================
-  const _charts = new Map(); // panelKey -> chartInstance
-  const _activePanelKey = ref("main"); // 默认主窗激活
-
+  const _charts = new Map();
+  const _activePanelKey = ref("main");
   function registerChart(panelKey, chartInstance) {
-    try {
-      if (!panelKey || !chartInstance) return;
-      _charts.set(String(panelKey), chartInstance);
-    } catch {}
+    try { if (!panelKey || !chartInstance) return; _charts.set(String(panelKey), chartInstance); } catch {}
   }
   function unregisterChart(panelKey) {
-    try {
-      if (!panelKey) return;
-      _charts.delete(String(panelKey));
-    } catch {}
+    try { if (!panelKey) return; _charts.delete(String(panelKey)); } catch {}
   }
   function setActivePanel(panelKey) {
-    try {
-      if (!panelKey) return;
-      _activePanelKey.value = String(panelKey);
-    } catch {}
+    try { if (!panelKey) return; _activePanelKey.value = String(panelKey); } catch {}
   }
-  function getActivePanel() {
-    return String(_activePanelKey.value || "main");
-  }
-  function getChart(panelKey) {
-    try {
-      return _charts.get(String(panelKey)) || null;
-    } catch {
-      return null;
-    }
-  }
-  function getActiveChart() {
-    try {
-      return _charts.get(String(_activePanelKey.value)) || null;
-    } catch {
-      return null;
-    }
-  }
+  function getActivePanel() { return String(_activePanelKey.value || "main"); }
+  function getChart(panelKey) { try { return _charts.get(String(panelKey)) || null; } catch { return null; } }
+  function getActiveChart() { try { return _charts.get(String(_activePanelKey.value)) || null; } catch { return null; } }
 
-  /**
-   * NEW: 读取指定 chart 的当前 dataZoom 范围（startValue/endValue）
-   */
   function _getZoomRangeOf(chartInstance) {
     try {
       const c = chartInstance;
@@ -150,11 +120,7 @@ export function useViewRenderHub() {
       const opt = c.getOption();
       const dz = Array.isArray(opt?.dataZoom) ? opt.dataZoom : [];
       if (!dz.length) return null;
-      const z = dz.find(
-        (x) =>
-          typeof x.startValue !== "undefined" &&
-          typeof x.endValue !== "undefined"
-      );
+      const z = dz.find( (x) => typeof x.startValue !== "undefined" && typeof x.endValue !== "undefined" );
       const len = (_vmRef.vm?.candles?.value || []).length;
       if (z && len > 0) {
         const sIdx = Math.max(0, Math.min(len - 1, Number(z.startValue)));
@@ -165,10 +131,6 @@ export function useViewRenderHub() {
     return null;
   }
 
-  /**
-   * NEW: 键盘步进移动十字线（ECharts-first；作用于当前激活窗体）
-   * @param {number} dir -1 左，一步；+1 右，一步
-   */
   function moveCursorByStep(dir) {
     try {
       const vm = _vmRef.vm;
@@ -179,46 +141,28 @@ export function useViewRenderHub() {
 
       const activeChart = getActiveChart();
       const zoomRange = _getZoomRangeOf(activeChart);
-      const sIdxNow =
-        zoomRange && Number.isFinite(zoomRange.sIdx)
-          ? zoomRange.sIdx
-          : Number(vm.meta.value?.view_start_idx ?? 0);
-      const eIdxNow =
-        zoomRange && Number.isFinite(zoomRange.eIdx)
-          ? zoomRange.eIdx
-          : Number(vm.meta.value?.view_end_idx ?? len - 1);
+      const sIdxNow = zoomRange && Number.isFinite(zoomRange.sIdx) ? zoomRange.sIdx : Number(vm.meta.value?.view_start_idx ?? 0);
+      const eIdxNow = zoomRange && Number.isFinite(zoomRange.eIdx) ? zoomRange.eIdx : Number(vm.meta.value?.view_end_idx ?? len - 1);
 
       const tsArr = arr.map((d) => Date.parse(d.t));
 
-      // 起点优先 lastFocusTs；缺失时退回右端
       let startIdx = -1;
       try {
         const lastTs = settings.getLastFocusTs(vm.code.value, vm.freq.value);
         if (Number.isFinite(lastTs)) {
-          const found = tsArr.findIndex(
-            (t) => Number.isFinite(t) && t === lastTs
-          );
+          const found = tsArr.findIndex((t) => Number.isFinite(t) && t === lastTs);
           if (found >= 0) startIdx = found;
         }
       } catch {}
       if (startIdx < 0) startIdx = eIdxNow;
 
-      let nextIdx = Math.max(
-        0,
-        Math.min(len - 1, startIdx + (dir < 0 ? -1 : +1))
-      );
+      let nextIdx = Math.max(0, Math.min(len - 1, startIdx + (dir < 0 ? -1 : +1)));
       const inView = nextIdx >= sIdxNow && nextIdx <= eIdxNow;
 
-      // 视界内：仅移动十字线
       try {
-        activeChart?.dispatchAction({
-          type: "showTip",
-          seriesIndex: 0,
-          dataIndex: nextIdx,
-        });
+        activeChart?.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: nextIdx });
       } catch {}
 
-      // 持久化起点（鼠标/键盘一致）
       try {
         const tsv = tsArr[nextIdx];
         if (Number.isFinite(tsv)) {
@@ -228,7 +172,6 @@ export function useViewRenderHub() {
 
       if (inView) return;
 
-      // 越界：轻推视窗一格，并把十字线停在边缘
       const viewWidth = Math.max(1, eIdxNow - sIdxNow + 1);
       let newS = sIdxNow;
       let newE = eIdxNow;
@@ -240,26 +183,23 @@ export function useViewRenderHub() {
         newS = Math.max(0, newE - viewWidth + 1);
       }
       try {
-        activeChart?.dispatchAction({
-          type: "dataZoom",
-          startValue: newS,
-          endValue: newE,
-        });
+        activeChart?.dispatchAction({ type: "dataZoom", startValue: newS, endValue: newE });
         const edgeIdx = nextIdx < sIdxNow ? newS : newE;
-        activeChart?.dispatchAction({
-          type: "showTip",
-          seriesIndex: 0,
-          dataIndex: edgeIdx,
-        });
+        activeChart?.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: edgeIdx });
       } catch {}
-      // 会后承接按各窗 onDataZoom 的 idle-commit 完成。
     } catch {}
   }
+
+  // FIX: 新增 setIndicatorPanes 方法，供 TechPanels 调用
+  function setIndicatorPanes(panes) {
+    _indicatorPanes.value = Array.isArray(panes) ? panes : [];
+  }
+
   function setMarketView(vm) {
     _vmRef.vm = vm;
-    // 订阅数据变更以触发统一计算
+    // FIX: 监听数据和 indicatorPanes 的变化
     watch(
-      () => [vm.candles.value, vm.indicators.value, vm.meta.value],
+      () => [vm.candles.value, vm.indicators.value, vm.meta.value, _indicatorPanes.value],
       () => {
         _computeAndPublish();
       },
@@ -270,10 +210,7 @@ export function useViewRenderHub() {
   function onRender(cb) {
     const id = _nextId++;
     _subs.set(id, typeof cb === "function" ? cb : () => {});
-    // 初次订阅时若已有快照，立即推送一次
-    try {
-      if (_lastSnapshot.value) cb(_lastSnapshot.value);
-    } catch {}
+    try { if (_lastSnapshot.value) cb(_lastSnapshot.value); } catch {}
     return id;
   }
 
@@ -284,42 +221,127 @@ export function useViewRenderHub() {
   function _publish(snapshot) {
     _lastSnapshot.value = snapshot;
     _subs.forEach((cb) => {
-      try {
-        cb(snapshot);
-      } catch {}
+      try { cb(snapshot); } catch {}
     });
   }
+  
+  // FIX: _getIndicatorOption 变为内部函数，负责为单个指标生成option
+  function _getIndicatorOption(kind, ui) {
+    const vm = _vmRef.vm;
+    if (!vm) return null;
+    
+    const base = {
+      candles: vm.candles.value,
+      indicators: vm.indicators.value,
+      freq: vm.freq.value,
+    };
+
+    const K = String(kind || "").toUpperCase();
+    if (K === "MACD") return buildMacdOption(base, ui);
+    if (K === "KDJ") return buildKdjOrRsiOption({ ...base, useKDJ: true, useRSI: false }, ui);
+    if (K === "RSI") return buildKdjOrRsiOption({ ...base, useKDJ: false, useRSI: true }, ui);
+    if (K === "BOLL") return buildBollOption(base, ui);
+    if (K === "VOL" || K === "AMOUNT") {
+      const volCfg = {
+        ...(settings.volSettings.value || {}),
+        mode: K === "AMOUNT" ? "amount" : "vol",
+      };
+      return buildVolumeOption(
+        {
+          ...base,
+          volCfg,
+          volEnv: {
+            hostWidth: 0,
+            visCount: Math.max(1, hub.barsCount.value || 1),
+            overrideMarkWidth: hub.markerWidthPx.value,
+          },
+        },
+        ui
+      );
+    }
+    return null; // 对于 "OFF" 或未知类型返回 null
+  }
+
+  // --- NEW: 将 MainChartPanel 的逻辑移入此处 ---
+  const _chanCache = ref({});
+  function _recomputeChan() {
+      const vm = _vmRef.vm;
+      if (!vm) return;
+      const arr = vm.candles.value || [];
+      if (!arr.length) {
+          _chanCache.value = { reduced: [], map: [], meta: null, fractals: [], pens: { confirmed: [], provisional: null, all: [] }, segments: [], barriersIndices: [], pivots: [] };
+          return;
+      }
+      const policy = settings.chanSettings.value.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
+      const res = computeInclude(arr, { anchorPolicy: policy });
+      const fr = computeFractals(res.reducedBars || [], {
+          minTickCount: settings.fractalSettings.value.minTickCount || 0,
+          minPct: settings.fractalSettings.value.minPct || 0,
+          minCond: String(settings.fractalSettings.value.minCond || "or"),
+      });
+      const pens = computePens(res.reducedBars || [], fr || [], res.mapOrigToReduced || [], { minGapReduced: 4 });
+      const segments = computeSegments(pens.confirmed || []);
+      const barrierIdxList = [];
+      const rb = res.reducedBars || [];
+      for (let i = 0; i < rb.length; i++) {
+          const cur = rb[i];
+          if (cur && cur.barrier_after_prev_bool) {
+              const prev = i > 0 ? rb[i - 1] : null;
+              const left = prev ? prev.end_idx_orig : null;
+              const right = cur.start_idx_orig;
+              if (Number.isFinite(+left)) barrierIdxList.push(+left);
+              if (Number.isFinite(+right)) barrierIdxList.push(+right);
+          }
+      }
+      const pivots = computePenPivots(pens.confirmed || []);
+      _chanCache.value = { reduced: res.reducedBars || [], map: res.mapOrigToReduced || [], meta: res.meta || null, fractals: fr || [], pens, segments, barriersIndices: barrierIdxList, pivots };
+  }
+
+  function _buildOverlaySeriesForOption({ hostW, visCount, markerW }) {
+    const out = [];
+    const cache = _chanCache.value || {};
+    const { reduced, fractals, pens, segments, barriersIndices, pivots } = cache;
+    if (barriersIndices?.length) out.push(...(buildBarrierLines(barriersIndices).series || []));
+    if (settings.chanSettings.value.showUpDownMarkers && reduced?.length) {
+        out.push(...(buildUpDownMarkers(reduced, { hostWidth: hostW, visCount, symbolWidthPx: markerW }).series || []));
+    }
+    if ((settings.fractalSettings.value?.enabled ?? true) && reduced?.length && fractals?.length) {
+        out.push(...(buildFractalMarkers(reduced, fractals, { hostWidth: hostW, visCount, symbolWidthPx: markerW }).series || []));
+    }
+    const penEnabled = (settings.chanSettings.value?.pen?.enabled ?? PENS_DEFAULTS.enabled) === true;
+    if (penEnabled && reduced?.length && (pens?.confirmed?.length || pens?.provisional)) {
+        out.push(...(buildPenLines(pens, { barrierIdxList: barriersIndices }).series || []));
+    }
+    if (segments?.length) {
+        out.push(...(buildSegmentLines(segments, { barrierIdxList: barriersIndices }).series || []));
+    }
+    if (pivots?.length) {
+        out.push(...(buildPenPivotAreas(pivots, { barrierIdxList: barriersIndices }).series || []));
+    }
+    return out;
+  }
+  // --- END: 逻辑移动结束 ---
 
   function _computeAndPublish() {
     const vm = _vmRef.vm;
     if (!vm) return;
 
     const candles = vm.candles.value || [];
-    const indicators = vm.indicators.value || {};
-    const freq = vm.freq.value || "1d";
-
     const len = candles.length;
     if (!len) return;
+    
+    _recomputeChan(); // NEW: 先计算缠论
 
-    // 统一离散范围（基于 hub 快照：barsCount + rightTs）
+    // FIX: 从 hub.getState() 获取所有状态
     const st = hub.getState();
     const bars = Math.max(1, Number(st.barsCount || 1));
-    const tsArr = candles.map((d) => {
-      try {
-        return Date.parse(d.t);
-      } catch {
-        return NaN;
-      }
-    });
+    const tsArr = candles.map((d) => { try { return Date.parse(d.t); } catch { return NaN; } });
 
     let eIdx = len - 1;
     if (Number.isFinite(st.rightTs)) {
       for (let i = len - 1; i >= 0; i--) {
         const tsv = tsArr[i];
-        if (Number.isFinite(tsv) && tsv <= st.rightTs) {
-          eIdx = i;
-          break;
-        }
+        if (Number.isFinite(tsv) && tsv <= st.rightTs) { eIdx = i; break; }
       }
     }
     let sIdx = Math.max(0, eIdx - bars + 1);
@@ -328,63 +350,72 @@ export function useViewRenderHub() {
     }
 
     const initialRange = { startValue: sIdx, endValue: eIdx };
-    const markerW = st.markerWidthPx; // 统一来源：hub 派生宽度
-
-    // MOD: 统一生成定位器（fixed or follow）
     const tipPositioner = _getTipPositioner();
-
-    // NEW: 获取当前悬浮面板 key
     const hoveredKey = _hoveredPanelKey.value;
 
-    // 主窗 option（上游统一位置源写入）
-    const mainOption = buildMainChartOption(
+    // --- REFACTORED: 构建主图 option ---
+    const anyMarkers = (settings.chanSettings.value?.showUpDownMarkers ?? true) === true && _chanCache.value?.reduced?.length > 0;
+    const markerHeight = Math.max(1, Math.round(Number(CHAN_DEFAULTS.markerHeightPx)));
+    const markerYOffset = Math.max(0, Math.round(Number(CHAN_DEFAULTS.markerYOffsetPx)));
+    const offsetDownPx = Math.round(markerHeight + markerYOffset);
+    const mainBottomExtraPx = anyMarkers ? offsetDownPx : 0;
+    const xAxisLabelMargin = anyMarkers ? offsetDownPx + 12 : 12;
+
+    const baseMainOption = buildMainChartOption(
       {
         candles,
-        indicators,
+        indicators: vm.indicators.value || {},
         chartType: vm.chartType.value || "kline",
         maConfigs: settings.maConfigs.value,
-        freq,
+        freq: vm.freq.value || "1d",
         klineStyle: settings.klineStyle.value,
         adjust: vm.adjust.value || "none",
-        // CHAN 数据由主窗内现有 computeInclude/computeFractals 继续处理，保持最小改动
-        reducedBars: [],
-        mapOrigToReduced: [],
+        reducedBars: _chanCache.value.reduced,
+        mapOrigToReduced: _chanCache.value.map,
       },
       {
         initialRange,
-        tooltipPositioner: tipPositioner, // MOD: 统一注入定位器
-        isHovered: hoveredKey === "main", // NEW: 传入悬浮状态
+        tooltipPositioner: tipPositioner,
+        isHovered: hoveredKey === "main",
+        mainAxisLabelSpacePx: 28,
+        xAxisLabelMargin,
+        mainBottomExtraPx,
       }
     );
 
-    // 构建量窗 option（一次；统一 overrideMarkWidth）
-    const volumeOption = buildVolumeOption(
-      {
-        candles,
-        indicators,
-        freq,
-        volCfg: settings.volSettings.value,
-        volEnv: {
-          hostWidth: 0, // 由 ECharts 计算，保持 0；真实宽度不影响 initialRange
-          visCount: bars,
-          overrideMarkWidth: markerW,
-        },
-      },
-      {
+    const overlaySeries = _buildOverlaySeriesForOption({
+      hostW: st.hostWidthPx, // FIX: 从 st 获取 hostWidthPx
+      visCount: bars,
+      markerW: st.markerWidthPx,
+    });
+    
+    const finalMainOption = {
+      ...baseMainOption,
+      series: [...(baseMainOption.series || []), ...overlaySeries],
+    };
+    // --- END REFACTOR ---
+
+    // FIX: 遍历 _indicatorPanes，为每个副图生成 option
+    const indicatorOptions = {};
+    for (const pane of _indicatorPanes.value) {
+      if (!pane || !pane.id || pane.kind === 'OFF') continue;
+      const paneKey = `indicator:${pane.id}`;
+      const isPaneHovered = hoveredKey === paneKey;
+      const option = _getIndicatorOption(pane.kind, {
         initialRange,
-        tooltipPositioner: tipPositioner, // MOD: 统一注入定位器
-        isHovered: hoveredKey === "volume", // NEW: 传入悬浮状态
+        tooltipPositioner: tipPositioner,
+        isHovered: isPaneHovered,
+      });
+      if (option) {
+        indicatorOptions[pane.id] = option;
       }
-    );
-
-    // 构建默认指标窗（提供工具方法获取具体 kind 的 option；此处留空由 IndicatorPanel 请求）
-    const dataForIndicators = { candles, indicators, freq, initialRange };
+    }
 
     const snapshot = {
       seq: ++_renderSeq,
       core: {
         code: vm.code.value || "",
-        freq,
+        freq: vm.freq.value || "1d",
         adjust: vm.adjust.value || "none",
         barsCount: bars,
         rightTs: st.rightTs,
@@ -392,26 +423,15 @@ export function useViewRenderHub() {
         eIdx,
         allRows: len,
         atRightEdge: !!st.atRightEdge,
-        markerWidthPx: markerW,
+        markerWidthPx: st.markerWidthPx,
+        hoveredPanelKey: hoveredKey,
       },
-      // MOD: 根因修复 - 将 isHovered 状态存入快照
       main: {
-        option: mainOption,
+        option: finalMainOption, // REFACTORED: 直接提供构建好的 option
         range: initialRange,
-        isHovered: hoveredKey === "main",
       },
-      volume: {
-        option: volumeOption,
-        range: initialRange,
-        isHovered: hoveredKey === "volume",
-      },
-      indicatorsBase: {
-        candles,
-        indicators,
-        freq,
-        initialRange,
-        isHovered: hoveredKey === "indicator",
-      },
+      // FIX: 新增 indicatorOptions 映射表
+      indicatorOptions,
       metaLink: {
         generated_at: vm.meta.value?.generated_at || "",
         source: vm.meta.value?.source || "",
@@ -422,90 +442,12 @@ export function useViewRenderHub() {
     _publish(snapshot);
   }
 
-  // 订阅 hub 的两帧合并广播，统一触发一次计算
+  // 订阅 hub 的两帧合并广播
   hub.onChange(() => {
     _computeAndPublish();
   });
 
-  function getIndicatorOption(kind) {
-    const base = _lastSnapshot.value?.indicatorsBase;
-    if (!base) return null;
-
-    // MOD: 指标窗也复用同一定位器
-    const tipPositioner = _getTipPositioner();
-    // NEW: 指标窗也需要 isHovered 状态
-    const ui = {
-      initialRange: base.initialRange,
-      tooltipPositioner: tipPositioner,
-      isHovered: base.isHovered, // 从快照中读取
-    };
-
-    const K = String(kind || "").toUpperCase();
-    if (K === "MACD") {
-      return buildMacdOption(
-        { candles: base.candles, indicators: base.indicators, freq: base.freq },
-        ui
-      );
-    }
-    if (K === "KDJ") {
-      return buildKdjOrRsiOption(
-        {
-          candles: base.candles,
-          indicators: base.indicators,
-          freq: base.freq,
-          useKDJ: true,
-          useRSI: false,
-        },
-        ui
-      );
-    }
-    if (K === "RSI") {
-      return buildKdjOrRsiOption(
-        {
-          candles: base.candles,
-          indicators: base.indicators,
-          freq: base.freq,
-          useKDJ: false,
-          useRSI: true,
-        },
-        ui
-      );
-    }
-    // NEW: BOLL 专用构造（不再错误走 RSI）
-    if (K === "BOLL") {
-      return buildBollOption(
-        { candles: base.candles, indicators: base.indicators, freq: base.freq },
-        ui
-      );
-    }
-    // NEW: 成交量/成交额立即构造量窗（不走默认 MACD）
-    if (K === "VOL" || K === "AMOUNT") {
-      const volCfg = {
-        ...(settings.volSettings.value || {}),
-        mode: K === "AMOUNT" ? "amount" : "vol",
-      };
-      return buildVolumeOption(
-        {
-          candles: base.candles,
-          indicators: base.indicators,
-          freq: base.freq,
-          volCfg,
-          volEnv: {
-            hostWidth: 0,
-            visCount: Math.max(1, _lastSnapshot.value?.core?.barsCount || 1),
-            overrideMarkWidth: _lastSnapshot.value?.core?.markerWidthPx,
-          },
-        },
-        ui
-      );
-    }
-    return buildMacdOption(
-      { candles: base.candles, indicators: base.indicators, freq: base.freq },
-      ui
-    );
-  }
-
-  // 新增：暴露统一源头的 tooltip 位置获取（供主窗订阅使用）
+  // 新增：暴露统一源头的 tooltip 位置获取
   function getTipPositioner() {
     return _getTipPositioner();
   }
@@ -514,22 +456,19 @@ export function useViewRenderHub() {
     setMarketView,
     onRender,
     offRender,
-    getIndicatorOption,
     getTipPositioner,
-    setHoveredPanel, // NEW: 暴露给各窗体调用
-    // NEW: 交互会话锁导出（供各窗体使用）
+    setHoveredPanel,
     beginInteraction,
     endInteraction,
     isInteracting,
-    // NEW: 图表注册与激活面板管理
     registerChart,
     unregisterChart,
     setActivePanel,
     getActivePanel,
     getChart,
     getActiveChart,
-    // NEW: 键盘步进移动
     moveCursorByStep,
+    setIndicatorPanes, // FIX: 暴露上报方法
   };
   return _singleton;
 }

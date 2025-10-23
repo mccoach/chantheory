@@ -4,6 +4,7 @@
      - 默认提供两个窗：成交量、MACD（兼容“原项目默认量窗+一个 MACD”）
      - 持久化 panes 到 useUserSettings.indicatorPanes；若历史数据未含 VOL/AMOUNT，自动在最前补 VOL
      - 新增：右侧悬浮拖动把手 → 父容器支持拖拽排序（HTML5 DnD）
+     - FIX: 将 panes 状态上报给 useViewRenderHub，作为生成 indicator options 的唯一来源。
 -->
 <template>
   <div class="tech-wrap" @dragover.prevent @drop.prevent="onDropToEnd">
@@ -63,9 +64,10 @@
 </template>
 
 <script setup>
-import { reactive, watch, onMounted, ref } from "vue";
+import { reactive, watch, onMounted, ref, inject } from "vue";
 import IndicatorPanel from "./tech/IndicatorPanel.vue";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { useViewRenderHub } from "@/composables/useViewRenderHub";
 
 // 初始：提供一个“成交量 + MACD”的双窗默认
 const state = reactive({
@@ -78,6 +80,8 @@ const panes = state.panes;
 
 // 用户设置持久化
 const settings = useUserSettings();
+// FIX: 注入渲染中枢以上报 panes 状态
+const renderHub = useViewRenderHub();
 
 // 拖拽排序状态
 const draggingId = ref(null);
@@ -98,14 +102,19 @@ onMounted(() => {
       panes.splice(0, panes.length, ...mapped);
     }
   } catch {}
+  // FIX: 首次挂载时上报初始 panes 状态
+  renderHub.setIndicatorPanes(panes);
 });
 
 // 持久化 panes 映射（仅 kind 顺序）
 watch(
-  () => panes.map((p) => p.kind),
-  (arr) => {
+  () => panes,
+  (newPanes) => {
     try {
-      settings.setIndicatorPanes(arr.map((k) => ({ kind: String(k || "MACD") })));
+      const kindsToSave = newPanes.map((p) => ({ kind: String(p.kind || "MACD") }));
+      settings.setIndicatorPanes(kindsToSave);
+      // FIX: 每当 panes 变化时，都上报给渲染中枢
+      renderHub.setIndicatorPanes(newPanes);
     } catch {}
   },
   { deep: true }

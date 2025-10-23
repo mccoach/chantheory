@@ -1,9 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\MarketDisplaySettings.vue -->
 <!-- ==============================
-说明：行情设置面板（新版：UI-only）
-- 职责：仅负责渲染行情相关的设置UI，不再管理状态。
-- 数据流：通过 `inject` 获取来自外壳的响应式草稿对象 (klineDraft, maDraft, adjustDraft)，并直接绑定。
-- 逻辑：MA 总控的三态切换逻辑 (useTriMasterToggle) 依然保留在此，因为它与 UI 渲染紧密相关。
+说明：行情设置面板（新版：UI-only, 数据驱动渲染）
+- 职责：仅负责渲染行情相关的设置UI。
+- 数据流：通过 `inject` 获取响应式草稿对象。
+- 渲染：使用新的通用渲染器 `useSettingsRenderer` 替代手写的 `renderControl`。
 ============================== -->
 <template>
   <SettingsGrid
@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, inject } from "vue";
+import { computed, h, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 import {
   DEFAULT_KLINE_STYLE,
@@ -32,6 +32,7 @@ import {
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
 import UiNumberBox from "@/components/ui/UiNumberBox.vue";
+import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 
 // 通过 inject 获取共享的草稿状态
 const klineDraft = inject("klineDraft");
@@ -176,240 +177,150 @@ function onRowReset(row) {
   }
 }
 
-// 控件渲染
-function renderControl(row, item) {
-  const id = String(item.key || "");
-  const mk = item.maKey;
-
-  // 原始K线
-  if (row.key === "k-original") {
-    if (id === "adjust") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h(
-              "select",
-              {
-                class: "input",
-                value: adjustDraft.value,
-                onChange: (e) => (adjustDraft.value = String(e.target.value)),
-              },
-              ADJUST_OPTIONS.map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            );
-        },
-      });
-    }
-    if (id === "upColor" || id === "downColor") {
-      const k = id;
-      return defineComponent({
-        setup() {
-          return () =>
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: klineDraft[k],
-              onInput: (e) => (klineDraft[k] = String(e.target.value)),
-            });
-        },
-      });
-    }
-    if (id === "upFade" || id === "downFade") {
-      const k =
-        id === "upFade" ? "originalFadeUpPercent" : "originalFadeDownPercent";
-      return defineComponent({
-        setup() {
-          const curr = () => Number(klineDraft[k] ?? 0);
-          return () =>
-            h(UiNumberBox, {
-              modelValue: curr(),
-              min: UI_LIMITS.percentage.min,
-              max: UI_LIMITS.percentage.max,
-              step: UI_LIMITS.percentage.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                klineDraft[k] = v;
-              },
-            });
-        },
-      });
-    }
-  }
-
-  // 合并K线
-  if (row.key === "k-merged") {
-    if (id === "outlineWidth") {
-      return defineComponent({
-        setup() {
-          const curr = () =>
-            Number(
-              klineDraft.mergedK.outlineWidth ??
-                DEFAULT_KLINE_STYLE.mergedK.outlineWidth
-            );
-          return () =>
-            h(UiNumberBox, {
-              modelValue: curr(),
-              min: UI_LIMITS.outlineWidth.min,
-              max: UI_LIMITS.outlineWidth.max,
-              step: UI_LIMITS.outlineWidth.step,
-              compact: true,
-              integer: false,
-              "frac-digits": 1,
-              "onUpdate:modelValue": (v) => {
-                klineDraft.mergedK.outlineWidth = v;
-              },
-            });
-        },
-      });
-    }
-    if (id === "mUpColor" || id === "mDownColor") {
-      const kk = id === "mUpColor" ? "upColor" : "downColor";
-      return defineComponent({
-        setup() {
-          const curr = () =>
-            klineDraft.mergedK[kk] ?? DEFAULT_KLINE_STYLE.mergedK[kk];
-          return () =>
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: curr(),
-              onInput: (e) => (klineDraft.mergedK[kk] = String(e.target.value)),
-            });
-        },
-      });
-    }
-    if (id === "fillFade") {
-      return defineComponent({
-        setup() {
-          const curr = () =>
-            Number(
-              klineDraft.mergedK.fillFadePercent ??
-                DEFAULT_KLINE_STYLE.mergedK.fillFadePercent
-            );
-          return () =>
-            h(UiNumberBox, {
-              modelValue: curr(),
-              min: UI_LIMITS.percentage.min,
-              max: UI_LIMITS.percentage.max,
-              step: UI_LIMITS.percentage.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                klineDraft.mergedK.fillFadePercent = v;
-              },
-            });
-        },
-      });
-    }
-    if (id === "displayOrder") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h(
-              "select",
-              {
-                class: "input",
-                value:
-                  klineDraft.mergedK.displayOrder ??
-                  DEFAULT_KLINE_STYLE.mergedK.displayOrder,
-                onChange: (e) =>
-                  (klineDraft.mergedK.displayOrder = String(
-                    e.target.value ?? DEFAULT_KLINE_STYLE.mergedK.displayOrder
-                  )),
-              },
-              DISPLAY_ORDER_OPTIONS.map((opt) =>
-                h("option", { value: opt.v }, opt.label)
-              )
-            );
-        },
-      });
-    }
-  }
-
-  // MA 行
-  if (row.key?.startsWith("ma-")) {
-    const conf = maDraft[mk] || DEFAULT_MA_CONFIGS[mk];
-    if (id === "ma-width") {
-      return defineComponent({
-        setup() {
-          const curr = () => Number(conf.width ?? DEFAULT_MA_CONFIGS[mk].width);
-          return () =>
-            h(UiNumberBox, {
-              modelValue: curr(),
-              min: UI_LIMITS.lineWidth.min,
-              max: UI_LIMITS.lineWidth.max,
-              step: UI_LIMITS.lineWidth.step,
-              compact: true,
-              integer: false,
-              "frac-digits": 1,
-              "onUpdate:modelValue": (v) => {
-                maDraft[mk].width = v;
-              },
-            });
-        },
-      });
-    }
-    if (id === "ma-color") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: conf.color,
-              onInput: (e) => (maDraft[mk].color = String(e.target.value)),
-            });
-        },
-      });
-    }
-    if (id === "ma-style") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h(
-              "select",
-              {
-                class: "input",
-                value: conf.style ?? DEFAULT_MA_CONFIGS[mk].style,
-                onChange: (e) =>
-                  (maDraft[mk].style = String(
-                    e.target.value ?? DEFAULT_MA_CONFIGS[mk].style
-                  )),
-              },
-              LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
-            );
-        },
-      });
-    }
-    if (id === "ma-period") {
-      return defineComponent({
-        setup() {
-          const curr = () =>
-            Number(conf.period ?? DEFAULT_MA_CONFIGS[mk].period);
-          return () =>
-            h(UiNumberBox, {
-              modelValue: curr(),
-              min: UI_LIMITS.positiveInteger.min,
-              max: Infinity,
-              step: UI_LIMITS.positiveInteger.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                maDraft[mk].period = v;
-              },
-            });
-        },
-      });
-    }
-  }
-
-  // 占位空控件
-  return defineComponent({
-    setup() {
-      return () => null;
-    },
-  });
-}
+// 使用新的通用渲染器
+const { renderControl } = useSettingsRenderer({
+  adjust: {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: adjustDraft.value,
+      onChange: (e) => (adjustDraft.value = e.target.value),
+      innerHTML: ADJUST_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  upColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: klineDraft.upColor,
+      onInput: (e) => (klineDraft.upColor = e.target.value),
+    }),
+  },
+  downColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: klineDraft.downColor,
+      onInput: (e) => (klineDraft.downColor = e.target.value),
+    }),
+  },
+  upFade: {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: klineDraft.originalFadeUpPercent,
+      min: UI_LIMITS.percentage.min,
+      max: UI_LIMITS.percentage.max,
+      step: UI_LIMITS.percentage.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (klineDraft.originalFadeUpPercent = v),
+    }),
+  },
+  downFade: {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: klineDraft.originalFadeDownPercent,
+      min: UI_LIMITS.percentage.min,
+      max: UI_LIMITS.percentage.max,
+      step: UI_LIMITS.percentage.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (klineDraft.originalFadeDownPercent = v),
+    }),
+  },
+  outlineWidth: {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: klineDraft.mergedK.outlineWidth,
+      min: UI_LIMITS.outlineWidth.min,
+      max: UI_LIMITS.outlineWidth.max,
+      step: UI_LIMITS.outlineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (klineDraft.mergedK.outlineWidth = v),
+    }),
+  },
+  mUpColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: klineDraft.mergedK.upColor,
+      onInput: (e) => (klineDraft.mergedK.upColor = e.target.value),
+    }),
+  },
+  mDownColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: klineDraft.mergedK.downColor,
+      onInput: (e) => (klineDraft.mergedK.downColor = e.target.value),
+    }),
+  },
+  fillFade: {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: klineDraft.mergedK.fillFadePercent,
+      min: UI_LIMITS.percentage.min,
+      max: UI_LIMITS.percentage.max,
+      step: UI_LIMITS.percentage.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (klineDraft.mergedK.fillFadePercent = v),
+    }),
+  },
+  displayOrder: {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: klineDraft.mergedK.displayOrder,
+      onChange: (e) => (klineDraft.mergedK.displayOrder = e.target.value),
+      innerHTML: DISPLAY_ORDER_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "ma-width": {
+    component: UiNumberBox,
+    getProps: (item) => ({
+      modelValue: maDraft[item.maKey].width,
+      min: UI_LIMITS.lineWidth.min,
+      max: UI_LIMITS.lineWidth.max,
+      step: UI_LIMITS.lineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (maDraft[item.maKey].width = v),
+    }),
+  },
+  "ma-color": {
+    component: "input",
+    getProps: (item) => ({
+      class: "input color",
+      type: "color",
+      value: maDraft[item.maKey].color,
+      onInput: (e) => (maDraft[item.maKey].color = e.target.value),
+    }),
+  },
+  "ma-style": {
+    component: "select",
+    getProps: (item) => ({
+      class: "input",
+      value: maDraft[item.maKey].style,
+      onChange: (e) => (maDraft[item.maKey].style = e.target.value),
+      innerHTML: LINE_STYLES.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "ma-period": {
+    component: UiNumberBox,
+    getProps: (item) => ({
+      modelValue: maDraft[item.maKey].period,
+      min: UI_LIMITS.positiveInteger.min,
+      step: UI_LIMITS.positiveInteger.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (maDraft[item.maKey].period = v),
+    }),
+  },
+});
 </script>

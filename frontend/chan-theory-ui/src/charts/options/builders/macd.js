@@ -3,6 +3,7 @@
 // 说明：MACD 窗 option 构造器（HIST 柱 + DIF/DEA 线）
 // - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
 // - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+// - FIX: 精确控制双Y轴的 axisPointer 可见性，实现“悬浮窗十字，其余竖线”效果。
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -77,15 +78,38 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
       textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
     },
     xAxis: { type: "category", data: dates },
-    yAxis: {
-      scale: true,
-      axisLabel: {
-        color: theme.axisLabelColor,
-        align: "right",
-        margin: ui?.isHovered ? 6 : 6,
+    yAxis: [
+      {
+        scale: true,
+        axisLabel: {
+          color: theme.axisLabelColor,
+          align: "right",
+          margin: ui?.isHovered ? 6 : 6,
+        },
+        axisPointer: {
+          show: true, // 保持为 true, 由 link 机制统一控制
+          label: { show: !!ui?.isHovered },
+          // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
+          lineStyle: {
+            color: ui?.isHovered ? theme.axisLineColor : "transparent",
+          },
+        },
       },
-      axisPointer: { show: !!ui?.isHovered, label: { show: !!ui?.isHovered } },
-    },
+      {
+        type: "value",
+        min: 0,
+        max: 1,
+        show: false,
+        scale: false,
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { show: false },
+        // FIX: 显式禁用第二Y轴的指针
+        axisPointer: {
+          show: false,
+        },
+      },
+    ],
     series,
   };
 

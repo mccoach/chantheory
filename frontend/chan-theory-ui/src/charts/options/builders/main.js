@@ -4,6 +4,7 @@
 // - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
 // - yAxis：主轴 + 覆盖轴（隐藏）
 // - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
+// - FIX: 保持主图与副图的 axisPointer 规则完全一致，实现“悬浮窗十字，其余竖线”效果。
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -203,7 +204,7 @@ export function buildMainChartOption(
   const mainYAxis = {
     scale: true,
     axisPointer: {
-      show: !!ui?.isHovered,
+      show: true, // 保持为 true, 由 link 机制统一控制
       label: {
         show: !!ui?.isHovered,
         formatter: function (params) {
@@ -213,6 +214,10 @@ export function buildMainChartOption(
               : params.value;
           return formatNumberScaled(val, { digits: 2, allowEmpty: true });
         },
+      },
+      // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
+      lineStyle: {
+        color: ui?.isHovered ? theme.axisLineColor : "transparent",
       },
     },
   };
@@ -225,6 +230,10 @@ export function buildMainChartOption(
     axisLine: { show: false },
     axisTick: { show: false },
     splitLine: { show: false },
+    // FIX: 显式禁用第二Y轴的指针
+    axisPointer: {
+      show: false,
+    },
   };
 
   let option = {

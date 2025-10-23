@@ -4,37 +4,16 @@
 export const CHAN_DEFAULTS = {
   showUpDownMarkers: true,
   anchorPolicy: "extreme",
-  visualPreset: "tri-default",
   markerMinPx: 1,
   markerMaxPx: 16,
   markerHeightPx: 10,
   markerYOffsetPx: 2,
   opacity: 0.9,
-  upShape: "triangle",
-  upColor: "#f56c6c",
-  downShape: "triangle",
-  downColor: "#00ff00",
+  upShape: "arrow",   // 确认：这是唯一的默认上涨形状
+  upColor: "#f56c6c",     // 确认：这是唯一的默认上涨颜色
+  downShape: "arrow", // 确认：这是唯一的默认下跌形状
+  downColor: "#00ff00",   // 确认：这是唯一的默认下跌颜色
   maxVisibleMarkers: 10000,
-};
-
-// 缠论标记视觉预设
-export const CHAN_MARKER_PRESETS = {
-  "tri-default": {
-    up: { shape: "triangle", rotate: 0, fill: "#f56c6c" },
-    down: { shape: "triangle", rotate: 180, fill: "#00ff00" },
-  },
-  diamond: {
-    up: { shape: "diamond", rotate: 0, fill: "#f56c6c" },
-    down: { shape: "diamond", rotate: 0, fill: "#00ff00" },
-  },
-  dot: {
-    up: { shape: "circle", rotate: 0, fill: "#f56c6c" },
-    down: { shape: "circle", rotate: 0, fill: "#00ff00" },
-  },
-  square: {
-    up: { shape: "rect", rotate: 0, fill: "#f56c6c" },
-    down: { shape: "rect", rotate: 0, fill: "#00ff00" },
-  },
 };
 
 // 分型
@@ -54,7 +33,7 @@ export const FRACTAL_DEFAULTS = {
   styleByStrength: {
     strong:   { bottomShape: "triangle", bottomColor: "#FF0000", topShape: "triangle", topColor: "#FF0000", fill: "solid", enabled: true },
     standard: { bottomShape: "triangle", bottomColor: "#FFFF00", topShape: "triangle", topColor: "#FFFF00", fill: "solid", enabled: true },
-    weak:     { bottomShape: "diamond", bottomColor: "#90EE90", topShape: "diamond", topColor: "#90EE90", fill: "hollow", enabled: true },
+    weak:     { bottomShape: "triangle", bottomColor: "#90EE90", topShape: "triangle", topColor: "#90EE90", fill: "hollow", enabled: true },
   },
   confirmStyle: {
     bottomShape: "circle", bottomColor: "#00ff00", topShape: "circle", topColor: "#00ff00", fill: "solid", enabled: true,

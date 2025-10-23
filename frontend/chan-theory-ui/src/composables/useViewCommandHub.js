@@ -223,6 +223,7 @@ export function useViewCommandHub() {
    * 获取当前状态快照（供订阅者使用）
    */
   function getState() {
+    // FIX: 在返回的快照中增加 hostWidthPx
     return {
       barsCount: Math.max(1, Number(barsCount.value || 1)),
       rightTs: rightTs.value != null ? Number(rightTs.value) : null,
@@ -235,6 +236,7 @@ export function useViewCommandHub() {
       presetKey: String(currentPresetKey.value || "ALL"),
       freq: String(currentFreq.value || "1d"),
       symbol: String(currentSymbol.value || ""),
+      hostWidthPx: Math.max(1, Number(hostWidthPx.value || 1)), // FIX: 新增 hostWidthPx
     };
   }
 

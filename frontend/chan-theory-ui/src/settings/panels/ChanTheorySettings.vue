@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, inject } from "vue";
+import { computed, h, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 import UiNumberBox from "@/components/ui/UiNumberBox.vue";
 import {
@@ -36,6 +36,7 @@ import {
   FILL_OPTIONS,
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
+import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 
 // 通过 inject 获取共享的草稿状态
 const chanDraft = inject("chanDraft");
@@ -66,7 +67,7 @@ const frTri = useTriMasterToggle({
     ]),
 });
 
-// 构建行
+// 构建行定义
 const rows = computed(() => {
   const cf = chanDraft || {};
   const ff = fractalDraft || {};
@@ -289,384 +290,302 @@ function onRowReset(row) {
   }
 }
 
-// 控件渲染
-function renderControl(row, item) {
-  const id = String(item.key || "");
-  const cf = chanDraft;
-  const ff = fractalDraft;
-
-  const makeSelect = (value, onChange, options) =>
-    h(
-      "select",
-      { class: "input", value, onChange },
-      options.map((opt) => h("option", { value: opt.v }, opt.label))
-    );
-
-  // chan-updown
-  if (row.key === "chan-updown") {
-    if (id === "upShape" || id === "downShape") {
-      const k = id;
-      return defineComponent({
-        setup() {
-          const val = () => cf[k] || CHAN_DEFAULTS[k];
-          return () =>
-            makeSelect(
-              val(),
-              (e) => (cf[k] = String(e.target.value)),
-              MARKER_SHAPE_OPTIONS
-            );
-        },
-      });
-    }
-    if (id === "upColor" || id === "downColor") {
-      const k = id;
-      return defineComponent({
-        setup() {
-          return () =>
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: cf[k] || CHAN_DEFAULTS[k],
-              onInput: (e) => (cf[k] = String(e.target.value)),
-            });
-        },
-      });
-    }
-    if (id === "anchorPolicy") {
-      return defineComponent({
-        setup() {
-          const val = () => cf.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
-          return () =>
-            makeSelect(
-              val(),
-              (e) => (cf.anchorPolicy = String(e.target.value || "extreme")),
-              ANCHOR_POLICY_OPTIONS
-            );
-        },
-      });
-    }
-  }
-
-  // fr-global
-  if (row.key === "fr-global") {
-    if (id === "fr-minTick") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h(UiNumberBox, {
-              modelValue: ff.minTickCount ?? FRACTAL_DEFAULTS.minTickCount,
-              min: UI_LIMITS.nonNegativeInteger.min,
-              step: UI_LIMITS.nonNegativeInteger.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                ff.minTickCount = v;
-              },
-            });
-        },
-      });
-    }
-    if (id === "fr-minPct") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h(UiNumberBox, {
-              modelValue: ff.minPct ?? FRACTAL_DEFAULTS.minPct,
-              min: UI_LIMITS.percentage.min,
-              max: UI_LIMITS.percentage.max,
-              step: UI_LIMITS.percentage.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                ff.minPct = v;
-              },
-            });
-        },
-      });
-    }
-    if (id === "fr-minCond") {
-      return defineComponent({
-        setup() {
-          const val = () => String(ff.minCond || FRACTAL_DEFAULTS.minCond);
-          return () =>
-            makeSelect(
-              val(),
-              (e) => (ff.minCond = String(e.target.value || "or")),
-              MIN_COND_OPTIONS
-            );
-        },
-      });
-    }
-  }
-
-  // 分型种类
-  if (row.key?.startsWith("fr-kind-")) {
-    const kind = row.key.slice("fr-kind-".length);
-    const readConf = () =>
-      (kind === "confirm" ? ff.confirmStyle : ff.styleByStrength?.[kind]) || {};
-    const writeConf = (patch) => {
-      if (kind === "confirm") {
-        ff.confirmStyle = { ...(ff.confirmStyle || {}), ...patch };
-      } else {
-        const s = ff.styleByStrength || {};
-        s[kind] = { ...(s[kind] || {}), ...patch };
-        ff.styleByStrength = s;
-      }
-    };
-
-    if (id.includes("Shape")) {
-      const type = id.includes("bot") ? "bottomShape" : "topShape";
-      return defineComponent({
-        setup: () => () =>
-          makeSelect(
-            readConf()[type],
-            (e) => writeConf({ [type]: String(e.target.value) }),
-            MARKER_SHAPE_OPTIONS
-          ),
-      });
-    }
-    if (id.includes("Color")) {
-      const type = id.includes("bot") ? "bottomColor" : "topColor";
-      return defineComponent({
-        setup: () => () =>
-          h("input", {
-            class: "input color",
-            type: "color",
-            value: readConf()[type],
-            onInput: (e) => writeConf({ [type]: String(e.target.value) }),
-          }),
-      });
-    }
-    if (id.includes("fill")) {
-      return defineComponent({
-        setup: () => () =>
-          makeSelect(
-            readConf().fill,
-            (e) => writeConf({ fill: String(e.target.value) }),
-            FILL_OPTIONS
-          ),
-      });
-    }
-  }
-
-  // pen
-  if (row.key === "pen") {
-    const pen = cf.pen || {};
-    if (id === "pen-lineWidth") {
-      return defineComponent({
-        setup() {
-          return () => h(UiNumberBox, {
-              modelValue: pen.lineWidth ?? PENS_DEFAULTS.lineWidth,
-              min: UI_LIMITS.lineWidth.min,
-              max: UI_LIMITS.lineWidth.max,
-              step: UI_LIMITS.lineWidth.step,
-              compact: true,
-              integer: false,
-              "frac-digits": 1,
-              "onUpdate:modelValue": (v) => {
-                if (cf.pen) cf.pen.lineWidth = v;
-                else cf.pen = { lineWidth: v };
-              },
-            });
-        },
-      });
-    }
-    if (id === "pen-color") {
-      return defineComponent({
-        setup() {
-          return () =>
-            h("input", {
-              class: "input color",
-              type: "color",
-              value: pen.color ?? PENS_DEFAULTS.color,
-              onInput: (e) => {
-                if (cf.pen)
-                  cf.pen.color = String(e.target.value || PENS_DEFAULTS.color);
-                else
-                  cf.pen = {
-                    color: String(e.target.value || PENS_DEFAULTS.color),
-                  };
-              },
-            });
-        },
-      });
-    }
-    if (id === "pen-confirmedStyle" || id === "pen-provisionalStyle") {
-      const kk = id.includes("confirmed")
-        ? "confirmedStyle"
-        : "provisionalStyle";
-      return defineComponent({
-        setup() {
-          const val = () => pen[kk] ?? PENS_DEFAULTS[kk];
-          return () =>
-            h(
-              "select",
-              {
-                class: "input",
-                value: val(),
-                onChange: (e) => {
-                  if (cf.pen)
-                    cf.pen[kk] = String(e.target.value || PENS_DEFAULTS[kk]);
-                  else
-                    cf.pen = {
-                      [kk]: String(e.target.value || PENS_DEFAULTS[kk]),
-                    };
-                },
-              },
-              LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
-            );
-        },
-      });
-    }
-  }
-
-  // segment
-  if (row.key === "segment") {
-    const sg = cf.segment || {};
-    if (id === "seg-lineWidth") {
-      return defineComponent({
-        setup() {
-          return () => h(UiNumberBox, {
-              modelValue: sg.lineWidth ?? SEGMENT_DEFAULTS.lineWidth,
-              min: UI_LIMITS.lineWidth.min,
-              max: UI_LIMITS.lineWidth.max,
-              step: UI_LIMITS.lineWidth.step,
-              compact: true,
-              integer: false,
-              "frac-digits": 1,
-              "onUpdate:modelValue": (v) => {
-                if (cf.segment) cf.segment.lineWidth = v;
-                else cf.segment = { lineWidth: v };
-              },
-            });
-        },
-      });
-    }
-    if (id === "seg-color") {
-      return defineComponent({
-        setup() {
-          return () => h("input", {
-            class: "input color",
-            type: "color",
-            value: sg.color ?? SEGMENT_DEFAULTS.color,
-            onInput: (e) => {
-              if(cf.segment) cf.segment.color = String(e.target.value || SEGMENT_DEFAULTS.color); else cf.segment = { color: String(e.target.value || SEGMENT_DEFAULTS.color) };
-            },
-          });
-        },
-      });
-    }
-    if (id === "seg-lineStyle") {
-      return defineComponent({
-        setup() {
-          const val = () => sg.lineStyle ?? SEGMENT_DEFAULTS.lineStyle;
-          return () =>
-            h(
-              "select",
-              {
-                class: "input",
-                value: val(),
-                onChange: (e) => {
-                  if (cf.segment)
-                    cf.segment.lineStyle = String(
-                      e.target.value || SEGMENT_DEFAULTS.lineStyle
-                    );
-                  else
-                    cf.segment = {
-                      lineStyle: String(
-                        e.target.value || SEGMENT_DEFAULTS.lineStyle
-                      ),
-                    };
-                },
-              },
-              LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
-            );
-        },
-      });
-    }
-  }
-
-  // penPivot
-  if (row.key === "penPivot") {
-    const pv = cf.penPivot || {};
-    if (id === "pv-lineWidth") {
-      return defineComponent({
-        setup() {
-          const value = () => pv.lineWidth ?? CHAN_PEN_PIVOT_DEFAULTS.lineWidth;
-          return () => h(UiNumberBox, {
-              modelValue: value(),
-              min: UI_LIMITS.lineWidth.min,
-              max: UI_LIMITS.lineWidth.max,
-              step: UI_LIMITS.lineWidth.step,
-              compact: true,
-              integer: false,
-              "frac-digits": 1,
-              "onUpdate:modelValue": (v) => {
-                if (cf.penPivot) cf.penPivot.lineWidth = v;
-                else cf.penPivot = { lineWidth: v };
-              },
-            });
-        },
-      });
-    }
-    if (id === "pv-lineStyle") {
-      return defineComponent({
-        setup() {
-          const val = () => pv.lineStyle ?? CHAN_PEN_PIVOT_DEFAULTS.lineStyle;
-          return () => h("select", {
+// 使用通用渲染器
+const { renderControl } = useSettingsRenderer({
+  upShape: {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.upShape,
+      onChange: (e) => (chanDraft.upShape = e.target.value),
+      innerHTML: MARKER_SHAPE_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  upColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.upColor,
+      onInput: (e) => (chanDraft.upColor = e.target.value),
+    }),
+  },
+  downShape: {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.downShape,
+      onChange: (e) => (chanDraft.downShape = e.target.value),
+      innerHTML: MARKER_SHAPE_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  downColor: {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.downColor,
+      onInput: (e) => (chanDraft.downColor = e.target.value),
+    }),
+  },
+  anchorPolicy: {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.anchorPolicy,
+      onChange: (e) => (chanDraft.anchorPolicy = e.target.value),
+      innerHTML: ANCHOR_POLICY_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "fr-minTick": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: fractalDraft.minTickCount,
+      min: UI_LIMITS.nonNegativeInteger.min,
+      step: UI_LIMITS.nonNegativeInteger.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (fractalDraft.minTickCount = v),
+    }),
+  },
+  "fr-minPct": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: fractalDraft.minPct,
+      min: UI_LIMITS.percentage.min,
+      max: UI_LIMITS.percentage.max,
+      step: UI_LIMITS.percentage.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (fractalDraft.minPct = v),
+    }),
+  },
+  "fr-minCond": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: fractalDraft.minCond,
+      onChange: (e) => (fractalDraft.minCond = e.target.value),
+      innerHTML: MIN_COND_OPTIONS.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  ...Object.fromEntries(
+    ["strong", "standard", "weak", "confirm"].flatMap((k) => {
+      const readConf = () =>
+        (k === "confirm"
+          ? fractalDraft.confirmStyle
+          : fractalDraft.styleByStrength[k]) || {};
+      const writeConf = (patch) => {
+        if (k === "confirm")
+          fractalDraft.confirmStyle = {
+            ...fractalDraft.confirmStyle,
+            ...patch,
+          };
+        else
+          fractalDraft.styleByStrength[k] = {
+            ...fractalDraft.styleByStrength[k],
+            ...patch,
+          };
+      };
+      return [
+        [
+          `fr-botShape-${k}`,
+          {
+            component: "select",
+            getProps: () => ({
               class: "input",
-              value: val(),
-              onChange: (e) => {
-                if(cf.penPivot) cf.penPivot.lineStyle = String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS.lineStyle); else cf.penPivot = { lineStyle: String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS.lineStyle) };
-              },
-            },
-            LINE_STYLES.map((opt) => h("option", { value: opt.v }, opt.label)) // <-- 修正：正确使用 opt.v 和 opt.label
-          );
-        },
-      });
-    }
-    if (id === "pv-upColor" || id === "pv-downColor") {
-      const kk = id.includes("upColor") ? "upColor" : "downColor";
-      return defineComponent({
-        setup() {
-          const value = () => pv[kk] ?? CHAN_PEN_PIVOT_DEFAULTS[kk];
-          return () => h("input", {
-            class: "input color",
-            type: "color",
-            value: value(),
-            onInput: (e) => {
-              if (cf.penPivot) cf.penPivot[kk] = String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS[kk]); else cf.penPivot = { [kk]: String(e.target.value || CHAN_PEN_PIVOT_DEFAULTS[kk]) };
-            },
-          });
-        },
-      });
-    }
-    if (id === "pv-alpha") {
-      return defineComponent({
-        setup() {
-          const value = () => pv.alphaPercent ?? CHAN_PEN_PIVOT_DEFAULTS.alphaPercent;
-          return () => h(UiNumberBox, {
-              modelValue: value(),
-              min: UI_LIMITS.percentage.min,
-              max: UI_LIMITS.percentage.max,
-              step: UI_LIMITS.percentage.step,
-              compact: true,
-              integer: true,
-              "onUpdate:modelValue": (v) => {
-                if (cf.penPivot) cf.penPivot.alphaPercent = v;
-                else cf.penPivot = { alphaPercent: v };
-              },
-            });
-        },
-      });
-    }
-  }
-
-  // 占位空控件
-  return defineComponent({
-    setup() {
-      return () => null;
-    },
-  });
-}
+              value: readConf().bottomShape,
+              onChange: (e) => writeConf({ bottomShape: e.target.value }),
+              innerHTML: MARKER_SHAPE_OPTIONS.map(
+                (o) => `<option value="${o.v}">${o.label}</option>`
+              ).join(""),
+            }),
+          },
+        ],
+        [
+          `fr-botColor-${k}`,
+          {
+            component: "input",
+            getProps: () => ({
+              class: "input color",
+              type: "color",
+              value: readConf().bottomColor,
+              onInput: (e) => writeConf({ bottomColor: e.target.value }),
+            }),
+          },
+        ],
+        [
+          `fr-topShape-${k}`,
+          {
+            component: "select",
+            getProps: () => ({
+              class: "input",
+              value: readConf().topShape,
+              onChange: (e) => writeConf({ topShape: e.target.value }),
+              innerHTML: MARKER_SHAPE_OPTIONS.map(
+                (o) => `<option value="${o.v}">${o.label}</option>`
+              ).join(""),
+            }),
+          },
+        ],
+        [
+          `fr-topColor-${k}`,
+          {
+            component: "input",
+            getProps: () => ({
+              class: "input color",
+              type: "color",
+              value: readConf().topColor,
+              onInput: (e) => writeConf({ topColor: e.target.value }),
+            }),
+          },
+        ],
+        [
+          `fr-fill-${k}`,
+          {
+            component: "select",
+            getProps: () => ({
+              class: "input",
+              value: readConf().fill,
+              onChange: (e) => writeConf({ fill: e.target.value }),
+              innerHTML: FILL_OPTIONS.map(
+                (o) => `<option value="${o.v}">${o.label}</option>`
+              ).join(""),
+            }),
+          },
+        ],
+      ];
+    })
+  ),
+  "pen-lineWidth": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: chanDraft.pen.lineWidth,
+      min: UI_LIMITS.lineWidth.min,
+      max: UI_LIMITS.lineWidth.max,
+      step: UI_LIMITS.lineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (chanDraft.pen.lineWidth = v),
+    }),
+  },
+  "pen-color": {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.pen.color,
+      onInput: (e) => (chanDraft.pen.color = e.target.value),
+    }),
+  },
+  "pen-confirmedStyle": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.pen.confirmedStyle,
+      onChange: (e) => (chanDraft.pen.confirmedStyle = e.target.value),
+      innerHTML: LINE_STYLES.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "pen-provisionalStyle": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.pen.provisionalStyle,
+      onChange: (e) => (chanDraft.pen.provisionalStyle = e.target.value),
+      innerHTML: LINE_STYLES.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "seg-lineWidth": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: chanDraft.segment.lineWidth,
+      min: UI_LIMITS.lineWidth.min,
+      max: UI_LIMITS.lineWidth.max,
+      step: UI_LIMITS.lineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (chanDraft.segment.lineWidth = v),
+    }),
+  },
+  "seg-color": {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.segment.color,
+      onInput: (e) => (chanDraft.segment.color = e.target.value),
+    }),
+  },
+  "seg-lineStyle": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.segment.lineStyle,
+      onChange: (e) => (chanDraft.segment.lineStyle = e.target.value),
+      innerHTML: LINE_STYLES.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "pv-lineWidth": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: chanDraft.penPivot.lineWidth,
+      min: UI_LIMITS.lineWidth.min,
+      max: UI_LIMITS.lineWidth.max,
+      step: UI_LIMITS.lineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (chanDraft.penPivot.lineWidth = v),
+    }),
+  },
+  "pv-lineStyle": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.penPivot.lineStyle,
+      onChange: (e) => (chanDraft.penPivot.lineStyle = e.target.value),
+      innerHTML: LINE_STYLES.map(
+        (o) => `<option value="${o.v}">${o.label}</option>`
+      ).join(""),
+    }),
+  },
+  "pv-upColor": {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.penPivot.upColor,
+      onInput: (e) => (chanDraft.penPivot.upColor = e.target.value),
+    }),
+  },
+  "pv-downColor": {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.penPivot.downColor,
+      onInput: (e) => (chanDraft.penPivot.downColor = e.target.value),
+    }),
+  },
+  "pv-alpha": {
+    component: UiNumberBox,
+    getProps: () => ({
+      modelValue: chanDraft.penPivot.alphaPercent,
+      min: UI_LIMITS.percentage.min,
+      max: UI_LIMITS.percentage.max,
+      step: UI_LIMITS.percentage.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (chanDraft.penPivot.alphaPercent = v),
+    }),
+  },
+});
 </script>
