@@ -34,9 +34,9 @@ export function useViewCommandHub() {
   const markerWidthPx = ref(8); // 符号宽度（派生，1..16）
   const hostWidthPx = ref(800); // 宿主宽度（由主窗上报）
   const allRows = ref(0); // 当前 ALL 序列总根数（数据落地时设置）
-  const currentPresetKey = ref(settings.windowPreset.value || "ALL"); // 当前窗宽高亮预设
-  const currentFreq = ref(settings.freq.value || "1d"); // 当前频率（用于查表）
-  const currentSymbol = ref(settings.lastSymbol.value || ""); // 当前标的代码（仅记录）
+  const currentPresetKey = ref(settings.preferences.windowPreset || "ALL"); // 当前窗宽高亮预设
+  const currentFreq = ref(settings.preferences.freq || "1d"); // 当前频率（用于查表）
+  const currentSymbol = ref(settings.preferences.lastSymbol || ""); // 当前标的代码（仅记录）
 
   // —— 新增：数据集边界缓存（必要的顺序变更说明）
   // 说明：为了在“主动交互动作中”正确维护 atRightEdge（判断 rightTs 是否在最右端），需要在中枢缓存 minTs/maxTs。

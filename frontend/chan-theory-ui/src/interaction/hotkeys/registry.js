@@ -2,6 +2,7 @@
 // ==============================
 // 说明：热键服务（作用域栈 + 键位映射 + 命令处理 + 内置默认行为）
 // 变更点：扩展输入白名单，允许在输入框内触发额外组合（Ctrl+Comma / F1 / Alt+R / Alt+E / ArrowDown / ArrowUp / Enter）。
+// - FIX: setUserOverrides 和 getBindings 方法将使用结构化的 userOverrides 对象。
 // ==============================
 
 import { ref } from "vue"; // 引入响应式
@@ -85,25 +86,25 @@ export class HotkeyService {
   } // 结束 popScope
 
   setBinding(scope, command, combo) {
-    // 设置单条覆盖（命令→组合）
-    const km = this._invert(this.keymap[scope] || {}); // 反转映射（combo->cmd → cmd->combo）
-    Object.keys(this.userOverrides[scope] || {}).forEach((c) => {
-      // 删除旧绑定
-      if ((this.userOverrides[scope] || {})[c] === command)
-        // 同命令
-        delete this.userOverrides[scope][c]; // 删除
+    // 这个方法现在逻辑上被 setUserOverrides 覆盖，但保留以防未来需要单点修改
+    const currentScopeOverrides = this.userOverrides[scope] || {};
+    // 移除旧的绑定
+    Object.keys(currentScopeOverrides).forEach((c) => {
+      if (currentScopeOverrides[c] === command) {
+        delete currentScopeOverrides[c];
+      }
     });
+    // 添加新的绑定
     if (combo) {
-      // 设置新组合
-      this.userOverrides[scope] = this.userOverrides[scope] || {};
-      this.userOverrides[scope][combo] = command; // 赋值
+      currentScopeOverrides[combo] = command;
     }
-  } // 结束 setBinding
+    this.userOverrides[scope] = currentScopeOverrides;
+  }
 
   setUserOverrides(overrides) {
-    // 设置整表覆盖
-    this.userOverrides = overrides || {}; // 覆盖
-  } // 结束 setUserOverrides
+    // 接收完整的、按 scope 组织的 overrides 对象
+    this.userOverrides = overrides || {};
+  }
 
   getBindings(scope) {
     // 获取“命令 → 组合”视图

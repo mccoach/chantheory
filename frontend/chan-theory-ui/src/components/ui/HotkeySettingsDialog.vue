@@ -179,7 +179,7 @@ function save() {
   });
   // 写入用户设置（本地持久化）与 HotkeyService（立即生效）
   settings.setHotkeyOverrides(overrides);
-  hotkeys.setUserOverrides(overrides);
+  // hotkeys.setUserOverrides 是由 useUserSettings 插件的 watch 自动调用的，这里无需手动调用
 }
 
 // 全部恢复默认（仅修改草稿；用户点击“保存并关闭”后生效）

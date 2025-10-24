@@ -3,8 +3,10 @@
 // 覆盖式防抖（Abort + reqId）+ 中枢化显示状态订阅（bars/rightTs/presetKey）
 // 本次重构（轻度）：保持原函数/变量顺序，不扩大范围，仅补充注释与确保 anchor_ts = 中枢 rightTs。
 // - 显示状态与后端解耦：任何 UI 交互先汇总到 useViewCommandHub，reload 时以 hub.rightTs 为锚点，服务端一次成型返回 meta.view_*。
+// - FIX: 导入 toRef，并正确使用它来创建 adjust 的响应式引用。
+// ==============================
 
-import { ref, watch, computed } from "vue";
+import { ref, watch, computed, toRef } from "vue";
 import { fetchCandles } from "@/services/marketService";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { pickPresetByBarsCountDown } from "@/constants";
@@ -39,10 +41,10 @@ export function useMarketView(options = {}) {
   const settings = useUserSettings();
 
   // —— 核心状态（保持原导出签名与前后顺序） —— //
-  const code = ref(settings.lastSymbol.value || "");
-  const freq = ref(settings.freq?.value || "1d");
-  const adjust = settings.adjust;
-  const windowPreset = ref(settings.windowPreset.value || "ALL");
+  const code = ref(settings.preferences.lastSymbol || "");
+  const freq = ref(settings.preferences.freq || "1d");
+  const adjust = toRef(settings.preferences, 'adjust');
+  const windowPreset = ref(settings.preferences.windowPreset || "ALL");
   const rightTs = ref(settings.getRightTs(code.value, freq.value) || null);
 
   const loading = ref(false);
@@ -51,13 +53,13 @@ export function useMarketView(options = {}) {
   const candles = ref([]);
   const indicators = ref({});
 
-  const chartType = ref(settings.chartType?.value || "kline");
+  const chartType = ref(settings.preferences.chartType || "kline");
   const visibleRange = ref({ startStr: "", endStr: "" });
   const displayBars = ref(0);
 
   // MOD: 统一传递设置中“出现”的所有 MA 周期，无视 enabled（一次性计算，后续只控制显示）
   const maPeriodsMap = computed(() => {
-    const configs = settings.maConfigs.value || {};
+    const configs = settings.chartDisplay.maConfigs || {};
     return Object.entries(configs).reduce((acc, [key, conf]) => {
       const n = Number(conf?.period);
       if (Number.isFinite(n) && n > 0) acc[key] = n;
@@ -230,7 +232,7 @@ export function useMarketView(options = {}) {
     if (autoStart) reload({ force: true });
   });
   watch(adjust, () => {
-    settings.setAdjust?.(adjust.value);
+    // setAdjust 由 useUserSettings 内部的 watch 自动处理
     if (autoStart) reload({ force: true });
   });
 

@@ -29,9 +29,9 @@ export function buildMainChartOption(
     candles,
     indicators,
     chartType,
-    maConfigs,
+    maConfigs, // <--- 注意：这个参数由 useViewRenderHub 从 settings 传入
     freq,
-    klineStyle,
+    klineStyle, // <--- 注意：这个参数由 useViewRenderHub 从 settings 传入
     adjust,
     reducedBars,
     mapOrigToReduced,

@@ -24,7 +24,7 @@ import { inject, ref, watch, provide, defineExpose } from "vue";
 import MarketDisplaySettings from "@/settings/panels/MarketDisplaySettings.vue";
 import ChanTheorySettings from "@/settings/panels/ChanTheorySettings.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useMarketView } from "@/composables/useMarketView"; // 修正：这是一个composables
+import { useMarketView } from "@/composables/useMarketView";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSettingsManager } from "@/composables/useSettingsManager";
 import {
@@ -109,7 +109,7 @@ provide("fractalDraft", fractalManager.draft);
 
 // 5. 复权设置管理器
 const adjustManager = (() => {
-  const draft = ref(settings.adjust.value || DEFAULT_APP_PREFERENCES.adjust);
+  const draft = ref(settings.preferences.adjust || DEFAULT_APP_PREFERENCES.adjust);
   const snapshot = ref(draft.value);
   const save = () => {
     settings.setAdjust(draft.value);

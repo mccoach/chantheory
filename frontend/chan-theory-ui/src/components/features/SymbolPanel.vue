@@ -65,7 +65,7 @@ const wl = useWatchlist();
 
 // === 状态管理 (由父组件统一协调) ===
 const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
-const inputText = ref(settings.lastSymbol.value || vm.code.value || "");
+const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
 const isInputFocused = ref(false);
 const isWatchlistOpen = ref(false);
 const suggestions = ref([]);
