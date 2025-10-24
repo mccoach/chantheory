@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { computed, h, inject } from "vue";
+import { computed, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 import {
   DEFAULT_KLINE_STYLE,
@@ -31,7 +31,7 @@ import {
   UI_LIMITS,
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
-import UiNumberBox from "@/components/ui/UiNumberBox.vue";
+import NumberSpinner from "@/components/ui/NumberSpinner.vue";
 import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 
 // 通过 inject 获取共享的草稿状态
@@ -209,7 +209,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   upFade: {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: klineDraft.originalFadeUpPercent,
       min: UI_LIMITS.percentage.min,
@@ -220,7 +220,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   downFade: {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: klineDraft.originalFadeDownPercent,
       min: UI_LIMITS.percentage.min,
@@ -231,7 +231,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   outlineWidth: {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: klineDraft.mergedK.outlineWidth,
       min: UI_LIMITS.outlineWidth.min,
@@ -260,7 +260,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   fillFade: {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: klineDraft.mergedK.fillFadePercent,
       min: UI_LIMITS.percentage.min,
@@ -282,7 +282,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "ma-width": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: (item) => ({
       modelValue: maDraft[item.maKey].width,
       min: UI_LIMITS.lineWidth.min,
@@ -313,7 +313,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "ma-period": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: (item) => ({
       modelValue: maDraft[item.maKey].period,
       min: UI_LIMITS.positiveInteger.min,

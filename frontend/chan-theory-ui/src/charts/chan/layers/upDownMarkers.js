@@ -6,6 +6,7 @@
 // ==============================
 import { CHAN_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { deriveSymbolSize } from "./geometry"; // NEW
 
 // 涨跌标记：横坐标 = anchor_idx_orig（承载点的原始索引），绑定隐藏 yAxis=1
 export function buildUpDownMarkers(reducedBars, env = {}) {
@@ -16,23 +17,16 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     (settings.chanTheory && settings.chanTheory.chanSettings) || {}
   );
 
-  const hostWidth = Math.max(1, Number(env.hostWidth || 0)); // 宿主宽度（几何计算）
-  const visCount = Math.max(1, Number(env.visCount || 1)); // 可见根数（几何计算）
-  // 统一符号宽度来源：优先外部 symbolWidthPx（中枢派生），否则根据 hostWidth+visCount 估算
-  const extW = Number(env.symbolWidthPx || NaN);
-  const approxW =
-    hostWidth > 1 && visCount > 0
-      ? Math.floor((hostWidth * 0.88) / visCount)
-      : 8; // 估算宽度
-  const markerW = Number.isFinite(extW)
-    ? Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, Math.round(extW)))
-    : Math.max(chan.markerMinPx, Math.min(chan.markerMaxPx, approxW));
-
-  // 统一高度与偏移来源：仅由 index.js 的 CHAN_DEFAULTS 决定
-  const markerH = Math.max(1, Math.round(Number(CHAN_DEFAULTS.markerHeightPx)));
-  const offsetDownPx = Math.round(
-    markerH + Number(CHAN_DEFAULTS.markerYOffsetPx)
-  );
+  // MODIFIED: Use deriveSymbolSize for unified geometry calculation
+  const { widthPx: markerW, heightPx: markerH, offsetBottomPx } = deriveSymbolSize({
+    hostWidth: env.hostWidth,
+    visCount: env.visCount,
+    minPx: chan.markerMinPx,
+    maxPx: chan.markerMaxPx,
+    overrideWidth: env.symbolWidthPx,
+    heightPx: CHAN_DEFAULTS.markerHeightPx,
+    yOffsetPx: CHAN_DEFAULTS.markerYOffsetPx,
+  });
 
   const upPoints = [];
   const downPoints = []; // 承载点集合
@@ -67,7 +61,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     type: "scatter",
     yAxisIndex: 1, // 不变量：隐藏 y 轴 index=1
     symbolSize: () => [markerW, markerH], // 宽高统一受中枢派生几何控制
-    symbolOffset: [0, offsetDownPx], // 底部偏移
+    symbolOffset: [0, offsetBottomPx], // 底部偏移
     clip: false,
     tooltip: { show: false },
     z: 2,

@@ -7,6 +7,7 @@
 import { CHAN_PEN_PIVOT_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { hexToRgba } from "@/utils/colorUtils";
+import { sampleSeriesByBarriers } from "./sampler"; // NEW
 
 /**
  * 笔中枢矩形绘制（markArea + markLine 四边）
@@ -43,20 +44,13 @@ export function buildPenPivotAreas(pivots, env = {}) {
 
   // 顶/底边按 x 从 left..right 逐一采点；遇屏障断开为独立 series
   function sampleEdgeToChunks(left, right, yConst) {
-    const chunks = [];
-    let curr = [];
-    const xa = Math.min(left, right);
-    const xb = Math.max(left, right);
-    for (let xi = xa; xi <= xb; xi++) {
-      if (barrierIdxSet.has(xi)) {
-        if (curr.length >= 2) chunks.push(curr);
-        curr = [];
-        continue;
-      }
-      curr.push([xi, yConst]);
-    }
-    if (curr.length >= 2) chunks.push(curr);
-    return chunks;
+    const yResolver = () => yConst;
+    return sampleSeriesByBarriers({
+      xStart: left,
+      xEnd: right,
+      yResolver,
+      barriersSet: barrierIdxSet,
+    });
   }
 
   const out = [];

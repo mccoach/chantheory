@@ -122,44 +122,6 @@ const vSetIndeterminate = {
   gap: 0; /* 行距由外层控制 */
 }
 
-/* 兜底：若外部未注入标准样式，这里给出最小可用的布局（不会覆盖外部 :deep 定义） */
-.std-row {
-  display: grid;
-  grid-template-columns: 90px repeat(5, 140px) 30px 30px;
-  align-items: center;
-  justify-items: center;
-  column-gap: 8px;
-  min-height: 36px;
-}
-.std-name {
-  justify-self: start;
-  font-weight: 600;
-}
-.std-item {
-  width: 150px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.std-item-label {
-  width: 60px;
-  text-align: right;
-  color: #bbb;
-  font-size: 12px;
-}
-.std-item-input {
-  width: 80px;
-  display: flex;
-  align-items: center;
-}
-.std-check,
-.std-reset {
-  width: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
 /* 复用外部 .btn.icon 的视觉（ModalDialog 已包含 ::before 的蒙版图标） */
 .btn.icon {
   width: 26px;

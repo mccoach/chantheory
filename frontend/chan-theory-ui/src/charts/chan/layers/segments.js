@@ -7,6 +7,7 @@
 // ==============================
 import { SEGMENT_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { sampleSeriesByBarriers } from "./sampler"; // NEW
 
 // 元线段（每段 series）
 export function buildSegmentLines(segments, env = {}) {
@@ -46,27 +47,18 @@ export function buildSegmentLines(segments, env = {}) {
     if (![xStart, yStart, xEnd, yEnd].every((v) => Number.isFinite(v)))
       return [];
 
-    const x0 = Math.min(xStart, xEnd);
-    const x1 = Math.max(xStart, xEnd);
-
     const dx = xEnd - xStart;
     const dy = yEnd - yStart;
     const slope = dx !== 0 ? dy / dx : 0;
 
-    const chunks = [];
-    let curr = [];
-    for (let xi = x0; xi <= x1; xi++) {
-      if (barrierIdxSet.has(xi)) {
-        if (curr.length >= 2) chunks.push(curr);
-        curr = [];
-        continue;
-      }
-      const t = xi - xStart;
-      const yi = yStart + slope * t;
-      curr.push([xi, yi]);
-    }
-    if (curr.length >= 2) chunks.push(curr);
-    return chunks;
+    const yResolver = (xi) => yStart + slope * (xi - xStart);
+
+    return sampleSeriesByBarriers({
+      xStart,
+      xEnd,
+      yResolver,
+      barriersSet: barrierIdxSet,
+    });
   }
 
   const out = [];

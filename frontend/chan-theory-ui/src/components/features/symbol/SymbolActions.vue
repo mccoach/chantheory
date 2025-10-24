@@ -11,16 +11,7 @@
       >
         刷新
       </button>
-      <button
-        class="seg-btn"
-        title="导出功能暂不可用"
-        @click="onExportClick"
-        :disabled="loading"
-      >
-        导出
-      </button>
     </div>
-    <!-- 原导出菜单的DOM结构可保留于此，但因功能短路，暂不渲染 -->
   </div>
 </template>
 
@@ -29,11 +20,6 @@ defineProps({
   loading: { type: Boolean, default: false },
 });
 defineEmits(["refresh"]);
-
-// “导出”功能被短路，点击无效果
-function onExportClick() {
-  console.warn("导出功能已被暂时禁用。");
-}
 </script>
 
 <style scoped>
@@ -60,12 +46,9 @@ function onExportClick() {
   user-select: none;
   font-size: 14px;
   line-height: 20px;
-  width: 60px;
+  width: 70px;
   height: 36px;
-  border-radius: 0;
-}
-.seg-btn + .seg-btn {
-  border-left: 1px solid #444;
+  border-radius: 10px;
 }
 .seg-btn:disabled {
   opacity: 0.6;

@@ -9,7 +9,6 @@
 import { ref, watch, computed, toRef } from "vue";
 import { fetchCandles } from "@/services/marketService";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { pickPresetByBarsCountDown } from "@/constants";
 // 新增：命令中枢（单例）
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 

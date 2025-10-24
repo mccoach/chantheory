@@ -57,7 +57,7 @@ function close() {
 
 /**
  * 切换当前活动标签（若无 tabs 则忽略）
- * @param {string} key - ��签 key
+ * @param {string} key -   签 key
  */
 function setActiveTab(key) {
   if (!activeDialog.value || !activeDialog.value.tabs?.length) return;

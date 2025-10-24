@@ -6,6 +6,7 @@
 // ==============================
 import { FRACTAL_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { deriveSymbolSize } from "./geometry"; // NEW
 
 // 分型标记：横坐标用 k2_idx_orig；绑定主轴 yAxisIndex=0；高度与间距由 FRACTAL_DEFAULTS 集中决定
 export function buildFractalMarkers(reducedBars, fractals, env = {}) {
@@ -17,24 +18,17 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
   );
   if (!cfg.enabled) return { series: [] };
 
-  const hostWidth = Math.max(1, Number(env.hostWidth || 0)); // 宿主宽
-  const visCount = Math.max(1, Number(env.visCount || 1)); // 可见根数
-
-  // 外部宽度覆盖（来自主窗广播）
-  const extW = Number(env.symbolWidthPx || NaN);
-  const approxW =
-    hostWidth > 1 && visCount > 0
-      ? Math.floor((hostWidth * 0.88) / visCount)
-      : 8;
-  const markerW = Number.isFinite(extW)
-    ? Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, Math.round(extW)))
-    : Math.max(cfg.markerMinPx, Math.min(cfg.markerMaxPx, approxW));
+  // MODIFIED: Use deriveSymbolSize for unified geometry calculation
+  const { widthPx: markerW, heightPx: markerH } = deriveSymbolSize({
+    hostWidth: env.hostWidth,
+    visCount: env.visCount,
+    minPx: cfg.markerMinPx,
+    maxPx: cfg.markerMaxPx,
+    overrideWidth: env.symbolWidthPx,
+    heightPx: FRACTAL_DEFAULTS.markerHeightPx,
+  });
 
   // 统一高度与顶/底偏移来源
-  const markerH = Math.max(
-    1,
-    Math.round(Number(FRACTAL_DEFAULTS.markerHeightPx))
-  );
   const apexGap = Math.max(
     0,
     Math.round(Number(FRACTAL_DEFAULTS.markerYOffsetPx))

@@ -1,12 +1,17 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\IndicatorPlaceholderPanel.vue -->
 <template>
   <div class="placeholder-panel">
-    当前指标暂无更多设置项，后续版本将开放参数配置。
+    {{ label }} 指标暂无更多设置项，后续版本将开放参数配置。
   </div>
 </template>
 
 <script setup>
-// 纯UI占位组件
+defineProps({
+  label: {
+    type: String,
+    default: "当前"
+  }
+});
 </script>
 
 <style scoped>

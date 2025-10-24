@@ -7,6 +7,7 @@
 // ==============================
 import { PENS_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { sampleSeriesByBarriers } from "./sampler"; // NEW
 
 // 画笔折线（每段 series）
 export function buildPenLines(pensObj, env = {}) {
@@ -47,31 +48,18 @@ export function buildPenLines(pensObj, env = {}) {
     const y2 = Number(p.end_y_pri);
     if (![x1, y1, x2, y2].every((v) => Number.isFinite(v))) return [];
 
-    const xa = Math.min(x1, x2);
-    const xb = Math.max(x1, x2);
     const dx = x2 - x1;
     const dy = y2 - y1;
     const slope = dx !== 0 ? dy / dx : 0;
 
-    const chunks = [];
-    let curr = [];
+    const yResolver = (xi) => y1 + slope * (xi - x1);
 
-    for (let xi = xa; xi <= xb; xi++) {
-      if (barrierIdxSet.has(xi)) {
-        if (curr.length >= 2) {
-          chunks.push(curr);
-        }
-        curr = [];
-        continue;
-      }
-      const t = xi - x1;
-      const yi = y1 + slope * t;
-      curr.push([xi, yi]);
-    }
-    if (curr.length >= 2) {
-      chunks.push(curr);
-    }
-    return chunks;
+    return sampleSeriesByBarriers({
+      xStart: x1,
+      xEnd: x2,
+      yResolver,
+      barriersSet: barrierIdxSet,
+    });
   }
 
   const series = [];

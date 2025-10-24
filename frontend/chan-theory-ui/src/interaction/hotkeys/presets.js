@@ -32,8 +32,6 @@ export const defaultKeymap = {
     "Ctrl+Left": "focusPrevField",
     // 快速刷新（Alt+R）
     "Alt+R": "refresh",
-    // 打开/关闭导出菜单（Alt+E）
-    "Alt+E": "toggleExportMenu",
     // NEW: 十字线键盘移动（全局）
     "ArrowLeft": "cursorLeft",
     "ArrowRight": "cursorRight",
@@ -113,7 +111,6 @@ export const commandLabels = {
   focusNextField: "跳转到下一个输入框",
   focusPrevField: "跳转到上一个输入框",
   refresh: "刷新数据",
-  toggleExportMenu: "打开/关闭导出菜单",
 
   // 标的下拉
   dropdownNext: "下拉选择下一项",

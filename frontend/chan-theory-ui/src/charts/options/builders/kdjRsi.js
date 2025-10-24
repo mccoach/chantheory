@@ -12,6 +12,7 @@ import { STYLE_PALETTE } from "@/constants";
 import { applyUi } from "../ui/applyUi";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { makeKdjRsiTooltipFormatter } from "../tooltips/index";
+import { createBaseTechOption } from "./common"; // NEW
 
 function asArray(x) {
   return Array.isArray(x) ? x : [];
@@ -78,76 +79,26 @@ export function buildKdjOrRsiOption(
     }
   }
 
-  const option = {
-    animation: false,
-    backgroundColor: theme.backgroundColor,
-    axisPointer: {
-      link: [{ xAxisIndex: "all" }],
-    },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "cross" },
-      appendToBody: false,
-      confine: true,
-      formatter: makeKdjRsiTooltipFormatter({ freq }),
-      className: "ct-fixed-tooltip",
-      borderWidth: 0,
-      backgroundColor: "rgba(20,20,20,0.85)",
-      textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
-    },
-    xAxis: { type: "category", data: dates },
-    yAxis: [
-      {
-        scale: true,
-        axisLabel: {
-          color: theme.axisLabelColor,
-          align: "right",
-          formatter: (val) =>
-            formatNumberScaled(val, {
-              digits: 2,
-              allowEmpty: true,
-              minIntDigitsToScale: 5,
-            }),
-          margin: ui?.isHovered ? 6 : 6,
-        },
-        axisPointer: {
-          show: true, // 保持为 true, 由 link 机制统一控制
-          label: { show: !!ui?.isHovered },
-          // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
-          lineStyle: {
-            color: ui?.isHovered ? theme.axisLineColor : "transparent",
-          },
-        },
-      },
-      {
-        type: "value",
-        min: 0,
-        max: 1,
-        show: false,
-        scale: false,
-        axisLine: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        // FIX: 显式禁用第二Y轴的指针
-        axisPointer: {
-          show: false,
-        },
-      },
-    ],
-    series,
-  };
+  // MODIFIED: Use createBaseTechOption to generate the skeleton
+  const yAxisFormatter = (val) =>
+    formatNumberScaled(val, {
+      digits: 2,
+      allowEmpty: true,
+      minIntDigitsToScale: 5,
+    });
 
-  if (ui?.tooltipPositioner) {
-    option.tooltip.position = ui.tooltipPositioner;
-  }
-
-  return applyUi(
-    option,
+  const option = createBaseTechOption(
     {
-      ...ui,
-      isMain: false,
-      leftPx: 72,
+      dates,
+      freq,
+      tooltipFormatter: makeKdjRsiTooltipFormatter({ freq }),
     },
-    { dates, freq }
+    ui,
+    yAxisFormatter
   );
+
+  // Fill in the series
+  option.series = series;
+
+  return option;
 }

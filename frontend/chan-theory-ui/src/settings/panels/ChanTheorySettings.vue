@@ -19,9 +19,9 @@
 </template>
 
 <script setup>
-import { computed, h, inject } from "vue";
+import { computed, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
-import UiNumberBox from "@/components/ui/UiNumberBox.vue";
+import NumberSpinner from "@/components/ui/NumberSpinner.vue";
 import {
   CHAN_DEFAULTS,
   FRACTAL_DEFAULTS,
@@ -344,7 +344,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "fr-minTick": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: fractalDraft.minTickCount,
       min: UI_LIMITS.nonNegativeInteger.min,
@@ -354,7 +354,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "fr-minPct": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: fractalDraft.minPct,
       min: UI_LIMITS.percentage.min,
@@ -464,7 +464,7 @@ const { renderControl } = useSettingsRenderer({
     })
   ),
   "pen-lineWidth": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: chanDraft.pen.lineWidth,
       min: UI_LIMITS.lineWidth.min,
@@ -506,7 +506,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "seg-lineWidth": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: chanDraft.segment.lineWidth,
       min: UI_LIMITS.lineWidth.min,
@@ -537,7 +537,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "pv-lineWidth": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: chanDraft.penPivot.lineWidth,
       min: UI_LIMITS.lineWidth.min,
@@ -577,7 +577,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "pv-alpha": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: chanDraft.penPivot.alphaPercent,
       min: UI_LIMITS.percentage.min,

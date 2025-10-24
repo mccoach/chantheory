@@ -6,21 +6,7 @@
 
 import { reactive } from "vue";
 import { CHAN_DEFAULTS, FRACTAL_DEFAULTS } from "@/constants";
-
-// 递归深度合并工具
-function deepMerge(target, source) {
-    const output = { ...target };
-    if (target && typeof target === 'object' && source && typeof source === 'object') {
-        Object.keys(source).forEach(key => {
-            if (source[key] && typeof source[key] === 'object' && key in target) {
-                output[key] = deepMerge(target[key], source[key]);
-            } else {
-                output[key] = source[key];
-            }
-        });
-    }
-    return output;
-}
+import { deepMerge } from "@/utils/objectUtils"; // NEW
 
 // 分型设置的特殊合并逻辑
 function mergeFractalSettings(local = {}) {

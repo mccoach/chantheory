@@ -354,363 +354,88 @@
 </template>
 
 <script setup>
-import {
-  inject,
-  onMounted,
-  onBeforeUnmount,
-  ref,
-  watch,
-  computed,
-  reactive,
-} from "vue";
-import * as echarts from "echarts";
-import { WINDOW_PRESETS } from "@/constants"; // REFACTORED: 移除不再使用的常量
+import { inject, ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { useSymbolIndex } from "@/composables/useSymbolIndex";
-import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { openMainChartSettings } from "@/settings/mainShell";
+import { useChartPanel } from "@/composables/useChartPanel";
+import { pad2 } from "@/utils/timeFormat";
+import { WINDOW_PRESETS } from "@/constants";
 
-import { pad2, fmtShort } from "@/utils/timeFormat";
-
-/* 双跳脱调度，避免主流程期 setOption/resize */
-function schedule(fn) {
-  try {
-    requestAnimationFrame(() => {
-      setTimeout(fn, 0);
-    });
-  } catch {
-    setTimeout(fn, 0);
-  }
-}
-function scheduleSetOption(opt, opts) {
-  schedule(() => {
-    try {
-      chart && chart.setOption(opt, opts);
-    } catch {}
-  });
-}
-function scheduleResize(width, height) {
-  schedule(() => {
-    try {
-      chart && chart.resize({ width, height });
-    } catch {}
-  });
-}
-
+// --- Injected Services ---
 const vm = inject("marketView");
-const renderHub = useViewRenderHub();
-const settings = useUserSettings();
-const { findBySymbol } = useSymbolIndex();
+const renderHub = inject("renderHub");
+const hub = inject("viewCommandHub");
 const dialogManager = inject("dialogManager");
-const hub = useViewCommandHub();
+const settings = useUserSettings();
 
-/* 当前高亮预设键 */
-const activePresetKey = ref(hub.getState().presetKey || "ALL");
-hub.onChange((st) => {
-  activePresetKey.value = st.presetKey || "ALL";
+// --- NEW: Use the common chart panel logic ---
+const {
+  wrapRef: wrap,
+  hostRef: host,
+  chart,
+  displayTitle,
+  onResizeHandleDown,
+  onMouseEnter,
+  onMouseLeave,
+} = useChartPanel({
+  panelKey: ref("main"),
+  vm: vm,
+  hub: hub,
+  renderHub: renderHub,
+  onChartReady: (instance) => {
+    // 主图特有的初始化逻辑
+    try {
+        renderHub.registerChart('main', instance);
+        host.value?.addEventListener('mouseenter', () => {
+            renderHub.setActivePanel('main');
+        });
+        
+        // FIX: 订阅渲染中枢
+        const unsubId = renderHub.onRender((snapshot) => {
+          try {
+            if (instance && snapshot.main?.option) {
+              // 使用 notMerge: true 保证每次都是全量替换，避免旧状态干扰
+              instance.setOption(snapshot.main.option, { notMerge: true, silent: true });
+            }
+          } catch (e) {
+            console.error("MainChartPanel onRender error:", e);
+          }
+        });
+        onBeforeUnmount(() => renderHub.offRender(unsubId)); // FIX: 卸载时取消订阅
+    } catch {}
+  }
 });
 
-/* 覆盖式防抖/序号守护 */
-let renderSeq = 0;
-function isStale(seq) {
-  return seq !== renderSeq;
-}
-
-/* 程序化 dataZoom 守护 */
-let progZoomGuard = { active: false, sig: null, ts: 0 };
-// 最近一次已应用范围（双保险早退，防回环）
-let lastAppliedRange = { s: null, e: null };
-
-/* 预设与高级面板 */
+// --- Component-Specific Logic (UI Controls) ---
 const presets = computed(() => WINDOW_PRESETS.slice());
 const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f;
 function activateK(f) {
-  vm.chartType.value = "kline";
   vm.setFreq(f);
 }
 
-/* 画布/实例与 Resize */
-const wrap = ref(null);
-const host = ref(null);
-let chart = null;
-let ro = null;
-let unsubId = null;
+const showRefreshed = ref(false);
+const refreshedAt = ref(null);
+const refreshedAtHHMMSS = computed(() => {
+  if (!refreshedAt.value) return "";
+  const d = refreshedAt.value;
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+});
 
-// NEW: 上报悬浮状态
-function onMouseEnter() {
-  renderHub.setHoveredPanel("main");
-  focusWrap(); // 原有 focus 逻辑
-}
-function onMouseLeave() {
-  renderHub.setHoveredPanel(null);
-}
+watch(() => vm.meta.value, () => {
+    refreshedAt.value = new Date();
+    showRefreshed.value = true;
+    setTimeout(() => { showRefreshed.value = false; }, 2000);
+    fillInlineFieldsFromEffective(); // 元信息更新后，同步一次“原位输入”的显示
+  },
+  { deep: true }
+);
 
-// 下沿拖拽高度调整（保留）
-let dragging = false,
-  startY = 0,
-  startH = 0;
-function onResizeHandleDown(_pos, e) {
-  dragging = true;
-  startY = e.clientY;
-  startH = wrap.value?.clientHeight || 0;
-  window.addEventListener("mousemove", onResizeHandleMove);
-  window.addEventListener("mouseup", onResizeHandleUp, { once: true });
-}
-function onResizeHandleMove(e) {
-  if (!dragging) return;
-  const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
-  if (wrap.value) {
-    wrap.value.style.height = `${Math.floor(next)}px`;
-    safeResize();
-  }
-}
-function onResizeHandleUp() {
-  dragging = false;
-  window.removeEventListener("mousemove", onResizeHandleMove);
-}
-function safeResize() {
-  if (!chart || !host.value) return;
-  const seq = renderSeq;
-  requestAnimationFrame(() => {
-    if (isStale(seq)) return;
-    try {
-      const nextW = host.value.clientWidth;
-      const nextH = host.value.clientHeight;
-      // 双跳脱 resize
-      scheduleResize(nextW, nextH);
-
-      const st = hub.getState();
-      const approxNextMarker = Math.max(
-        1,
-        Math.min(16, Math.round((nextW * 0.88) / Math.max(1, st.barsCount)))
-      );
-      if (approxNextMarker !== hub.markerWidthPx.value) {
-        hub.execute("ResizeHost", { widthPx: nextW });
-      }
-    } catch {}
-  });
-}
-
-/* 设置弹窗（改为独立壳调用） */
 function openSettingsDialog() {
   try {
     openMainChartSettings(dialogManager, { activeTab: "chan" });
   } catch (e) {}
 }
 
-/* 标题与刷新状态 */
-const displayHeader = ref({ name: "", code: "", freq: "" });
-const displayTitle = computed(() => {
-  const n = displayHeader.value.name || "",
-    c = displayHeader.value.code || vm.code.value || "",
-    f = displayHeader.value.freq || vm.freq.value || "";
-  const src = (vm.meta.value?.source || "").trim(),
-    srcLabel = src ? `（${src}）` : "";
-  const adjText =
-    { none: "", qfq: " 前复权", hfq: " 后复权" }[
-      String(vm.adjust.value || "none")
-    ] || "";
-  return n
-    ? `${n}（${c}）：${f}${srcLabel}${adjText}`
-    : `${c}：${f}${srcLabel}${adjText}`;
-});
-const showRefreshed = ref(false);
-const refreshedAt = ref(null);
-const refreshedAtHHMMSS = computed(() => {
-  if (!refreshedAt.value) return "";
-  const d = refreshedAt.value,
-    pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-});
-
-/* 键盘左右键 */
-let currentIndex = -1;
-function focusWrap() {
-  try {
-    wrap.value?.focus?.();
-  } catch {}
-}
-
-// REFACTORED: 移除 recomputeChan 和 buildOverlaySeriesForOption
-
-/* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
-let dzIdleTimer = null;
-const dzIdleDelayMs = 100; // 建议 100–200ms，避免频繁承接
-
-// NEW: 拖移会话鼠标状态（仅鼠标未抬起时不结束交互）
-let isMouseDown = false;
-let zrMouseDownHandler = () => {
-  isMouseDown = true;
-};
-let zrMouseUpHandler = () => {
-  isMouseDown = false;
-  try {
-    renderHub.endInteraction("main");
-  } catch {}
-};
-let winMouseUpHandler = () => {
-  isMouseDown = false;
-  try {
-    renderHub.endInteraction("main");
-  } catch {}
-};
-
-/* onDataZoom：ECharts-first 会话锁 + idle-commit（不抢权、会后承接） */
-function onDataZoom(params) {
-  try {
-    const info = (params && params.batch && params.batch[0]) || params || {};
-    const len = (vm.candles.value || []).length;
-    if (!len) return;
-
-    // 2) 提取索引区间（优先索引，其次百分比）
-    let sIdx, eIdx;
-    if (
-      typeof info.startValue !== "undefined" &&
-      typeof info.endValue !== "undefined"
-    ) {
-      sIdx = Number(info.startValue);
-      eIdx = Number(info.endValue);
-    } else if (typeof info.start === "number" && typeof info.end === "number") {
-      const maxIdx = len - 1;
-      sIdx = Math.round((info.start / 100) * maxIdx);
-      eIdx = Math.round((info.end / 100) * maxIdx);
-    } else {
-      return;
-    }
-    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
-    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
-    sIdx = Math.max(0, sIdx);
-    eIdx = Math.min(len - 1, eIdx);
-
-    // NEW: 交互期间即时更新主窗顶栏预览（不改中枢与范围）
-    const arr = vm.candles.value || [];
-    previewStartStr.value = arr[sIdx]?.t || "";
-    previewEndStr.value = arr[eIdx]?.t || "";
-    previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
-    // NEW: 广播给主窗（若交互源是副窗/指标窗）
-    try {
-      window.dispatchEvent(
-        new CustomEvent("chan:preview-range", {
-          detail: {
-            code: vm.code.value,
-            freq: vm.freq.value,
-            sIdx,
-            eIdx,
-          },
-        })
-      );
-    } catch {}
-
-    // 会话锁：交互开始
-    renderHub.beginInteraction("main");
-
-    // 清空上一次 idle 计时器，启动新的（最后一次范围为准）
-    if (dzIdleTimer) {
-      clearTimeout(dzIdleTimer);
-      dzIdleTimer = null;
-    }
-    dzIdleTimer = setTimeout(() => {
-      try {
-        // 交互结束：会后承接一次
-        const bars_new = Math.max(1, eIdx - sIdx + 1);
-        const tsArr = (vm.candles.value || []).map((d) => Date.parse(d.t));
-        const anchorTs = Number.isFinite(tsArr[eIdx])
-          ? tsArr[eIdx]
-          : hub.getState().rightTs;
-
-        const st = hub.getState();
-        const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
-        const changedEIdx =
-          Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
-
-        if (changedBars || changedEIdx) {
-          // 会后承接：仅这一次 hub.execute，触发持久化与锚定
-          if (changedBars && changedEIdx) {
-            hub.execute("ScrollZoom", {
-              nextBars: bars_new,
-              nextRightTs: anchorTs,
-            });
-          } else if (changedBars) {
-            hub.execute("SetBarsManual", { nextBars: bars_new });
-          } else if (changedEIdx) {
-            hub.execute("Pan", { nextRightTs: anchorTs });
-          }
-        }
-      } finally {
-        // NEW: 仅在鼠标已抬起时才结束交互；鼠标未抬起保持拖移会话
-        if (!isMouseDown) {
-          renderHub.endInteraction("main");
-        }
-      }
-    }, dzIdleDelayMs);
-  } catch {}
-}
-
-/* REFACTORED: 一次性装配渲染（消费 hub 预构建的 option） */
-function doSinglePassRender(snapshot) {
-  try {
-    if (!chart || !snapshot) return;
-    const mySeq = ++renderSeq;
-
-    if (renderHub.isInteracting()) {
-      return;
-    }
-
-    const finalOption = snapshot.main?.option;
-    if (!finalOption) return;
-
-    // 程序化 dataZoom 守护
-    const initialRange = snapshot.main.range;
-    const guardSig = `${initialRange.startValue}:${initialRange.endValue}`;
-    progZoomGuard.active = true;
-    progZoomGuard.sig = guardSig;
-    progZoomGuard.ts = Date.now();
-    scheduleSetOption(finalOption, {
-      notMerge: true,
-      lazyUpdate: false,
-      silent: true,
-    });
-    lastAppliedRange = { s: initialRange.startValue, e: initialRange.endValue };
-    setTimeout(() => {
-      progZoomGuard.active = false;
-    }, 300);
-
-    // 更新顶栏预览文案
-    const sIdx = initialRange.startValue;
-    const eIdx = initialRange.endValue;
-    const arr = vm.candles.value || [];
-    previewStartStr.value = arr[sIdx]?.t || "";
-    previewEndStr.value = arr[eIdx]?.t || "";
-    previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
-  } catch (e) {
-    console.error("MainChartPanel render error:", e);
-  }
-}
-const previewStartStr = ref("");
-const previewEndStr = ref("");
-const previewBarsCount = ref(0);
-
-// >>> 改：formattedStart/End 调用统一 fmtShort（传入当前 freq），保持行为一致 <<<
-const formattedStart = computed(() => {
-  return (
-    (previewStartStr.value && fmtShort(previewStartStr.value)) ||
-    fmtShort(vm.visibleRange.value.startStr) ||
-    "-"
-  );
-});
-const formattedEnd = computed(() => {
-  return (
-    (previewEndStr.value && fmtShort(previewEndStr.value, vm.freq.value)) ||
-    fmtShort(vm.visibleRange.value.endStr, vm.freq.value) ||
-    "-"
-  );
-});
-const topBarsCount = computed(() => {
-  return Number(previewBarsCount.value || vm.meta.value?.view_rows || 0);
-});
-
-/* 预设点击与滚轮缩放（保持原逻辑） */
 function onClickPreset(preset) {
   try {
     const pkey = String(preset || "ALL");
@@ -719,203 +444,60 @@ function onClickPreset(preset) {
   } catch {}
 }
 
+// --- Inline Inputs Logic ---
+const activePresetKey = ref(hub.getState().presetKey || "ALL");
+hub.onChange((st) => {
+  activePresetKey.value = st.presetKey || "ALL";
+});
+
+const isMinuteFreq = computed(() => /m$/.test(String(vm.freq.value || "")));
+const startFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
+const endFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
+const barsStr = ref("");
+
+const previewStartStr = ref("");
+const previewEndStr = ref("");
+const previewBarsCount = ref(0);
+
+const topBarsCount = computed(() => {
+  return Number(previewBarsCount.value || vm.meta.value?.view_rows || 0);
+});
+
 function onPreviewRange(ev) {
   try {
     const d = ev?.detail || {};
-    // 仅在当前 code|freq 匹配时更新文案
-    if (
-      String(d.code || "") !== String(vm.code.value || "") ||
-      String(d.freq || "") !== String(vm.freq.value || "")
-    ) {
-      return;
-    }
+    if (String(d.code || "") !== String(vm.code.value || "") || String(d.freq || "") !== String(vm.freq.value || "")) return;
     const arr = vm.candles.value || [];
     const s = Math.max(0, Math.min(arr.length - 1, Number(d.sIdx)));
     const e = Math.max(0, Math.min(arr.length - 1, Number(d.eIdx)));
     previewStartStr.value = arr[s]?.t || "";
     previewEndStr.value = arr[e]?.t || "";
     previewBarsCount.value = Math.max(1, e - s + 1);
-    // 更新“原位输入框”的显示（基于预览值）
     fillInlineFieldsFromEffective();
   } catch {}
 }
 
-/* 生命周期 */
 onMounted(() => {
-  const el = host.value;
-  if (!el) return;
-  chart = echarts.init(el, null, {
-    renderer: "canvas",
-    width: el.clientWidth,
-    height: el.clientHeight,
-  });
-  chart.group = "ct-sync";
-  try {
-    echarts.connect("ct-sync");
-  } catch {}
-
-  // NEW: 监听画布与窗口鼠标抬起/按下，维护拖移会话不被超时中断
-  try {
-    const zr = chart.getZr();
-    zr.on("mousedown", zrMouseDownHandler);
-    zr.on("mouseup", zrMouseUpHandler);
-    window.addEventListener("mouseup", winMouseUpHandler);
-  } catch {}
-
-  chart.on("updateAxisPointer", (params) => {
-    try {
-      const list = vm.candles.value || [];
-      const len = list.length;
-      if (!len) return;
-
-      let idx = -1;
-
-      const sd = Array.isArray(params?.seriesData)
-        ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
-        : null;
-      if (sd && Number.isFinite(sd.dataIndex)) {
-        idx = sd.dataIndex;
-      } else {
-        const xInfo = Array.isArray(params?.axesInfo)
-          ? params.axesInfo.find((ai) => ai && ai.axisDim === "x")
-          : null;
-        const v = xInfo?.value;
-
-        if (Number.isFinite(v)) {
-          idx = Math.max(0, Math.min(len - 1, Number(v)));
-        } else if (typeof v === "string" && v) {
-          const dates = list.map((d) => d.t);
-          idx = dates.indexOf(v);
-        } else {
-          const b0 = Array.isArray(params?.batch)
-            ? params.batch.find((b) => Number.isFinite(b?.dataIndex))
-            : null;
-          if (b0 && Number.isFinite(b0.dataIndex)) {
-            idx = Math.max(0, Math.min(len - 1, Number(b0.dataIndex)));
-          }
-        }
-      }
-
-      if (idx < 0 || idx >= len) return;
-      const tIso = list[idx]?.t;
-      const tsVal = tIso ? Date.parse(tIso) : NaN;
-      if (Number.isFinite(tsVal)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
-      }
-    } catch {}
-  });
-
-  // 绑定 dataZoom：含“程序化守护 + 有效变化判定”
-  chart.on("dataZoom", onDataZoom); // 会话锁 + idle-commit，会后承接到中枢
-
-  // NEW: 订阅全局预览事件（来自副窗/指标窗的 dataZoom）
-  try {
-    window.addEventListener("chan:preview-range", onPreviewRange);
-  } catch {}
-
-  try {
-    ro = new ResizeObserver(() => {
-      safeResize();
-    });
-    ro.observe(el);
-  } catch {}
-  requestAnimationFrame(() => {
-    safeResize();
-  });
-
-  // —— 订阅 useViewRenderHub：移到 chart.init 完成后（必要调序    —— //
-  // 说明：避免首帧快照在 chart 未初始化时被丢弃，导致不渲染。
-  unsubId = renderHub.onRender((snapshot) => {
-    doSinglePassRender(snapshot);
-  });
-
-  // 初始化“原位输入”的显示
+  window.addEventListener("chan:preview-range", onPreviewRange);
   fillInlineFieldsFromEffective();
+  // 订阅 hub 变化以更新输入框
+  const subId = hub.onChange(syncFromHub);
+  onBeforeUnmount(() => hub.offChange(subId));
 });
 
 onBeforeUnmount(() => {
-  if (unsubId != null) {
-    renderHub.offRender(unsubId);
-    unsubId = null;
-  }
-  // NEW: 解除订阅
-  try {
-    window.removeEventListener("chan:preview-range", onPreviewRange);
-  } catch {}
-
-  renderHub.endInteraction("main");
-  try {
-    ro && ro.disconnect();
-  } catch {}
-  ro = null;
-  try {
-    chart && chart.dispose();
-  } catch {}
-  chart = null;
-  // ADD-BEGIN [组件卸载时取消权威订阅]
-  try {
-    hub.offChange(hubSubForInline);
-  } catch {}
-  // NEW: 解除鼠标事件监听
-  try {
-    const zr = chart && chart.getZr ? chart.getZr() : null;
-    zr && zr.off && zr.off("mousedown", zrMouseDownHandler);
-    zr && zr.off && zr.off("mouseup", zrMouseUpHandler);
-    window.removeEventListener("mouseup", winMouseUpHandler);
-  } catch {}
-});
-
-/* 标题/刷新徽标更新 */
-watch(
-  () => vm.meta.value,
-  () => {
-    updateHeaderFromCurrent();
-    refreshedAt.value = new Date();
-    showRefreshed.value = true;
-    setTimeout(() => {
-      showRefreshed.value = false;
-    }, 2000);
-    // 元信息更新后，同步一次“原位输入”的显示
-    fillInlineFieldsFromEffective();
-  },
-  { deep: true }
-);
-
-function updateHeaderFromCurrent() {
-  const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
-  const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
-  let name = "";
-  try {
-    name = findBySymbol(sym)?.name?.trim() || "";
-  } catch {}
-  displayHeader.value = { name, code: sym, freq: frq };
-}
-
-/* 原位输入：起止日期/时间与 Bars */
-const isMinuteFreq = computed(() => /m$/.test(String(vm.freq.value || "")));
-
-// 原位输入的字段（起/止）
-const startFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
-const endFields = reactive({ Y: "", M: "", D: "", h: "", m: "" });
-
-// Bars 原位输入
-const barsStr = ref("");
-
-// 权威订阅：任何渠道变更 bars/rightTs 后，起止与 Bars 立即刷新显示
-const hubSubForInline = hub.onChange((st) => {
-  syncFromHub(st);
+  window.removeEventListener("chan:preview-range", onPreviewRange);
+  renderHub.unregisterChart('main');
 });
 
 function syncFromHub(st) {
   try {
     const arr = vm.candles.value || [];
-    const len = arr.length;
-    if (!len) return;
-    // 以 hub.rightTs 定位 eIdx；若为空退到最右
-    let eIdx = len - 1;
+    if (!arr.length) return;
+    let eIdx = arr.length - 1;
     if (Number.isFinite(+st.rightTs)) {
       const rt = +st.rightTs;
-      for (let i = len - 1; i >= 0; i--) {
+      for (let i = arr.length - 1; i >= 0; i--) {
         const t = Date.parse(arr[i].t);
         if (Number.isFinite(t) && t <= rt) {
           eIdx = i;
@@ -923,84 +505,53 @@ function syncFromHub(st) {
         }
       }
     }
-    // 以 hub.barsCount 推 sIdx（左端触底补齐）
     const bars = Math.max(1, Number(st.barsCount || 1));
     let sIdx = Math.max(0, eIdx - bars + 1);
     if (sIdx === 0 && eIdx - sIdx + 1 < bars) {
-      eIdx = Math.min(len - 1, bars - 1);
+      eIdx = Math.min(arr.length - 1, bars - 1);
     }
-    // 更新预览（驱动现有显示链路）
     previewStartStr.value = arr[sIdx]?.t || "";
     previewEndStr.value = arr[eIdx]?.t || "";
     previewBarsCount.value = Math.max(1, eIdx - sIdx + 1);
-    // 同步输入框与 Bars 文案
     fillInlineFieldsFromEffective();
     barsStr.value = String(Math.max(1, Number(st.barsCount || 1)));
   } catch {}
 }
 
-// 从“当前有效显示（预览优先，其次 vm.visibleRange）”填充各输入框
 function fillInlineFieldsFromEffective() {
   try {
-    const startIso =
-      (previewStartStr.value && previewStartStr.value) ||
-      vm.visibleRange.value.startStr ||
-      "";
-    const endIso =
-      (previewEndStr.value && previewEndStr.value) ||
-      vm.visibleRange.value.endStr ||
-      "";
+    const startIso = previewStartStr.value || vm.visibleRange.value.startStr || "";
+    const endIso = previewEndStr.value || vm.visibleRange.value.endStr || "";
     if (!startIso || !endIso) return;
-    const ds = new Date(startIso);
-    const de = new Date(endIso);
+    const ds = new Date(startIso), de = new Date(endIso);
     if (Number.isNaN(ds.getTime()) || Number.isNaN(de.getTime())) return;
-
-    // 日族：仅年月日
     startFields.Y = String(ds.getFullYear());
     startFields.M = pad2(ds.getMonth() + 1);
     startFields.D = pad2(ds.getDate());
-
     endFields.Y = String(de.getFullYear());
     endFields.M = pad2(de.getMonth() + 1);
     endFields.D = pad2(de.getDate());
-
-    // 分钟族：附加时分
     if (isMinuteFreq.value) {
       startFields.h = pad2(ds.getHours());
       startFields.m = pad2(ds.getMinutes());
       endFields.h = pad2(de.getHours());
       endFields.m = pad2(de.getMinutes());
     } else {
-      startFields.h = "";
-      startFields.m = "";
-      endFields.h = "";
-      endFields.m = "";
+      startFields.h = ""; startFields.m = ""; endFields.h = ""; endFields.m = "";
     }
-
-    // Bars 输入框显示（以当前可见 view_rows）
-    barsStr.value = String(
-      Math.max(
-        1,
-        Number(previewBarsCount.value || vm.meta.value?.view_rows || 0)
-      )
-    );
+    barsStr.value = String(Math.max(1, Number(previewBarsCount.value || vm.meta.value?.view_rows || 0)));
   } catch {}
 }
 
-// ADD-BEGIN [两位数输入与滚轮仅改值（阻止页面滚动）]
-// 说明：月/日/时/分始终显示两位；滚轮增减值仅改当前输入，不滚动页面。
 function onTwoDigitInput(group, key, ev, min, max) {
   try {
     const raw = String(ev?.target?.value ?? "");
     const n = parseInt(raw.replace(/[^\d]/g, ""), 10);
     if (Number.isNaN(n)) return;
     const v = Math.max(min, Math.min(max, n));
-    const pad2v = pad2(v); // >>> 改：使用统一 pad2 <<<
-    if (group === "start") {
-      startFields[key] = pad2v;
-    } else {
-      endFields[key] = pad2v;
-    }
+    const pad2v = pad2(v);
+    if (group === "start") startFields[key] = pad2v;
+    else endFields[key] = pad2v;
   } catch {}
 }
 
@@ -1011,11 +562,7 @@ function onWheelAdjust(group, key, e, min, max) {
     const delta = e.deltaY < 0 ? +1 : -1;
     let next = Number.isFinite(curr) ? curr + delta : delta > 0 ? min : max;
     next = Math.max(min, Math.min(max, next));
-    if (key === "Y") {
-      tgt[key] = String(next);
-    } else {
-      tgt[key] = String(next).padStart(2, "0");
-    }
+    tgt[key] = key === "Y" ? String(next) : pad2(next);
   } catch {}
 }
 
@@ -1027,30 +574,16 @@ function onBarsWheel(e) {
   barsStr.value = String(next);
 }
 
-// 将“日族输入”应用为数据窗口（失焦触发）
 function applyInlineRangeDaily() {
   try {
-    const ys = parseInt(startFields.Y, 10),
-      ms = parseInt(startFields.M, 10),
-      ds = parseInt(startFields.D, 10);
-    const ye = parseInt(endFields.Y, 10),
-      me = parseInt(endFields.M, 10),
-      de = parseInt(endFields.D, 10);
+    const ys = parseInt(startFields.Y, 10), ms = parseInt(startFields.M, 10), ds = parseInt(startFields.D, 10);
+    const ye = parseInt(endFields.Y, 10), me = parseInt(endFields.M, 10), de = parseInt(endFields.D, 10);
     if (![ys, ms, ds, ye, me, de].every(Number.isFinite)) return;
-
-    // 构造 YYYY-MM-DD 文本
-    const toYMD = (y, m, d) =>
-      `${String(y).padStart(4, "0")}-${pad2(m)}-${pad2(d)}`;
-
-    const sY = toYMD(ys, ms, ds);
-    const eY = toYMD(ye, me, de);
-
-    // 从 ALL candles 查找索引（与原 applyManualRange 的逻辑一致）
+    const toYMD = (y, m, d) => `${String(y).padStart(4, "0")}-${pad2(m)}-${pad2(d)}`;
+    const sY = toYMD(ys, ms, ds), eY = toYMD(ye, me, de);
     const arr = vm.candles.value || [];
     if (!arr.length) return;
-
-    let sIdx = -1,
-      eIdx = -1;
+    let sIdx = -1, eIdx = -1;
     for (let i = 0; i < arr.length; i++) {
       const ymd = String(arr[i].t || "").slice(0, 10);
       if (sIdx < 0 && ymd >= sY) sIdx = i;
@@ -1058,51 +591,26 @@ function applyInlineRangeDaily() {
     }
     if (sIdx < 0) sIdx = 0;
     if (eIdx < 0) eIdx = arr.length - 1;
-    if (sIdx > eIdx) {
-      const t = sIdx;
-      sIdx = eIdx;
-      eIdx = t;
-    }
-
+    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     const nextBars = Math.max(1, eIdx - sIdx + 1);
     const anchorTs = Date.parse(arr[eIdx]?.t || "");
     if (!Number.isFinite(anchorTs)) return;
-
     hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
   } catch {}
 }
 
-// 将“分钟族输入”应用为数据窗口（失焦触发）
 function applyInlineRangeMinute() {
   try {
-    const ys = parseInt(startFields.Y, 10),
-      ms = parseInt(startFields.M, 10),
-      ds = parseInt(startFields.D, 10),
-      hs = parseInt(startFields.h, 10),
-      mins = parseInt(startFields.m, 10);
-
-    const ye = parseInt(endFields.Y, 10),
-      me = parseInt(endFields.M, 10),
-      de = parseInt(endFields.D, 10),
-      he = parseInt(endFields.h, 10),
-      mine = parseInt(endFields.m, 10);
-
-    if (![ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite))
-      return;
-
-    // 构造本地时间的 Date（浏览器本地时区）；与 ECharts/前端解析保持一致
-    const startDt = new Date(ys, ms - 1, ds, hs, mins, 0, 0);
-    const endDt = new Date(ye, me - 1, de, he, mine, 0, 0);
-    const msStart = startDt.getTime();
-    const msEnd = endDt.getTime();
+    const ys = parseInt(startFields.Y, 10), ms = parseInt(startFields.M, 10), ds = parseInt(startFields.D, 10), hs = parseInt(startFields.h, 10), mins = parseInt(startFields.m, 10);
+    const ye = parseInt(endFields.Y, 10), me = parseInt(endFields.M, 10), de = parseInt(endFields.D, 10), he = parseInt(endFields.h, 10), mine = parseInt(endFields.m, 10);
+    if (![ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite)) return;
+    const startDt = new Date(ys, ms - 1, ds, hs, mins, 0, 0), endDt = new Date(ye, me - 1, de, he, mine, 0, 0);
+    const msStart = startDt.getTime(), msEnd = endDt.getTime();
     if (!Number.isFinite(msStart) || !Number.isFinite(msEnd)) return;
-
     const arr = vm.candles.value || [];
     if (!arr.length) return;
-
     const tsArr = arr.map((d) => Date.parse(d.t));
-    let sIdx = -1,
-      eIdx = -1;
+    let sIdx = -1, eIdx = -1;
     for (let i = 0; i < tsArr.length; i++) {
       const t = tsArr[i];
       if (!Number.isFinite(t)) continue;
@@ -1111,21 +619,14 @@ function applyInlineRangeMinute() {
     }
     if (sIdx < 0) sIdx = 0;
     if (eIdx < 0) eIdx = tsArr.length - 1;
-    if (sIdx > eIdx) {
-      const t = sIdx;
-      sIdx = eIdx;
-      eIdx = t;
-    }
-
+    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
     const nextBars = Math.max(1, eIdx - sIdx + 1);
     const anchorTs = tsArr[eIdx];
     if (!Number.isFinite(anchorTs)) return;
-
     hub.execute("SetDatesManual", { nextBars, nextRightTs: anchorTs });
   } catch {}
 }
 
-// Bars 原位输入（失焦应用，行为与原高级面板一致）
 function applyBarsInline() {
   try {
     const n = Math.max(1, parseInt(String(barsStr.value || "1"), 10));

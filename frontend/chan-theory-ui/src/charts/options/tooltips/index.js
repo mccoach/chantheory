@@ -1,6 +1,6 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\tooltips\index.js
 // ==============================
-// 说明：统一 tooltip 构造（单一模��）
+// 说明：统一 tooltip 构造（单一模  ）
 // - 模板：首行（时间 + 可选附加） + 多条信息行（左：颜色圆点，可缺省；右：label：value）
 // - 导出：makeMainTooltipFormatter / makeVolumeTooltipFormatter / makeMacdTooltipFormatter
 //         makeBollTooltipFormatter / makeKdjRsiTooltipFormatter

@@ -20,9 +20,9 @@
 </template>
 
 <script setup>
-import { computed, h, inject } from "vue";
+import { computed, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
-import UiNumberBox from "@/components/ui/UiNumberBox.vue";
+import NumberSpinner from "@/components/ui/NumberSpinner.vue";
 import {
   DEFAULT_VOL_SETTINGS,
   UI_LIMITS,
@@ -162,7 +162,7 @@ function onRowReset(row) {
 // 使用通用渲染器
 const { renderControl } = useSettingsRenderer({
   barPercent: {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: volDraft.volBar.barPercent,
       min: UI_LIMITS.barWidthPercent.min,
@@ -195,7 +195,7 @@ const { renderControl } = useSettingsRenderer({
       [
         `mavol-width-${mk}`,
         {
-          component: UiNumberBox,
+          component: NumberSpinner,
           getProps: () => ({
             modelValue: volDraft.mavolStyles[mk].width,
             min: UI_LIMITS.lineWidth.min,
@@ -235,7 +235,7 @@ const { renderControl } = useSettingsRenderer({
       [
         `mavol-period-${mk}`,
         {
-          component: UiNumberBox,
+          component: NumberSpinner,
           getProps: () => ({
             modelValue: volDraft.mavolStyles[mk].period,
             min: UI_LIMITS.positiveInteger.min,
@@ -268,7 +268,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "pump-threshold": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: volDraft.markerPump.threshold,
       min: UI_LIMITS.nonNegativeFloat.min,
@@ -298,7 +298,7 @@ const { renderControl } = useSettingsRenderer({
     }),
   },
   "dump-threshold": {
-    component: UiNumberBox,
+    component: NumberSpinner,
     getProps: () => ({
       modelValue: volDraft.markerDump.threshold,
       min: UI_LIMITS.nonNegativeFloat.min,

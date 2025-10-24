@@ -1,4 +1,5 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\IndicatorPanel.vue -->
+
 <!-- ============================== -->
 <!-- 合并版 IndicatorPanel：既可渲染 成交量/成交额，也可渲染 MACD/KDJ/RSI/BOLL/OFF
      - FIX: 移除本地 setOption 调用，完全依赖渲染中枢的快照进行渲染。
@@ -94,71 +95,77 @@
 <script setup>
 import {
   inject,
-  onMounted,
   onBeforeUnmount,
   ref,
   watch,
-  nextTick,
   computed,
 } from "vue";
-import * as echarts from "echarts";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";
-import { useUserSettings } from "@/composables/useUserSettings";
-import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { openIndicatorSettings } from "@/settings/indicatorShell";
+import { useChartPanel } from "@/composables/useChartPanel"; // NEW: Import the common panel hook
 
-// props / emits
+// --- props / emits (No changes) ---
 const props = defineProps({
   id: { type: [String, Number], required: true },
   kind: { type: String, default: "MACD" },
 });
 const emit = defineEmits(["update:kind", "close", "dragstart", "dragend"]);
 
-// 注入
+// --- Injected Services ---
 const vm = inject("marketView");
-const hub = useViewCommandHub();
-const renderHub = useViewRenderHub();
-const settings = useUserSettings();
-const { findBySymbol } = useSymbolIndex();
+const hub = inject("viewCommandHub");
+const renderHub = inject("renderHub");
 const dialogManager = inject("dialogManager");
 
-// 渲染序号守护
-let renderSeq = 0;
-function isStale(seq) {
-  return seq !== renderSeq;
-}
-
-// DOM / 实例
-const wrap = ref(null);
-const host = ref(null);
-let chart = null;
-let ro = null;
-
-// 悬浮状态上报
-function onMouseEnter() {
-  renderHub.setHoveredPanel(`indicator:${props.id}`);
-}
-function onMouseLeave() {
-  renderHub.setHoveredPanel(null);
-}
-
-// 尺寸安全 resize
-function safeResize() {
-  if (!chart || !host.value) return;
-  const seq = renderSeq;
-  requestAnimationFrame(() => {
-    if (isStale(seq)) return;
+// --- NEW: Use the common chart panel logic ---
+const panelKey = computed(() => `indicator:${props.id}`);
+const {
+  wrapRef: wrap,
+  hostRef: host,
+  displayTitle,
+  onResizeHandleDown,
+  onMouseEnter,
+  onMouseLeave,
+} = useChartPanel({
+  panelKey,
+  vm,
+  hub,
+  renderHub,
+  onChartReady: (instance) => {
+    // 指标图特有的初始化逻辑
     try {
-      chart.resize({
-        width: host.value.clientWidth,
-        height: host.value.clientHeight,
+      renderHub.registerChart(panelKey.value, instance);
+      host.value?.addEventListener("mouseenter", () => {
+        renderHub.setActivePanel(panelKey.value);
       });
+      
+      // FIX: Unified render subscription logic
+      const unsubId = renderHub.onRender((snapshot) => {
+        try {
+          if (!instance) return;
+          const kind = String(kindLocal.value || "").toUpperCase();
+          if (kind === "OFF") {
+            instance.clear();
+            return;
+          }
+          const option = snapshot.indicatorOptions?.[props.id];
+          if (option) {
+            // Ensure clean state on each render
+            instance.setOption(option, { notMerge: true, silent: true });
+          }
+        } catch (e) {
+          console.error(`IndicatorPanel[${props.id}] onRender error:`, e);
+        }
+      });
+      onBeforeUnmount(() => renderHub.offRender(unsubId));
     } catch {}
-  });
-}
+  }
+});
 
-// 选择种类
+// --- Component-Specific Logic ---
+
+// Indicator Kind Selector
 const kindLocal = ref(props.kind.toUpperCase());
 watch(
   () => props.kind,
@@ -167,295 +174,18 @@ watch(
   }
 );
 function onKindChange() {
-  // FIX: 只 emit 更新，不执行任何本地 setOption
   emit("update:kind", kindLocal.value);
 }
 
-// 顶栏标题
-const displayHeader = ref({ name: "", code: "", freq: "" });
-const displayTitle = computed(() => {
-  const n = displayHeader.value.name || "",
-    c = displayHeader.value.code || vm.code.value || "",
-    f = displayHeader.value.freq || vm.freq.value || "";
-  const src = (vm.meta.value?.source || "").trim(),
-    srcLabel = src ? `（${src}）` : "";
-  const adjText =
-    { none: "", qfq: " 前复权", hfq: " 后复权" }[
-      String(vm.adjust.value || "none")
-    ] || "";
-  return n
-    ? `${n}（${c}）：${f}${srcLabel}${adjText}`
-    : `${c}：${f}${srcLabel}${adjText}`;
-});
-function updateHeaderFromCurrent() {
-  const sym = (vm.meta.value?.symbol || vm.code.value || "").trim();
-  const frq = String(vm.meta.value?.freq || vm.freq.value || "").trim();
-  let name = "";
-  try {
-    name = findBySymbol(sym)?.name?.trim() || "";
-  } catch {}
-  displayHeader.value = { name, code: sym, freq: frq };
-}
-
-// 设置窗
+// Settings Dialog
 function openSettingsDialog() {
   openIndicatorSettings(dialogManager, { initialKind: kindLocal.value });
 }
 
-// dataZoom：会后承接
-let dzIdleTimer = null;
-const dzIdleDelayMs = 180;
-
-let isMouseDown = false;
-let zrMouseDownHandler = () => {
-  isMouseDown = true;
-};
-let zrMouseUpHandler = () => {
-  isMouseDown = false;
-  try {
-    renderHub.endInteraction(`indicator:${props.id}`);
-  } catch {}
-};
-let winMouseUpHandler = () => {
-  isMouseDown = false;
-  try {
-    renderHub.endInteraction(`indicator:${props.id}`);
-  } catch {}
-};
-
-function onDataZoom(params) {
-  try {
-    const isActive = renderHub.getActiveChart?.() === chart;
-    if (!isActive && !isMouseDown) return;
-
-    const info = (params && params.batch && params.batch[0]) || params || {};
-    const arr = vm.candles.value || [];
-    const len = arr.length;
-    if (!len) return;
-    let sIdx, eIdx;
-    if (
-      typeof info.startValue !== "undefined" &&
-      typeof info.endValue !== "undefined"
-    ) {
-      sIdx = Number(info.startValue);
-      eIdx = Number(info.endValue);
-    } else if (typeof info.start === "number" && typeof info.end === "number") {
-      const maxIdx = len - 1;
-      sIdx = Math.round((info.start / 100) * maxIdx);
-      eIdx = Math.round((info.end / 100) * maxIdx);
-    } else return;
-    if (!Number.isFinite(sIdx) || !Number.isFinite(eIdx)) return;
-    if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
-    sIdx = Math.max(0, sIdx);
-    eIdx = Math.min(len - 1, eIdx);
-
-    try {
-      window.dispatchEvent(
-        new CustomEvent("chan:preview-range", {
-          detail: {
-            code: vm.code.value,
-            freq: vm.freq.value,
-            sIdx,
-            eIdx,
-          },
-        })
-      );
-    } catch {}
-
-    renderHub.beginInteraction(`indicator:${props.id}`);
-    if (dzIdleTimer) {
-      clearTimeout(dzIdleTimer);
-      dzIdleTimer = null;
-    }
-    dzIdleTimer = setTimeout(() => {
-      try {
-        const bars_new = Math.max(1, eIdx - sIdx + 1);
-        const tsArr = arr.map((d) => Date.parse(d.t));
-        const anchorTs = Number.isFinite(tsArr[eIdx])
-          ? tsArr[eIdx]
-          : hub.getState().rightTs;
-        const st = hub.getState();
-        const changedBars = bars_new !== Math.max(1, Number(st.barsCount || 1));
-        const changedEIdx =
-          Number.isFinite(tsArr[eIdx]) && tsArr[eIdx] !== st.rightTs;
-
-        if (changedBars || changedEIdx) {
-          if (changedBars && changedEIdx) {
-            hub.execute("ScrollZoom", {
-              nextBars: bars_new,
-              nextRightTs: anchorTs,
-            });
-          } else if (changedBars) {
-            hub.execute("SetBarsManual", { nextBars: bars_new });
-          } else if (changedEIdx) {
-            hub.execute("Pan", { nextRightTs: anchorTs });
-          }
-        }
-      } finally {
-        if (!isMouseDown) {
-          renderHub.endInteraction(`indicator:${props.id}`);
-        }
-      }
-    }, dzIdleDelayMs);
-  } catch {}
-}
-
-onMounted(async () => {
-  const el = host.value;
-  if (!el) return;
-  chart = echarts.init(el, null, {
-    renderer: "canvas",
-    width: el.clientWidth,
-    height: el.clientHeight,
-  });
-  chart.group = "ct-sync";
-  try {
-    echarts.connect("ct-sync");
-  } catch {}
-
-  const thisPanelKey = `indicator:${props.id}`;
-  try {
-    renderHub.registerChart(thisPanelKey, chart);
-    el.addEventListener("mouseenter", () => {
-      renderHub.setActivePanel(thisPanelKey);
-    });
-  } catch {}
-
-  try {
-    const zr = chart.getZr();
-    zr.on("mousedown", zrMouseDownHandler);
-    zr.on("mouseup", zrMouseUpHandler);
-    window.addEventListener("mouseup", winMouseUpHandler);
-  } catch {}
-
-  chart.on("updateAxisPointer", (params) => {
-    try {
-      const list = vm.candles.value || [];
-      const len = list.length;
-      if (!len) return;
-
-      let idx = -1;
-
-      // 1) 优先使用 seriesData 的 dataIndex（最可靠）
-      const sd = Array.isArray(params?.seriesData)
-        ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
-        : null;
-      if (sd && Number.isFinite(sd.dataIndex)) {
-        idx = sd.dataIndex;
-      } else {
-        // 2) 回退：明确寻找 x 轴信息（axisDim === 'x'），严禁使用 axesInfo[0]
-        const xInfo = Array.isArray(params?.axesInfo)
-          ? params.axesInfo.find((ai) => ai && ai.axisDim === "x")
-          : null;
-        const v = xInfo?.value;
-
-        if (Number.isFinite(v)) {
-          // 某些情况下 value 就是索引
-          idx = Math.max(0, Math.min(len - 1, Number(v)));
-        } else if (typeof v === "string" && v) {
-          // 类目轴返回日期字符串，按时间查索引
-          const dates = list.map((d) => d.t);
-          idx = dates.indexOf(v);
-        } else {
-          // 3) 再兜底：尝试 batch 内的 dataIndex（部分版本/场景下可用）
-          const b0 = Array.isArray(params?.batch)
-            ? params.batch.find((b) => Number.isFinite(b?.dataIndex))
-            : null;
-          if (b0 && Number.isFinite(b0.dataIndex)) {
-            idx = Math.max(0, Math.min(len - 1, Number(b0.dataIndex)));
-          }
-        }
-      }
-
-      if (idx < 0 || idx >= len) return;
-      const tIso = list[idx]?.t;
-      const tsVal = tIso ? Date.parse(tIso) : NaN;
-      if (Number.isFinite(tsVal)) {
-        settings.setLastFocusTs(vm.code.value, vm.freq.value, tsVal);
-      }
-    } catch {}
-  });
-
-  chart.on("dataZoom", onDataZoom);
-
-  try {
-    ro = new ResizeObserver(() => {
-      safeResize();
-    });
-    ro.observe(el);
-  } catch {}
-  requestAnimationFrame(() => {
-    safeResize();
-  });
-
-  updateHeaderFromCurrent();
-});
-
-// 订阅上游渲染
-const unsubId = renderHub.onRender((snapshot) => {
-  try {
-    if (!chart) return;
-    const mySeq = ++renderSeq;
-
-    const kind = String(kindLocal.value || "").toUpperCase();
-    if (kind === "OFF") {
-      chart.clear();
-      return;
-    }
-
-    const notMerge = !renderHub.isInteracting();
-
-    // FIX: 从快照中查找为本面板预先生成的 option
-    const option = snapshot.indicatorOptions?.[props.id];
-    if (!option) return;
-
-    chart.setOption(option, { notMerge, silent: true });
-  } catch (e) {
-    console.error(`IndicatorPanel[${props.id}] onRender error:`, e);
-  }
-});
-
-onBeforeUnmount(() => {
-  renderHub.offRender(unsubId);
-  const thisPanelKey = `indicator:${props.id}`;
-
-  if (ro) {
-    try {
-      ro.disconnect();
-    } catch {}
-    ro = null;
-  }
-
-  if (chart) {
-    try {
-      const zr = chart.getZr ? chart.getZr() : null;
-      zr && zr.off && zr.off("mousedown", zrMouseDownHandler);
-      zr && zr.off && zr.off("mouseup", zrMouseUpHandler);
-      chart.dispose();
-    } catch {}
-    chart = null;
-  }
-  try {
-    renderHub.unregisterChart(thisPanelKey);
-  } catch {}
-
-  window.removeEventListener("mouseup", winMouseUpHandler);
-});
-
-// 监听元信息变化以刷新左上标题
-watch(
-  () => vm.meta.value,
-  async () => {
-    await nextTick();
-    updateHeaderFromCurrent();
-  },
-  { deep: true }
-);
-
-// 右侧拖动把手
+// Drag & Drop Sorting
 function onDragHandleStart(e) {
   try {
-    e.dataTransfer && e.dataTransfer.setData("text/plain", String(props.id));
+    e.dataTransfer?.setData("text/plain", String(props.id));
   } catch {}
   emit("dragstart");
 }
@@ -463,29 +193,9 @@ function onDragHandleEnd() {
   emit("dragend");
 }
 
-// 底部高度拖拽
-let dragging = false,
-  startY = 0,
-  startH = 0;
-function onResizeHandleDown(_pos, e) {
-  dragging = true;
-  startY = e.clientY;
-  startH = wrap.value?.clientHeight || 0;
-  window.addEventListener("mousemove", onResizeHandleMove);
-  window.addEventListener("mouseup", onResizeHandleUp, { once: true });
-}
-function onResizeHandleMove(e) {
-  if (!dragging) return;
-  const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
-  if (wrap.value) {
-    wrap.value.style.height = `${Math.floor(next)}px`;
-    safeResize();
-  }
-}
-function onResizeHandleUp() {
-  dragging = false;
-  window.removeEventListener("mousemove", onResizeHandleMove);
-}
+onBeforeUnmount(() => {
+  renderHub.unregisterChart(panelKey.value);
+});
 </script>
 
 <style scoped>

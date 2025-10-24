@@ -6,21 +6,9 @@
 
 import { reactive } from "vue";
 import { DEFAULT_KLINE_STYLE, DEFAULT_MA_CONFIGS, DEFAULT_VOL_SETTINGS } from "@/constants";
+import { deepMerge } from "@/utils/objectUtils"; // NEW
 
-// 递归深度合并工具，用于确保本地的深层配置能正确覆盖默认值
-function deepMerge(target, source) {
-    const output = { ...target };
-    if (target && typeof target === 'object' && source && typeof source === 'object') {
-        Object.keys(source).forEach(key => {
-            if (source[key] && typeof source[key] === 'object' && key in target) {
-                output[key] = deepMerge(target[key], source[key]);
-            } else {
-                output[key] = source[key];
-            }
-        });
-    }
-    return output;
-}
+// 递归深度合并工具，用于确保本地的深层配置能正确覆盖默认值 (REMOVED)
 
 export function createChartDisplayState(localData = {}) {
   const state = reactive({

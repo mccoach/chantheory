@@ -14,7 +14,6 @@
       inputmode="numeric"
       :pattern="integer ? '^-?\\d*$' : '^-?\\d*(?:\\.\\d*)?$'"
       v-select-all
-      @focus="onFocus"
       @input="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
@@ -156,9 +155,6 @@ function onBlur() {
   const n = normalizeNumber(props.modelValue);
   if (n != null) emit("update:modelValue", n);
   emit("blur");
-}
-function onFocus() {
-  try { setTimeout(() => inp.value && inp.value.select(), 0); } catch {}
 }
 </script>
 

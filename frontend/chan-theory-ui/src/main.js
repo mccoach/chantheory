@@ -21,4 +21,4 @@ app.use(InteractionPlugin, { userOverrides: settings.preferences.hotkeyOverrides
 // 全局注册选择指令：模板中统一使用 v-select-all
 app.directive("select-all", vSelectAll);
 
-app.mount("#app"); // 挂载git 
+app.mount("#app"); // 挂载git

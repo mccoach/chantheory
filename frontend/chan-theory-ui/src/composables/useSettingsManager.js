@@ -7,17 +7,12 @@
 //   * settingsKey: 在 useUserSettings 中的存储键。
 //   * defaultConfig: 来自 constants 的出厂默认配置。
 //   * mergeFn (可选): 自定义合并函数，用于深度合并加载的设置。
-// - 返回：{ draft, save, reset }
-//   * draft: 一个 reactive 对象，供 UI 面板直接绑定。
-//   * save: 将草稿写回 useUserSettings。
-//   * reset: 将草稿恢复到出厂默认值。
+// - REFACTORED: 根因修复，使用 keyDomainMap 替代硬编码的 if/else，使设置读取更健壮和可扩展。
 // ==============================
 
 import { reactive } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 
-// 将 settingsKey (camelCase) 转换为 useUserSettings 中的 setter 方法名 (PascalCase)
-// e.g., 'klineStyle' -> 'setKlineStyle'
 function keyToSetterName(key) {
   if (!key) return null;
   return `set${key.charAt(0).toUpperCase()}${key.slice(1)}`;
@@ -28,13 +23,39 @@ export function useSettingsManager({ settingsKey, defaultConfig, mergeFn }) {
 
   // 1. 创建草稿对象
   // 初始状态：从 useUserSettings 加载，并与默认值合并
-  const localConfig = settings[settingsKey]?.value ?? {};
+  // ===== BEGIN REFACTORED BLOCK =====
+  function readCurrentConfig() {
+    try {
+      // NEW: 使用映射表替代硬编码的 if/else，使逻辑更清晰、可扩展
+      const keyDomainMap = {
+        klineStyle: "chartDisplay",
+        maConfigs: "chartDisplay",
+        volSettings: "chartDisplay",
+        chanSettings: "chanTheory",
+        fractalSettings: "chanTheory",
+      };
+      const domain = keyDomainMap[settingsKey];
+      if (domain && settings[domain]) {
+        return settings[domain][settingsKey] ?? {};
+      }
+      // 兜底：如果未来有新的领域或键，记录警告并返回空对象
+      console.warn(`useSettingsManager: Unknown or unmapped settingsKey '${settingsKey}'. Falling back to empty config.`);
+      return {};
+    } catch (e) {
+      console.error(`useSettingsManager: Failed to read config for key '${settingsKey}'`, e);
+      return {};
+    }
+  }
+
+  // 初始加载：从 useUserSettings 的正确路径读取
+  const localConfig = readCurrentConfig();
   const mergedConfig =
     typeof mergeFn === "function"
       ? mergeFn(localConfig)
       : { ...defaultConfig, ...localConfig };
 
   const draft = reactive(JSON.parse(JSON.stringify(mergedConfig)));
+  // ---- 结束重构区域 ----
 
   // 2. 保存方法
   const save = () => {

@@ -64,7 +64,7 @@
 </template>
 
 <script setup>
-import { reactive, watch, onMounted, ref, inject } from "vue";
+import { reactive, watch, onMounted, ref } from "vue";
 import IndicatorPanel from "./tech/IndicatorPanel.vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewRenderHub } from "@/composables/useViewRenderHub";

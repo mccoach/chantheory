@@ -57,9 +57,7 @@ import ModalDialog from "@/components/ui/ModalDialog.vue";
 
 import { useUserSettings } from "./composables/useUserSettings";
 import { useMarketView } from "./composables/useMarketView";
-import { useExportController } from "./composables/useExportController";
 import { useDialogManager } from "./composables/useDialogManager";
-import { buildExportFilename } from "./utils/download";
 import { waitBackendAlive } from "./utils/backendReady";
 import { ensureIndexFresh } from "./composables/useSymbolIndex";
 // NEW: 统一渲染中枢
@@ -79,6 +77,7 @@ provide("renderHub", renderHub);
 
 // NEW: 中枢（供设置保存/重置时调用 Refresh）
 const hub = useViewCommandHub();
+provide("viewCommandHub", hub); // FIX: 注入命令中枢，供所有子组件使用
 
 const dialogManager = useDialogManager();
 provide("dialogManager", dialogManager);
@@ -90,11 +89,6 @@ if (hotkeys) {
   hotkeys.registerHandlers("global", {
     refresh() {
       vm.reload(true);
-    },
-    toggleExportMenu() {
-      try {
-        window.dispatchEvent(new CustomEvent("chan:toggle-export-menu"));
-      } catch {}
     },
     openHotkeySettings() {
       import("@/components/ui/HotkeySettingsDialog.vue").then((mod) => {
@@ -114,13 +108,6 @@ if (hotkeys) {
     saveSettings() { handleModalSave(); },
   });
 }
-
-const exportController = useExportController({
-  isBusy: () => vm.loading.value,
-  filenameBuilder: (fmt) =>
-    buildExportFilename(vm.code.value, vm.freq.value, fmt),
-});
-provide("exportController", exportController);
 
 const backendReady = ref(false);
 provide("backendReady", backendReady);

@@ -28,7 +28,7 @@
     </div>
     <!-- 默认或未知 tab 的降级处理 -->
     <div v-else>
-      <IndicatorPlaceholderPanel />
+      <IndicatorPlaceholderPanel :label="currentTabKey" />
     </div>
   </div>
 </template>

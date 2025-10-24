@@ -11,6 +11,7 @@ import { STYLE_PALETTE } from "@/constants";
 import { applyUi } from "../ui/applyUi";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { makeBollTooltipFormatter } from "../tooltips/index";
+import { createBaseTechOption } from "./common"; // NEW
 
 function asArray(x) {
   return Array.isArray(x) ? x : [];
@@ -59,71 +60,18 @@ export function buildBollOption({ candles, indicators, freq }, ui) {
     });
   }
 
-  const option = {
-    animation: false,
-    backgroundColor: theme.backgroundColor,
-    axisPointer: { link: [{ xAxisIndex: "all" }] },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "cross" },
-      appendToBody: false,
-      confine: true,
-      formatter: makeBollTooltipFormatter({ freq }),
-      className: "ct-fixed-tooltip",
-      borderWidth: 0,
-      backgroundColor: "rgba(20,20,20,0.85)",
-      textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
-    },
-    xAxis: { type: "category", data: dates },
-    yAxis: [
-      {
-        scale: true,
-        axisLabel: {
-          color: theme.axisLabelColor,
-          align: "right",
-          formatter: (val) =>
-            formatNumberScaled(val, { minIntDigitsToScale: 5 }),
-          margin: ui?.isHovered ? 6 : 6,
-        },
-        axisPointer: {
-          show: true, // 保持为 true, 由 link 机制统一控制
-          label: { show: !!ui?.isHovered },
-          // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
-          lineStyle: {
-            color: ui?.isHovered ? theme.axisLineColor : "transparent",
-          },
-        },
-      },
-      // NEW: 第二Y轴，用于承载未来的图外标记
-      {
-        type: "value",
-        min: 0,
-        max: 1,
-        show: false,
-        scale: false,
-        axisLine: { show: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        // FIX: 显式禁用第二Y轴的指针
-        axisPointer: {
-          show: false,
-        },
-      },
-    ],
-    series,
-  };
-
-  if (ui?.tooltipPositioner) {
-    option.tooltip.position = ui.tooltipPositioner;
-  }
-
-  return applyUi(
-    option,
+  // MODIFIED: Use createBaseTechOption to generate the skeleton
+  const option = createBaseTechOption(
     {
-      ...ui,
-      isMain: false,
-      leftPx: 72,
+      dates,
+      freq,
+      tooltipFormatter: makeBollTooltipFormatter({ freq }),
     },
-    { dates, freq }
+    ui
   );
+
+  // Fill in the series
+  option.series = series;
+
+  return option;
 }
