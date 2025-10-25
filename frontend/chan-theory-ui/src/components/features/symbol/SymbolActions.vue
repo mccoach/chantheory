@@ -46,7 +46,7 @@ defineEmits(["refresh"]);
   user-select: none;
   font-size: 14px;
   line-height: 20px;
-  width: 70px;
+  width: 60px;
   height: 36px;
   border-radius: 10px;
 }

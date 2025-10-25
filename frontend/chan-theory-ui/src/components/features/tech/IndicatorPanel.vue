@@ -15,59 +15,41 @@
     @mouseleave="onMouseLeave"
   >
     <div class="top-info">
-      <select
-        class="sel-kind"
-        v-model="kindLocal"
-        @change="onKindChange"
-        title="选择副窗内容"
-      >
-        <option value="VOL">成交量</option>
-        <option value="AMOUNT">成交额</option>
-        <option value="MACD">MACD</option>
-        <option value="KDJ">KDJ</option>
-        <option value="RSI">RSI</option>
-        <option value="BOLL">BOLL</option>
-        <option value="OFF">OFF</option>
-      </select>
-      <div class="title">{{ displayTitle }}</div>
-      <button
-        class="btn-close"
-        @click="$emit('close')"
-        title="关闭此窗"
-        aria-label="关闭"
-      >
-        <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
-          <defs>
-            <linearGradient id="gcx" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0" stop-color="#3a3a3a" />
-              <stop offset="1" stop-color="#242424" />
-            </linearGradient>
-          </defs>
-          <rect
-            x="2.5"
-            y="2.5"
-            rx="6"
-            ry="6"
-            width="19"
-            height="19"
-            fill="url(#gcx)"
-            stroke="#8b8b8b"
-            stroke-width="1"
-          />
-          <path
-            d="M8 8 L16 16"
-            stroke="#e6e6e6"
-            stroke-width="1.8"
-            stroke-linecap="round"
-          />
-          <path
-            d="M16 8 L8 16"
-            stroke="#e6e6e6"
-            stroke-width="1.8"
-            stroke-linecap="round"
-          />
-        </svg>
-      </button>
+      <!-- NEW: 左右两栏布局 -->
+      <div class="left-box">
+        <select
+          class="sel-kind"
+          v-model="kindLocal"
+          @change="onKindChange"
+          title="选择副窗内容"
+        >
+          <option value="VOL">成交量</option>
+          <option value="AMOUNT">成交额</option>
+          <option value="MACD">MACD</option>
+          <option value="KDJ">KDJ</option>
+          <option value="RSI">RSI</option>
+          <option value="BOLL">BOLL</option>
+          <option value="OFF">OFF</option>
+        </select>
+        <div class="title">{{ displayTitle }}</div>
+      </div>
+      <div class="right-box">
+        <!-- 设置按钮在关闭按钮左侧，间距2px -->
+        <button
+          class="btn-settings"
+          @click="openSettingsDialog"
+          title="指标设置"
+          aria-label="指标设置"
+          v-html="SETTINGS_ICON_SVG"
+        ></button>
+        <button
+          class="btn-close"
+          @click="$emit('close')"
+          title="关闭此窗"
+          aria-label="关闭"
+          v-html="CLOSE_ICON_SVG"
+        ></button>
+      </div>
     </div>
 
     <div ref="host" class="canvas-host"></div>
@@ -100,10 +82,9 @@ import {
   watch,
   computed,
 } from "vue";
-import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useViewRenderHub } from "@/composables/useViewRenderHub";
 import { openIndicatorSettings } from "@/settings/indicatorShell";
 import { useChartPanel } from "@/composables/useChartPanel"; // NEW: Import the common panel hook
+import { SETTINGS_ICON_SVG, CLOSE_ICON_SVG } from "@/constants/icons"; // NEW: Import SVG constants
 
 // --- props / emits (No changes) ---
 const props = defineProps({
@@ -227,6 +208,19 @@ onBeforeUnmount(() => {
     rgba(17, 17, 17, 0)
   );
 }
+/* NEW: 左右两栏容器 */
+.left-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.right-box {
+  margin-left: auto; /* 靠右 */
+  display: inline-flex;
+  align-items: center;
+  gap: 2px; /* 设置与关闭按钮间距为 2px */
+}
+
 .sel-kind {
   height: 22px;
   background: #0f0f0f;
@@ -240,12 +234,13 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: #ddd;
   user-select: none;
-  margin-left: 8px;
 }
+
+/* 按钮外观交由 SVG 渐变与描边定义，容器只需统一尺寸与交互 */
+.btn-settings,
 .btn-close {
-  margin-left: auto;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   background: transparent;
   border: none;
   padding: 0;

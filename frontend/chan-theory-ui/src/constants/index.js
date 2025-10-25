@@ -5,3 +5,4 @@ export * from './common';
 export * from './charts/main';
 export * from './charts/volume';
 export * from './charts/chan';
+export * from './icons'; // NEW: Export the new icon constants

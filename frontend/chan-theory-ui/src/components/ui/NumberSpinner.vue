@@ -1,4 +1,5 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\ui\NumberSpinner.vue -->
+<!-- FIX: Re-added scoped styles to make the component's width configurable from the parent. -->
 <template>
   <div
     class="numspin"
@@ -158,5 +159,77 @@ function onBlur() {
 }
 </script>
 
-<!-- 删除样式：NumberSpinner 不再定义任何样式；业务侧自行统一外观 -->
-<!-- (style block removed) -->
+<style scoped>
+.numspin {
+  display: inline-flex;
+  align-items: center;
+  width: 100%; /* 组件宽度占满其容器 */
+  height: 28px;
+  background: #0f0f0f;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+.numspin.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.numspin-input {
+  flex-grow: 1; /* 占据所有剩余空间 */
+  width: 100%; /* 关键：输入框宽度占满 .numspin */
+  height: 100%;
+  background: transparent;
+  color: #ddd;
+  border: none;
+  outline: none;
+  padding: 0 6px;
+  box-sizing: border-box;
+  text-align: center;
+}
+.numspin-arrows {
+  display: flex;
+  flex-direction: column;
+  width: 18px;
+  height: 100%;
+  flex-shrink: 0;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease;
+}
+.numspin:hover .numspin-arrows {
+  opacity: 1;
+  visibility: visible;
+}
+.arrow {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+.arrow.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.arrow:hover:not(.disabled) {
+  background-color: #333;
+}
+.arrow.up::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 5px solid #aaa;
+}
+.arrow.down::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #aaa;
+}
+</style>
