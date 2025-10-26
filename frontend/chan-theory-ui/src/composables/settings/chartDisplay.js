@@ -12,17 +12,17 @@ import { deepMerge } from "@/utils/objectUtils"; // NEW
 
 export function createChartDisplayState(localData = {}) {
   const state = reactive({
-    klineStyle: deepMerge(DEFAULT_KLINE_STYLE, localData.klineStyle || {}),
-    maConfigs: deepMerge(DEFAULT_MA_CONFIGS, localData.maConfigs || {}),
-    volSettings: deepMerge(DEFAULT_VOL_SETTINGS, localData.volSettings || {}),
+    klineStyle: deepMerge({}, DEFAULT_KLINE_STYLE, localData.klineStyle || {}),
+    maConfigs: deepMerge({}, DEFAULT_MA_CONFIGS, localData.maConfigs || {}),
+    volSettings: deepMerge({}, DEFAULT_VOL_SETTINGS, localData.volSettings || {}),
   });
 
   const setters = {
     setKlineStyle: (obj) => {
-      state.klineStyle = deepMerge(DEFAULT_KLINE_STYLE, obj || {});
+      state.klineStyle = deepMerge({}, DEFAULT_KLINE_STYLE, obj || {});
     },
     setMaConfigs: (obj) => {
-      state.maConfigs = deepMerge(DEFAULT_MA_CONFIGS, obj || {});
+      state.maConfigs = deepMerge({}, DEFAULT_MA_CONFIGS, obj || {});
     },
     updateMa: (key, patch) => {
       if (state.maConfigs[key]) {
@@ -30,7 +30,7 @@ export function createChartDisplayState(localData = {}) {
       }
     },
     setVolSettings: (obj) => {
-      state.volSettings = deepMerge(DEFAULT_VOL_SETTINGS, obj || {});
+      state.volSettings = deepMerge({}, DEFAULT_VOL_SETTINGS, obj || {});
     },
     patchVolSettings: (patch) => {
       state.volSettings = { ...(state.volSettings || {}), ...(patch || {}) };
@@ -38,9 +38,9 @@ export function createChartDisplayState(localData = {}) {
   };
 
   const onStorage = (newLocal) => {
-    state.klineStyle = deepMerge(DEFAULT_KLINE_STYLE, newLocal.klineStyle || {});
-    state.maConfigs = deepMerge(DEFAULT_MA_CONFIGS, newLocal.maConfigs || {});
-    state.volSettings = deepMerge(DEFAULT_VOL_SETTINGS, newLocal.volSettings || {});
+    state.klineStyle = deepMerge({}, DEFAULT_KLINE_STYLE, newLocal.klineStyle || {});
+    state.maConfigs = deepMerge({}, DEFAULT_MA_CONFIGS, newLocal.maConfigs || {});
+    state.volSettings = deepMerge({}, DEFAULT_VOL_SETTINGS, newLocal.volSettings || {});
   };
 
   return { state, setters, onStorage };

@@ -21,13 +21,13 @@ function mergeFractalSettings(local = {}) {
 
 export function createChanTheoryState(localData = {}) {
   const state = reactive({
-    chanSettings: deepMerge(CHAN_DEFAULTS, localData.chanSettings || {}),
+    chanSettings: deepMerge({}, CHAN_DEFAULTS, localData.chanSettings || {}),
     fractalSettings: mergeFractalSettings(localData.fractalSettings || {}),
   });
 
   const setters = {
     setChanSettings: (obj) => {
-      state.chanSettings = deepMerge(CHAN_DEFAULTS, obj || {});
+      state.chanSettings = deepMerge({}, CHAN_DEFAULTS, obj || {});
     },
     patchChanSettings: (patch) => {
         state.chanSettings = { ...(state.chanSettings || {}), ...(patch || {}) };
@@ -38,7 +38,7 @@ export function createChanTheoryState(localData = {}) {
   };
 
   const onStorage = (newLocal) => {
-    state.chanSettings = deepMerge(CHAN_DEFAULTS, newLocal.chanSettings || {});
+    state.chanSettings = deepMerge({}, CHAN_DEFAULTS, newLocal.chanSettings || {});
     state.fractalSettings = mergeFractalSettings(newLocal.fractalSettings || {});
   };
 

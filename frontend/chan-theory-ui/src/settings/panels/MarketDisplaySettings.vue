@@ -39,6 +39,10 @@ const klineDraft = inject("klineDraft");
 const maDraft = inject("maDraft");
 const adjustDraft = inject("adjustDraft");
 
+// NEW: 注入统一重置器
+const klineResetter = inject("klineResetter");
+const maResetter = inject("maResetter");
+
 function getMAKeys() {
   return Object.keys(maDraft || {});
 }
@@ -148,32 +152,30 @@ function onRowToggle(row) {
   }
 }
 
-// 单行恢复默认
+// 单行恢复默认（只改草稿，不保存）
 function onRowReset(row) {
   const key = String(row.key || "");
   if (key === "k-original") {
-    Object.assign(klineDraft, {
-      upColor: DEFAULT_KLINE_STYLE.upColor,
-      downColor: DEFAULT_KLINE_STYLE.downColor,
-      originalFadeUpPercent: DEFAULT_KLINE_STYLE.originalFadeUpPercent,
-      originalFadeDownPercent: DEFAULT_KLINE_STYLE.originalFadeDownPercent,
-      originalEnabled: DEFAULT_KLINE_STYLE.originalEnabled,
-    });
+    // 原始K线：重置相关字段到默认；复权 UI 草稿一并回默认
+    klineResetter?.resetPath("upColor");
+    klineResetter?.resetPath("downColor");
+    klineResetter?.resetPath("originalFadeUpPercent");
+    klineResetter?.resetPath("originalFadeDownPercent");
+    klineResetter?.resetPath("originalEnabled");
     adjustDraft.value = DEFAULT_APP_PREFERENCES.adjust;
     return;
   }
   if (key === "k-merged") {
-    klineDraft.mergedEnabled = DEFAULT_KLINE_STYLE.mergedEnabled;
-    klineDraft.mergedK = { ...DEFAULT_KLINE_STYLE.mergedK };
+    // 合并K线：整体对象与开关
+    klineResetter?.resetPath("mergedK");
+    klineResetter?.resetPath("mergedEnabled");
     return;
   }
   if (key.startsWith("ma-")) {
-    const mk = key.slice(3);
-    const def = DEFAULT_MA_CONFIGS[mk];
-    if (def) {
-      maDraft[mk] = { ...def };
-      maTri.updateSnapshot();
-    }
+    const mk = key.slice(3); // 如 "MA5"
+    // 重置该条 MA 至默认
+    maResetter?.resetPath(mk);
+    maTri.updateSnapshot();
   }
 }
 

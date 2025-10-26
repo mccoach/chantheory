@@ -4,6 +4,8 @@
 // - 职责：加载/保存/同步 LocalStorage，并将配置分发给各个子模块进行管理。
 // - 导出：一个按领域组织的、包含响应式状态和方法的结构化对象。
 // - 修正：将 volSettings 归入 chartDisplay 模块。
+// - REFACTORED: 修复了因浅层展开状态(...)导致响应式更新丢失，从而无法持久化的问题。
+//   通过将聚合状态改为嵌套结构，并相应调整持久化逻辑，确保所有设置变更都能被正确侦听和保存。
 // ==============================
 
 import { reactive, watch, readonly } from "vue";
@@ -50,16 +52,27 @@ export function useUserSettings() {
   const chartDisplay = createChartDisplayState(localData);
   const chanTheory = createChanTheoryState(localData);
 
-  // 聚合所有子模块的状态
+  // REFACTORED: 聚合所有子模块的状态。
+  // 使用嵌套结构而不是扁平化展开，以确保对子状态对象属性（如 indicatorPanes 数组）的重新赋值能被 watch 捕获。
   const aggregatedState = reactive({
-    ...preferences.state,
-    ...viewState.state,
-    ...chartDisplay.state,
-    ...chanTheory.state,
+    preferences: preferences.state,
+    viewState: viewState.state,
+    chartDisplay: chartDisplay.state,
+    chanTheory: chanTheory.state,
   });
 
-  // 统一的持久化：深度监听聚合后的状态
-  const saveDebounced = debounce((s) => saveToLocal(s), 300);
+  // REFACTORED: 统一的持久化：深度监听聚合后的状态。
+  // 在保存前，将嵌套的 aggregatedState 重新展平为 localStorage 的存储结构。
+  const saveDebounced = debounce((nestedState) => {
+    const flattenedState = {
+      ...nestedState.preferences,
+      ...nestedState.viewState,
+      ...nestedState.chartDisplay,
+      ...nestedState.chanTheory,
+    };
+    saveToLocal(flattenedState);
+  }, 300);
+
   watch(aggregatedState, (newState) => saveDebounced(newState), { deep: true });
 
   // 统一的跨标签页同步
@@ -67,6 +80,7 @@ export function useUserSettings() {
     if (e.key !== LS_KEY || !e.newValue) return;
     try {
       const newLocal = JSON.parse(e.newValue);
+      // 各个子模块负责响应该事件并更新自己的状态
       preferences.onStorage(newLocal);
       viewState.onStorage(newLocal);
       chartDisplay.onStorage(newLocal);

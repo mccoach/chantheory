@@ -44,6 +44,7 @@ import IndicatorPlaceholderPanel from "@/settings/panels/IndicatorPlaceholderPan
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useSettingsManager } from "@/composables/useSettingsManager";
 import { DEFAULT_VOL_SETTINGS } from "@/constants";
+import { createSettingsResetter } from "@/settings/common/useSettingsResetter";
 
 const props = defineProps({
   initialKind: { type: String, default: "VOL" },
@@ -63,19 +64,19 @@ const volManager = useSettingsManager({
 });
 provide("volDraft", volManager.draft);
 
-// 暴露 save 和 resetAll 方法
+// NEW: 创建并提供重置器（只改草稿）
+const volResetter = createSettingsResetter({ draft: volManager.draft, defaults: DEFAULT_VOL_SETTINGS });
+provide("volResetter", volResetter);
+
+// 暴露 save 和 resetAll 方法（resetAll 仅重置草稿，不保存、不刷新）
 const save = () => {
   // 目前只有量窗有可保存的设置
   volManager.save();
   // 保存后触发一次刷新
   hub.execute("Refresh", {});
 };
-
 const resetAll = () => {
-  // 目前只有量窗有可重置的设置
-  volManager.reset();
-  // 重置后触发一次刷新
-  hub.execute("Refresh", {});
+  volResetter.resetAll();
 };
 
 defineExpose({ save, resetAll });

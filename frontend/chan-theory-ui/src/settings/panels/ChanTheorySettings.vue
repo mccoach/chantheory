@@ -238,20 +238,31 @@ function onRowToggle(row) {
   }
 }
 
-// 行重置
+// 行重置（统一调用 resetter；只改草稿，不保存、不刷新）
 function onRowReset(row) {
   const key = String(row.key || "");
-  const cf = chanDraft;
-  const ff = fractalDraft;
-
   if (key === "chan-updown") {
-    const { pen, segment, penPivot, ...rest } = cf;
-    Object.assign(rest, JSON.parse(JSON.stringify(CHAN_DEFAULTS)));
-    Object.assign(cf, rest);
+    // 重置涨跌标记相关字段（保留 pen/segment/penPivot）
+    chanResetter?.resetPath("showUpDownMarkers");
+    chanResetter?.resetPath("upShape");
+    chanResetter?.resetPath("upColor");
+    chanResetter?.resetPath("downShape");
+    chanResetter?.resetPath("downColor");
+    chanResetter?.resetPath("anchorPolicy");
+    // 如需同步最小/最大/高度/偏移，亦可按需加入：
+    // chanResetter?.resetPath("markerMinPx");
+    // chanResetter?.resetPath("markerMaxPx");
+    // chanResetter?.resetPath("markerHeightPx");
+    // chanResetter?.resetPath("markerYOffsetPx");
     return;
   }
   if (key === "fr-global") {
-    Object.assign(ff, JSON.parse(JSON.stringify(FRACTAL_DEFAULTS)));
+    // 重置分型判定总控（与缠论页正确链路一致）
+    fractalResetter?.resetPath("minTickCount");
+    fractalResetter?.resetPath("minPct");
+    fractalResetter?.resetPath("minCond");
+    fractalResetter?.resetPath("showStrength");
+    fractalResetter?.resetPath("confirmStyle");
     frTri.updateSnapshot();
     return;
   }
@@ -259,33 +270,27 @@ function onRowReset(row) {
   if (key.startsWith("fr-kind-")) {
     const kind = key.slice("fr-kind-".length);
     if (kind === "confirm") {
-      ff.confirmStyle = JSON.parse(
-        JSON.stringify(FRACTAL_DEFAULTS.confirmStyle)
-      );
+      fractalResetter?.resetPath("confirmStyle");
       frTri.updateSnapshot();
       return;
     }
-    const def = JSON.parse(
-      JSON.stringify(FRACTAL_DEFAULTS.styleByStrength[kind])
-    );
-    const s = ff.styleByStrength || {};
-    s[kind] = def;
-    ff.styleByStrength = s;
-    const ss = ff.showStrength || {};
-    ff.showStrength = { ...ss, [kind]: true };
+    fractalResetter?.resetPath(`styleByStrength.${kind}`);
+    // 同步显隐为默认（强/标/弱默认均为 true）
+    const ss = fractalDraft.showStrength || {};
+    fractalDraft.showStrength = { ...ss, [kind]: true };
     frTri.updateSnapshot();
     return;
   }
   if (key === "pen") {
-    cf.pen = JSON.parse(JSON.stringify(PENS_DEFAULTS));
+    chanResetter?.resetPath("pen");
     return;
   }
   if (key === "segment") {
-    cf.segment = JSON.parse(JSON.stringify(SEGMENT_DEFAULTS));
+    chanResetter?.resetPath("segment");
     return;
   }
   if (key === "penPivot") {
-    cf.penPivot = JSON.parse(JSON.stringify(CHAN_PEN_PIVOT_DEFAULTS));
+    chanResetter?.resetPath("penPivot");
     return;
   }
 }

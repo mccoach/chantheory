@@ -37,6 +37,7 @@ import {
   SEGMENT_DEFAULTS,
   CHAN_PEN_PIVOT_DEFAULTS,
 } from "@/constants";
+import { createSettingsResetter } from "@/settings/common/useSettingsResetter";
 
 const props = defineProps({
   initialActiveTab: { type: String, default: "chan" },
@@ -49,22 +50,18 @@ const settings = useUserSettings();
 const currentTabKey = ref(props.initialActiveTab || "chan");
 
 // == 为每个设置项创建独立的、通用的管理器 ==
-
-// 1. K线样式管理器
 const klineManager = useSettingsManager({
   settingsKey: "klineStyle",
   defaultConfig: DEFAULT_KLINE_STYLE,
 });
 provide("klineDraft", klineManager.draft);
 
-// 2. MA配置管理器
 const maManager = useSettingsManager({
   settingsKey: "maConfigs",
   defaultConfig: DEFAULT_MA_CONFIGS,
 });
 provide("maDraft", maManager.draft);
 
-// 3. 缠论设置管理器
 const chanDefaultConfig = {
   ...CHAN_DEFAULTS,
   pen: PENS_DEFAULTS,
@@ -86,7 +83,6 @@ const chanManager = useSettingsManager({
 });
 provide("chanDraft", chanManager.draft);
 
-// 4. 分型设置管理器
 const fractalManager = useSettingsManager({
   settingsKey: "fractalSettings",
   defaultConfig: FRACTAL_DEFAULTS,
@@ -107,9 +103,7 @@ const fractalManager = useSettingsManager({
 });
 provide("fractalDraft", fractalManager.draft);
 
-// 5. 复权设置管理器
 const adjustManager = (() => {
-  // FIX: `settings.preferences.adjust` 是正确路径, 且它不是一个 ref, 无需 .value
   const draft = ref(settings.preferences.adjust || DEFAULT_APP_PREFERENCES.adjust);
   const snapshot = ref(draft.value);
   const save = () => {
@@ -125,6 +119,15 @@ const adjustManager = (() => {
 })();
 provide("adjustDraft", adjustManager.draft);
 
+// NEW: 创建并提供统一重置器供子面板使用（只改草稿，不保存、不刷新）
+const klineResetter = createSettingsResetter({ draft: klineManager.draft, defaults: DEFAULT_KLINE_STYLE });
+const maResetter = createSettingsResetter({ draft: maManager.draft, defaults: DEFAULT_MA_CONFIGS });
+const chanResetter = createSettingsResetter({ draft: chanManager.draft, defaults: chanDefaultConfig });
+const fractalResetter = createSettingsResetter({ draft: fractalManager.draft, defaults: FRACTAL_DEFAULTS });
+provide("klineResetter", klineResetter);
+provide("maResetter", maResetter);
+provide("chanResetter", chanResetter);
+provide("fractalResetter", fractalResetter);
 
 // === 暴露给 App.vue 的核心方法 ===
 const save = () => {
@@ -142,18 +145,15 @@ const save = () => {
 };
 
 const resetAll = () => {
-  klineManager.reset();
-  maManager.reset();
-  chanManager.reset();
-  fractalManager.reset();
+  klineResetter.resetAll();
+  maResetter.resetAll();
+  chanResetter.resetAll();
+  fractalResetter.resetAll();
   adjustManager.reset();
-  hub.execute("Refresh", {});
 };
 
 defineExpose({ save, resetAll });
 
-
-// 监听外壳当前 tab
 const dialogManager = inject("dialogManager", null);
 watch(
   () => dialogManager?.activeDialog?.value?.activeTab,
