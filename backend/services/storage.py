@@ -2,7 +2,7 @@
 # ==============================
 # 说明：
 # - ensure_daily_recent：改为构造“字典行”，与 upsert_candles 的命名占位符一致。
-# - 其它行为与外部契约不变。
+# - ensure_daily_recent：明确返回包含 {ok: bool, ...} 的字典，标志近端保障是否成功。
 # ==============================
 
 from __future__ import annotations  # 允许前置注解
@@ -77,84 +77,71 @@ def _infer_symbol_type(symbol: str) -> str:
 
 def ensure_daily_recent(symbol: str, iface_key: Optional[str] = None) -> Dict[str, Any]:
     """
-    确保“任意标的”的 1d 近端最新（永久库 candles）：
-    - 判定 candles 中该 symbol 的 1d 最新日 >= expected 则跳过
-    - 否则：通过新版 fetch_period_ms 取 [19900101, expected] 的 1d（可按 iface_key 选择方法），UPSERT 到 candles
-    - 若该标的为 A 股：同时拉取并 UPSERT 复权因子（ak 因子接口）
-    返回：简要动作信息
+    确保“任意标的”的 1d 近端最新。
+    - 关键变更: 总是返回一个包含 {ok: bool, ...} 的字典。
     """
-    conn = get_conn(); cur = conn.cursor()  # DB 连接
-    # 查询现有最新日线 ts
+    conn = get_conn(); cur = conn.cursor()
     cur.execute("SELECT MAX(ts) AS mx FROM candles WHERE symbol=? AND freq='1d' AND adjust='none';", (symbol,))
-    row = cur.fetchone(); mx_ts = row["mx"]  # 可能为 None
+    row = cur.fetchone(); mx_ts = row["mx"]
 
-    # 计算“应更新到的自然日”（Asia/Shanghai）
     expected = _expected_latest_trading_day()
 
-    # 若已有最新记录日期 >= 目标日期 → 跳过更新
     if mx_ts is not None:
         latest = yyyymmdd_from_ms(int(mx_ts))
         if latest >= expected:
             return {"ok": True, "action": "skip", "expected": expected, "latest": latest}
 
-    # 准备取数窗口（整窗）
-    start_ms = ms_from_yyyymmdd(19900101)  # 左端：1990-01-01
-    end_ms = int(datetime.now().timestamp() * 1000)  # 右端：当前时刻
-    sec_type = _infer_symbol_type(symbol)  # 品类：'A'|'ETF'|'LOF'
+    start_ms = ms_from_yyyymmdd(19900101)
+    end_ms = int(datetime.now().timestamp() * 1000)
+    sec_type = _infer_symbol_type(symbol)
 
-    # 抓取 1d（新版：返回 df, provider, source_key）
-    def _fetch_price():
-        return fetch_period_ms(symbol, "1d", start_ms, end_ms, sec_type=sec_type, iface_key=iface_key)
-    df_price, provider, source_key = _retry(_fetch_price) or (pd.DataFrame(), "", None)
+    try:
+        def _fetch_price():
+            return fetch_period_ms(symbol, "1d", start_ms, end_ms, sec_type=sec_type, iface_key=iface_key)
+        df_price, provider, source_key = _retry(_fetch_price) or (pd.DataFrame(), "", None)
+    except Exception as e:
+        return {"ok": False, "action": "fetch_fail", "error": str(e)}
 
     rows: list[Dict[str, Any]] = []
     if df_price is not None and not df_price.empty:
-        x = df_price.sort_values("ts").drop_duplicates(subset=["ts"])  # 时间升序 + 去重
-        has_tvr = "turnover_rate" in x.columns  # 是否包含换手率
+        x = df_price.sort_values("ts").drop_duplicates(subset=["ts"])
+        has_tvr = "turnover_rate" in x.columns
         for _, r in x.iterrows():
             ts_val = int(r["ts"])
             rows.append({
-                "symbol": symbol,
-                "freq": "1d",
-                "adjust": "none",
-                "close_time": format_close_time_str(ts_val, "1d"),
-                "ts": ts_val,
-                "open": float(r["open"]),
-                "high": float(r["high"]),
-                "low": float(r["low"]),
-                "close": float(r["close"]),
+                "symbol": symbol, "freq": "1d", "adjust": "none",
+                "close_time": format_close_time_str(ts_val, "1d"), "ts": ts_val,
+                "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"]),
                 "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
                 "amount": float(r["amount"]) if "amount" in x.columns and pd.notna(r["amount"]) else None,
                 "turnover_rate": float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
-                "source": (provider or "ak"),
-                "fetched_at": datetime.now().isoformat(),
-                "revision": (source_key or None),
+                "source": (provider or "ak"), "fetched_at": datetime.now().isoformat(), "revision": (source_key or None),
             })
         if rows:
-            upsert_candles(rows)  # 批量 UPSERT
+            upsert_candles(rows)
 
-    # A 股：同步复权因子（qfq/hfq）
     if _infer_symbol_type(symbol) == "A":
         try:
-            _df_none, df_factors = fetch_daily_none_and_factors(symbol, 19900101, expected)  # 拉取因子
+            _df_none, df_factors = fetch_daily_none_and_factors(symbol, 19900101, expected)
             if df_factors is not None and not df_factors.empty:
                 now_iso = datetime.now().isoformat()
-                facs = []
-                for _, r in df_factors.iterrows():
-                    facs.append((
-                        symbol, int(r["date"]), float(r["qfq_factor"]), float(r["hfq_factor"]), now_iso
-                    ))
+                facs = [(symbol, int(r["date"]), float(r["qfq_factor"]), float(r["hfq_factor"]), now_iso) for _, r in df_factors.iterrows()]
                 if facs:
-                    upsert_factors(facs)  # UPSERT 因子表
+                    upsert_factors(facs)
         except Exception:
-            # 因子失败不可阻断主流程（保持静默）
             pass
-
-    # 返回摘要（便于日志与 API 调试查看）
+    
+    # 验证更新后是否达标
+    cur.execute("SELECT MAX(ts) AS mx FROM candles WHERE symbol=? AND freq='1d' AND adjust='none';", (symbol,))
+    row_after = cur.fetchone(); mx_ts_after = row_after["mx"]
+    latest_after = yyyymmdd_from_ms(int(mx_ts_after)) if mx_ts_after is not None else 0
+    is_ok_after = latest_after >= expected
+    
     return {
-        "ok": True,
-        "action": "update" if rows else "noop",
+        "ok": is_ok_after,
+        "action": "update",
         "expected": expected,
+        "latest_after": latest_after,
         "provider": provider or "",
         "source_key": source_key or "",
         "rows_written": len(rows)

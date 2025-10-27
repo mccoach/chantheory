@@ -5,6 +5,7 @@
        - 移除所有本地的 option 构建逻辑，简化为纯粹的 option 消费者。
        - 将所有顶部控制UI和逻辑提取到新的 <MainChartControls /> 组件中。
      - FIX: 确保"更新完成"提示的模板代码完整且 z-index 足够高。
+     - NEW: 消费 meta.completeness 字段，显示“数据不完整”警告。
 -->
 <template>
   <!-- REFACTORED: 顶部控制区已提取到 MainChartControls 组件 -->
@@ -24,12 +25,15 @@
       <div class="right-box">
         <div class="status">
           <span v-if="vm.loading.value" class="badge busy">更新中…</span>
-          <!-- NEW: 渐变淡出“已刷新”提示 -->
+          <!-- NEW: 根据 completeness 显示不同状态 -->
           <transition name="hintfade">
-            <span v-if="!vm.loading.value && showRefreshed" class="badge done">
+            <span v-if="!vm.loading.value && showRefreshed && vm.meta.value?.completeness === 'complete'" class="badge done">
               已刷新 {{ refreshedAtHHMMSS }}
             </span>
           </transition>
+          <span v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" class="badge warn" title="近端数据更新失败，当前为历史缓存">
+            数据不完整
+          </span>
         </div>
         <!-- NEW: 主图设置按钮 -->
         <button
@@ -200,6 +204,13 @@ onBeforeUnmount(() => {
   background: rgba(46, 204, 113, 0.15);
   border: 1px solid rgba(46, 204, 113, 0.35);
   color: #2ecc71;
+}
+/* NEW: "数据不完整" 警告样式 */
+.badge.warn {
+  background: rgba(231, 76, 60, 0.15);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  color: #e74c3c;
+  cursor: help;
 }
 /* NEW: 渐变淡出动画（已刷新提示） */
 .hintfade-leave-active {

@@ -348,7 +348,9 @@ export function useViewRenderHub() {
   /** 步骤4: 编排与发布 */
   function _computeAndPublish() {
     const vm = _vmRef.vm;
-    if (!vm || !vm.candles.value || !vm.candles.value.length) return;
+    // FIX: 当数据为空时，不再提前返回，而是继续流程以生成并发布一个“空”的 option 来清空图表。
+    if (!vm) return;
+    
 
     // 准备上下文
     const candles = vm.candles.value;

@@ -127,6 +127,14 @@ def _expected_last_end_ts_for_freq(freq: str, now: Optional[datetime] = None) ->
                     now = d
                     break
         else:
+            # NEW: 非交易日的分钟族也按“上一交易日的下午收盘分钟”进行近端达标判定
+            prev = now
+            for _ in range(7):
+                prev = prev - timedelta(days=1)
+                if _lazy_is_trading_day(prev):
+                    # 下午会话结束时刻（15:00）
+                    s_pm, e_pm = _session_ranges_for(prev)[1]
+                    return _ms_from_dt(e_pm)
             return None
     if freq in {"1m","5m","15m","30m","60m"}:
         minutes = int(freq.replace("m",""))
@@ -461,61 +469,72 @@ def _fallback_resample_from_1d(symbol: str, target_freq: str) -> Tuple[Optional[
         return ("resample", f"resample_1d_to_{target_freq}")
     return (None, None)
 
-def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_iface_key: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """保证非 1d 周期近端达标（整窗拉取，失败时兜底重采样）。"""
+def _ensure_near_end_for_freq(symbol: str, freq: str, sec_type: str, preferred_iface_key: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    保证非 1d 周期近端达标。
+    返回 (success: bool, provider: Optional[str], source_key: Optional[str])
+    """
     if freq == "1d":
-        return (None, None)
+        # 对于1d, 成功状态由 ensure_daily_recent 决定，这里假设其在上游已处理
+        return True, None, None
     now = _today_shanghai()
     expected_ts = _expected_last_end_ts_for_freq(freq, now)
     meta = get_cache_meta(symbol, freq, "none")
     last_ts = int(meta["last_ts"]) if meta and meta.get("last_ts") is not None else None
+
     if expected_ts is None:
-        return (None, None)
+        return True, None, None # 非交易日或盘中休息，视为已达标
     if last_ts is not None and last_ts >= int(expected_ts):
-        return (None, None)
+        return True, None, None # 本地数据已达标
+
     start_ms = START_1990_MS
     end_ms = int(time.time() * 1000)
+    
     def _fetch():
         return fetch_period_ms(symbol, freq, start_ms, end_ms, sec_type=sec_type, iface_key=preferred_iface_key)
-    df_fetch, provider, src_key = _retry(_fetch) or (pd.DataFrame(), "", None)
-    if df_fetch is not None and not df_fetch.empty:
-        x = df_fetch.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
-        has_amt = "amount" in x.columns
-        has_tvr = "turnover_rate" in x.columns
-        rows = []
-        for _, r in x.iterrows():
-            ts_val = int(r["ts"])
-            rows.append({
-                "symbol": symbol,
-                "freq": freq,
-                "adjust": "none",
-                "close_time": format_close_time_str(ts_val, freq),
-                "ts": ts_val,
-                "open": float(r["open"]),
-                "high": float(r["high"]),
-                "low": float(r["low"]),
-                "close": float(r["close"]),
-                "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
-                "amount": float(r["amount"]) if has_amt and pd.notna(r["amount"]) else None,
-                "turnover_rate": float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
-                "source": provider or "",
-                "fetched_at": datetime.now().isoformat(),
-                "revision": src_key or None,
-            })
-        if rows:
-            upsert_cache_candles(rows)
-            rebuild_cache_meta(symbol, freq, "none")
-        return (provider or None, src_key)
+    
+    try:
+        df_fetch, provider, src_key = _retry(_fetch) or (pd.DataFrame(), "", None)
+        if df_fetch is not None and not df_fetch.empty:
+            x = df_fetch.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+            has_amt = "amount" in x.columns
+            has_tvr = "turnover_rate" in x.columns
+            rows = []
+            for _, r in x.iterrows():
+                ts_val = int(r["ts"])
+                rows.append({
+                    "symbol": symbol, "freq": freq, "adjust": "none",
+                    "close_time": format_close_time_str(ts_val, freq), "ts": ts_val,
+                    "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"]),
+                    "volume": float(r["volume"] if pd.notna(r["volume"]) else 0.0),
+                    "amount": float(r["amount"]) if has_amt and pd.notna(r["amount"]) else None,
+                    "turnover_rate": float(r["turnover_rate"]) if has_tvr and pd.notna(r["turnover_rate"]) else None,
+                    "source": provider or "", "fetched_at": datetime.now().isoformat(), "revision": src_key or None,
+                })
+            if rows:
+                upsert_cache_candles(rows)
+                rebuild_cache_meta(symbol, freq, "none")
+            
+            meta_after = get_cache_meta(symbol, freq, "none")
+            last_ts_after = int(meta_after["last_ts"]) if meta_after and meta_after.get("last_ts") is not None else None
+            success = last_ts_after is not None and last_ts_after >= int(expected_ts)
+            return success, provider or None, src_key
+
+    except Exception:
+        pass
+
+    # 主接口失败，尝试兜底
     if freq in {"5m","15m","30m","60m"}:
         prov, key = _fallback_resample_from_1m(symbol, freq, sec_type, preferred_iface_key)
         if prov:
-            return (prov, key)
+            return True, prov, key
     if freq in {"1w","1M"}:
         prov, key = _fallback_resample_from_1d(symbol, freq)
         if prov:
-            return (prov, key)
+            return True, prov, key
+
     touch_cache_meta(symbol, freq, "none")
-    return (None, None)
+    return False, None, None
 
 def _apply_adjustment(df_none: pd.DataFrame, symbol: str, adjust: str) -> pd.DataFrame:
     """对不复权 DataFrame 应用前/后复权。"""
@@ -540,12 +559,18 @@ def _apply_adjustment(df_none: pd.DataFrame, symbol: str, adjust: str) -> pd.Dat
 
 def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
                       include: Set[str], ma_periods_map: Dict[str, int], trace_id: Optional[str],
+                      completeness: str,  # <-- NEW
                       downsample_from: Optional[str] = None,
                       source: Optional[str] = None, source_key: Optional[str] = None,
                       # NEW: 统一可视窗口（索引基于 ALL）
                       view_start_idx: int = 0, view_end_idx: int = -1,
                       window_preset_effective: str = "ALL") -> Dict[str, Any]:
     """组装 /api/candles 响应（返回 ALL 序列 + 可视窗口索引）。"""
+    
+    # NEW: 根据completeness状态决定是否返回空数据
+    if completeness == "empty":
+        df = pd.DataFrame()
+
     if df is None or df.empty:
         return {
             "meta": {
@@ -559,6 +584,7 @@ def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
                 "downsample_from": downsample_from,
                 "is_cached": True,
                 "trace_id": trace_id,
+                "completeness": "empty", # NEW
                 # NEW
                 "all_rows": 0,
                 "view_rows": 0,
@@ -619,6 +645,7 @@ def assemble_response(symbol: str, freq: str, adjust: str, df: pd.DataFrame,
         "timezone": settings.timezone,
         "source": src,
         "source_key": source_key,
+        "completeness": completeness,  # <-- NEW
         "downsample_from": downsample_from,
         "is_cached": True,
         "trace_id": trace_id,
@@ -645,29 +672,46 @@ def get_candles(symbol: str, freq: str, adjust: str = "none",
     主入口：继续保障 ALL 数据正确，同时服务端一次成型计算“可视切片”的 v_s/v_e。
     - 返回 ALL candles（不裁剪），meta 中提供 view_*，前端仅应用 dataZoom。
     """
+    
+    # NEW: 跟踪数据完整性
+    is_complete = True
+    
     # 先保障 1d（供 1w/1M 兜底）
     try:
-        ensure_daily_recent(symbol, preferred_iface_key)
+        daily_sync_res = ensure_daily_recent(symbol, preferred_iface_key)
+        if not daily_sync_res.get("ok", False):
+            is_complete = False
     except Exception:
-        pass
+        is_complete = False
 
     sec_type = _get_symbol_type(symbol)
 
     # 保障非 1d 的近端
     src_prov, src_key = (None, None)
-    try:
-        src_prov, src_key = _ensure_near_end_for_freq(symbol, freq, sec_type, preferred_iface_key)
-    except Exception:
-        pass
+    if freq != '1d': # 1d 已经在上面处理
+        try:
+            # _ensure_near_end_for_freq 现在返回 (success, provider, source_key)
+            success, src_prov, src_key = _ensure_near_end_for_freq(symbol, freq, sec_type, preferred_iface_key)
+            if not success:
+                is_complete = False
+        except Exception:
+            is_complete = False
 
     # 读取 ALL（不裁剪）
     df = _read_local(symbol, freq, None, None, sec_type)
     df_final = _apply_adjustment(df, symbol, adjust)
+    
+    # 根据数据状态决定最终的 completeness
+    if df_final.empty:
+        completeness = "empty"
+    else:
+        completeness = "complete" if is_complete else "incomplete"
 
     all_rows = int(len(df_final))
     if all_rows <= 0:
         return assemble_response(symbol, freq, adjust, df_final,
                                  include or set(), ma_periods_map or {}, trace_id,
+                                 completeness="empty", # NEW
                                  downsample_from="1m" if (src_prov == "resample") else None,
                                  source=src_prov, source_key=src_key,
                                  view_start_idx=0, view_end_idx=-1,
@@ -707,6 +751,7 @@ def get_candles(symbol: str, freq: str, adjust: str = "none",
 
     return assemble_response(symbol, freq, adjust, df_final,
                              include or set(), ma_periods_map or {}, trace_id,
+                             completeness=completeness, # NEW
                              downsample_from="1m" if (src_prov == "resample") else None,
                              source=src_prov, source_key=src_key,
                              view_start_idx=s_idx, view_end_idx=e_idx,
