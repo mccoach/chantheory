@@ -1,83 +1,214 @@
-# backend/app.py  # 应用入口文件
+# backend/app.py
 # ==============================
-# 说明：FastAPI 应用入口（启动即用 + 初始化后台化）
-# - 启动：仅做轻量初始化（SQLite 架构 + 配置监听），立即可服务
-# - 后台：启动守护线程执行初始化任务（如自选池近窗同步），不阻塞端口监听
-# - 健康：/api/health 返回后台任务状态，前端可据此显示“后台初始化进行中”
-# - 本次改动：注册 symbols 路由，提供 /api/symbols/index；以及新增 user_history 路由。
+# 说明：FastAPI 应用入口（V4.0 - 清理废弃依赖）
+# 改动：
+#   - 移除 status_router（已删除）
+#   - 优化启动逻辑
 # ==============================
 
-from __future__ import annotations  # 启用前置注解（便于类型注解前引用）
+from __future__ import annotations
 
-# 第三方
-from fastapi import FastAPI  # FastAPI 应用类
-from fastapi.middleware.cors import CORSMiddleware  # CORS 中间件
+import asyncio
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict, Any
+from datetime import datetime
 
-# 标准库
-from typing import Dict, Any  # 类型注解
-from datetime import datetime  # 时间
+from backend.settings import settings, DATA_TYPE_DEFINITIONS
+from backend.db import ensure_initialized
+from backend.routers.candles import router as candles_router
+from backend.routers.symbols import router as symbols_router
+from backend.routers.user_config import router as user_config_router
+from backend.routers.user import router as user_router
+from backend.routers.debug import router as debug_router
+from backend.routers.events import router as events_router
+from backend.routers.data_sync import router as data_sync_router
+from backend.services.unified_sync_executor import get_sync_executor
+from backend.utils.logger import get_logger
 
-# 项目内
-from backend.settings import settings  # 全局配置
-from backend.db.sqlite import ensure_initialized  # DB 初始化（建表等）
-from backend.routers.candles import router as candles_router  # 蜡烛路由
-from backend.routers.user_config import router as user_config_router  # 用户配置路由
-from backend.routers.watchlist import router as watchlist_router  # 自选路由
-from backend.routers.storage import router as storage_router  # 存储管理路由
-from backend.routers.debug import router as debug_router  # 调试路由
-from backend.routers.symbols import router as symbols_router  # 符号索引路由（新增）
-from backend.routers.user_history import router as user_history_router  # 历史记录路由（新增）
-from backend.services.config import start_watcher  # 配置文件监听线程
-from backend.services.tasks import start_background_tasks, get_task_status  # 后台任务管理
+_LOG = get_logger("app")
 
-# 创建 FastAPI 应用
-app = FastAPI(title="ChanTheory API", version="1.0.0")  # 应用元信息
+app = FastAPI(title="ChanTheory API", version="4.0.0")
 
-# CORS 配置（仅本地白名单，合规默认不暴露公网）
 app.add_middleware(
-    CORSMiddleware,  # 使用 CORS 中间件
-    allow_origins=settings.cors_origins,  # 允许的来源（白名单）
-    allow_credentials=True,  # 是否允许携带 Cookie
-    allow_methods=["*"],  # 放开所有方法
-    allow_headers=["*"],  # 放开所有请求头
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# 启动钩子：轻量初始化 + 启动后台任务（不阻塞）
-@app.on_event("startup")  # 注册应用启动事件
-def _on_startup() -> None:  # 启动回调
-    """应用启动时：快速就绪 + 后台化初始化"""  # 文档字符串
-    ensure_initialized()  # 确保数据库表结构存在（幂等，快速）
-    start_watcher()  # 启动配置文件监听（原子写 + 镜像，后台线程）
-    start_background_tasks()  # 启动一次性初始化后台任务（守护线程）
+executor = get_sync_executor()
 
-# 探活接口（最小）
-@app.get("/api/ping")  # GET /api/ping
-def ping() -> Dict[str, Any]:  # 函数声明
-    """最小探活（后端是否可用）"""  # 说明
-    return {"ok": True, "msg": "pong"}  # 固定返回
+@app.on_event("startup")
+async def on_startup() -> None:
+    """应用启动时：初始化数据库并触发首次同步"""
+    
+    _LOG.info("应用启动：开始初始化")
+    
+    # 1. 初始化数据库
+    ensure_initialized()
+    
+    # 2. 优先同步交易日历（阻塞等待，确保后续缺口判断可用）
+    await sync_trade_calendar_blocking()
+    
+    # 3. 启动执行器（后台任务消费循环）
+    asyncio.create_task(executor.start())
+    
+    # 4. 触发启动时的数据需求
+    await trigger_startup_sync()
+    
+    _LOG.info("应用启动完成")
 
-# 健康检查接口（包含后台任务状态）
-@app.get("/api/health")  # GET /api/health
-def health() -> Dict[str, Any]:  # 函数声明
-    """健康状态（包含后台任务状态）"""  # 说明
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    """应用关闭时：安全停止执行器"""
+    _LOG.info("应用关闭：停止执行器")
+    await executor.stop()
+
+async def sync_trade_calendar_blocking():
+    """
+    同步交易日历（阻塞版，优先执行）
+    
+    职责：
+      在启动时第一时间拉取交易日历并落库，
+      确保后续的缺口判断函数能查到交易日数据。
+    """
+    from backend.datasource import dispatcher
+    from backend.services.normalizer import normalize_trade_calendar_df
+    from backend.db.calendar import upsert_trade_calendar
+    
+    _LOG.info("[启动] 开始同步交易日历（阻塞）")
+    
+    try:
+        # 拉取
+        raw_df, source_id = await dispatcher.fetch('trade_calendar')
+        
+        if raw_df is None or raw_df.empty:
+            _LOG.error("[启动] 交易日历拉取失败")
+            return
+        
+        # 标准化
+        clean_df = normalize_trade_calendar_df(raw_df)
+        
+        if clean_df is None or clean_df.empty:
+            _LOG.error("[启动] 交易日历标准化失败")
+            return
+        
+        # 转为记录格式
+        records = [
+            {
+                'date': int(row['date']),
+                'market': settings.default_market,
+                'is_trading_day': 1
+            }
+            for _, row in clean_df.iterrows()
+        ]
+        
+        # 落库（阻塞等待）
+        await asyncio.to_thread(upsert_trade_calendar, records)
+        
+        _LOG.info(f"[启动] 交易日历同步完成，共 {len(records)} 个交易日")
+    
+    except Exception as e:
+        _LOG.error(f"[启动] 交易日历同步失败: {e}")
+
+async def trigger_startup_sync():
+    """触发启动时的数据同步"""
+    
+    from backend.services.data_requirement_parser import get_requirement_parser
+    from backend.services.priority_queue import get_priority_queue
+    from backend.db.watchlist import select_user_watchlist
+    
+    parser = get_requirement_parser()
+    queue = get_priority_queue()
+    
+    # 获取自选池
+    watchlist = select_user_watchlist()
+    watchlist_symbols = [w['symbol'] for w in watchlist]
+    
+    # 构建启动时的数据需求声明
+    requirements = []
+    
+    # 需求1：标的列表
+    requirements.append({
+        'scope': 'global',
+        'includes': [{
+            'type': 'symbol_index',
+            'priority': DATA_TYPE_DEFINITIONS['symbol_index']['priority']
+        }]
+    })
+    
+    # 需求2：自选池数据
+    if watchlist_symbols:
+        includes = []
+        
+        # 6个频率
+        for freq in settings.sync_standard_freqs:
+            dt_id = f'watchlist_kline_{freq}'
+            includes.append({
+                'type': dt_id,
+                'freq': freq,
+                'priority': DATA_TYPE_DEFINITIONS[dt_id]['priority']
+            })
+        
+        # 档案和因子
+        includes.append({
+            'type': 'watchlist_profile',
+            'priority': DATA_TYPE_DEFINITIONS['watchlist_profile']['priority']
+        })
+        includes.append({
+            'type': 'watchlist_factors',
+            'priority': DATA_TYPE_DEFINITIONS['watchlist_factors']['priority']
+        })
+        
+        requirements.append({
+            'scope': 'watchlist',
+            'symbols': watchlist_symbols,
+            'includes': includes
+        })
+    
+    # 需求3：全量档案补缺（P40）
+    # 注意：这个需求会生成大量任务，放在最后
+    requirements.append({
+        'scope': 'all_symbols',
+        'includes': [{
+            'type': 'all_symbols_profile',
+            'priority': DATA_TYPE_DEFINITIONS['all_symbols_profile']['priority']
+        }]
+    })
+    
+    # 解析并入队
+    tasks = parser.parse_requirements(requirements)
+    
+    for task in tasks:
+        await queue.enqueue(task)
+    
+    _LOG.info(f"[启动同步] 已生成 {len(tasks)} 个任务")
+
+@app.get("/api/ping")
+def ping() -> Dict[str, Any]:
+    return {"ok": True, "msg": "pong"}
+
+@app.get("/api/health")
+def health() -> Dict[str, Any]:
     return {
-        "ok": True,  # 应用可用
-        "time": datetime.now().isoformat(),  # 当前时间（ISO）
-        "timezone": settings.timezone,  # 时区（Asia/Shanghai）
-        "db_path": str(settings.db_path) if settings.debug else "[hidden]",  # DB 路径
-        "background_tasks": get_task_status(),  # 后台任务状态快照
+        "ok": True,
+        "time": datetime.now().isoformat(),
+        "timezone": settings.timezone,
+        "db_path": str(settings.db_path) if settings.debug else "[hidden]",
+        "executor_running": executor.running,
+        "queue_size": executor.queue.size(),
     }
 
-# 挂载路由（业务路由分层：路由薄，服务厚）
-app.include_router(candles_router)        # /api/candles
-app.include_router(user_config_router)    # /api/user/config
-app.include_router(watchlist_router)      # /api/watchlist*
-app.include_router(storage_router)        # /api/storage*
-app.include_router(debug_router)          # /api/debug*
-app.include_router(symbols_router)        # /api/symbols*
-app.include_router(user_history_router)   # /api/user/history*（新增）
+app.include_router(candles_router)
+app.include_router(symbols_router)
+app.include_router(user_config_router)
+app.include_router(user_router)
+app.include_router(debug_router)
+app.include_router(events_router)
+app.include_router(data_sync_router)
 
-# 本地直接运行（调试）
-if __name__ == "__main__":  # 判断是否脚本运行
-    import uvicorn  # 导入 uvicorn
-    uvicorn.run(app, host=settings.host, port=settings.port)  # 启动服务
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.app:app", host=settings.host, port=settings.port, reload=True)

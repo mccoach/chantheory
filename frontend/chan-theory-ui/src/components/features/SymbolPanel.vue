@@ -1,6 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
-<!-- REFACTORED: 重构为协调者组件 -->
-<!-- FINAL FIX: 恢复 inWatchlistSet 计算属性和对 SymbolSearch 的 :watchlist 绑定，彻底修复星标状态不同步问题。 -->
+<!-- (REFACTORED)
+     - 移除对已废弃的 historyService 的所有引用和调用。
+     - 历史记录功能现在完全由 useUserSettings 在前端 LocalStorage 中管理。
+     - (FIX) 修复 inWatchlistSet 计算属性，确保将对象数组映射为 symbol 字符串集合。
+-->
 <template>
   <div class="symbol-row">
     <!-- 左列：标的输入与自选 -->
@@ -49,7 +52,6 @@ import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import * as historyApi from "@/services/historyService";
 
 // 导入新的子组件
 import SymbolSearch from "./symbol/SymbolSearch.vue";
@@ -87,8 +89,11 @@ onBeforeUnmount(() => {
 
 // === 计算属性 (决定子组件显示) ===
 
-// NEW: 恢复 inWatchlistSet，作为响应式数据源传递给子组件
-const inWatchlistSet = computed(() => new Set(Array.isArray(wl.items.value) ? wl.items.value : []));
+// (FIX) 修复数据类型不匹配问题：将对象数组映射为 symbol 字符串集合
+const inWatchlistSet = computed(() => {
+  const arr = Array.isArray(wl.items.value) ? wl.items.value : [];
+  return new Set(arr.map(it => String((it && it.symbol) || "").trim()).filter(Boolean));
+});
 
 const historyDisplay = computed(() => {
   const list = settings.getSymbolHistoryList();
@@ -124,7 +129,7 @@ function onBlur() {
   }, 150);
 }
 
-watch(inputText, (newValue) => {
+watch(inputText, () => {
   invalidHint.value = "";
   updateSuggestions();
 });
@@ -155,12 +160,6 @@ async function selectItem(item) {
   vm.code.value = sym;
   settings.setLastSymbol(sym);
   settings.addSymbolHistoryEntry(sym);
-
-  try {
-    await historyApi.add({ symbol: sym, freq: vm.freq.value });
-  } catch (e) {
-    console.warn("history add failed:", e?.message || e);
-  }
 
   invalidHint.value = "";
   suggestions.value = [];

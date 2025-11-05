@@ -1,0 +1,1944 @@
+个股信息查询-东财
+接口: stock_individual_info_em
+
+目标地址: http://quote.eastmoney.com/concept/sh603777.html?from=classic
+
+描述: 东方财富-个股-股票信息
+
+限量: 单次返回指定 symbol 的个股信息
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="603777"; 股票代码
+timeout	float	timeout=None; 默认不设置超时参数
+输出参数
+
+名称	类型	描述
+item	object	-
+value	object	-
+接口示例
+
+
+
+stock_individual_info_em_df = ak.stock_individual_info_em(symbol="000001")
+print(stock_individual_info_em_df)
+数据示例
+
+   item               value
+0    最新               7.05
+1  股票代码             000002
+2  股票简称            万  科Ａ
+3   总股本       11930709471.0
+4   流通股        9716935865.0
+5   总市值  84111501770.550003
+6  流通市值      68504397848.25
+7    行业              房地产开发
+8  上市时间            19910129
+个股信息查询-雪球
+接口: stock_individual_basic_info_xq
+
+目标地址: https://xueqiu.com/snowman/S/SH601127/detail#/GSJJ
+
+描述: 雪球财经-个股-公司概况-公司简介
+
+限量: 单次返回指定 symbol 的个股信息
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="SH601127"; 股票代码
+token	str	token=None;
+timeout	float	timeout=None; 默认不设置超时参数
+输出参数
+
+名称	类型	描述
+item	object	-
+value	object	-
+接口示例
+
+
+
+stock_individual_basic_info_xq_df = ak.stock_individual_basic_info_xq(symbol="SH601127")
+print(stock_individual_basic_info_xq_df)
+数据示例
+
+                            item                                              value
+0                         org_id                                         T000071215
+1                    org_name_cn                                        赛力斯集团股份有限公司
+2              org_short_name_cn                                                赛力斯
+3                    org_name_en                               Seres Group Co.,Ltd.
+4              org_short_name_en                                              SERES
+5        main_operation_business      新能源汽车及核心三电(电池、电驱、电控)、传统汽车及核心部件总成的研发、制造、销售及服务。
+6                operating_scope  　　一般项目：制造、销售：汽车零部件、机动车辆零部件、普通机械、电器机械、电器、电子产品（不...
+7                district_encode                                             500106
+8            org_cn_introduction  赛力斯始创于1986年，是以新能源汽车为核心业务的技术科技型汽车企业。现有员工1.6万人，A...
+9           legal_representative                                                张正萍
+10               general_manager                                                张正萍
+11                     secretary                                                 申薇
+12              established_date                                      1178812800000
+13                     reg_asset                                       1509782193.0
+14                     staff_num                                              16102
+15                     telephone                                     86-23-65179666
+16                      postcode                                             401335
+17                           fax                                     86-23-65179777
+18                         email                                    601127@seres.cn
+19                   org_website                                   www.seres.com.cn
+20                reg_address_cn                                      重庆市沙坪坝区五云湖路7号
+21                reg_address_en                                               None
+22             office_address_cn                                      重庆市沙坪坝区五云湖路7号
+23             office_address_en                                               None
+24               currency_encode                                             019001
+25                      currency                                                CNY
+26                   listed_date                                      1465920000000
+27               provincial_name                                                重庆市
+28             actual_controller                                       张兴海 (13.79%)
+29                   classi_name                                               民营企业
+30                   pre_name_cn                                     重庆小康工业集团股份有限公司
+31                      chairman                                                张正萍
+32               executives_nums                                                 20
+33              actual_issue_vol                                        142500000.0
+34                   issue_price                                               5.81
+35             actual_rc_net_amt                                        738451000.0
+36              pe_after_issuing                                              18.19
+37  online_success_rate_of_issue                                           0.110176
+38            affiliate_industry         {'ind_code': 'BK0025', 'ind_name': '汽车整车'}
+
+历史行情数据
+历史行情数据-东财
+接口: stock_zh_a_hist
+
+目标地址: https://quote.eastmoney.com/concept/sh603777.html?from=classic(示例)
+
+描述: 东方财富-沪深京 A 股日频率数据; 历史数据按日频率更新, 当日收盘价请在收盘后获取
+
+限量: 单次返回指定沪深京 A 股上市公司、指定周期和指定日期间的历史行情日频率数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='603777'; 股票代码可以在 ak.stock_zh_a_spot_em() 中获取
+period	str	period='daily'; choice of {'daily', 'weekly', 'monthly'}
+start_date	str	start_date='20210301'; 开始查询的日期
+end_date	str	end_date='20210616'; 结束查询的日期
+adjust	str	默认返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据
+timeout	float	timeout=None; 默认不设置超时参数
+
+输出参数-历史行情数据
+
+名称	类型	描述
+日期	object	交易日
+股票代码	object	不带市场标识的股票代码
+开盘	float64	开盘价
+收盘	float64	收盘价
+最高	float64	最高价
+最低	float64	最低价
+成交量	int64	注意单位: 手
+成交额	float64	注意单位: 元
+振幅	float64	注意单位: %
+涨跌幅	float64	注意单位: %
+涨跌额	float64	注意单位: 元
+换手率	float64	注意单位: %
+
+接口示例-历史行情数据-不复权
+
+
+
+stock_zh_a_hist_df = ak.stock_zh_a_hist(symbol="000001", period="daily", start_date="20170301", end_date='20240528', adjust="")
+print(stock_zh_a_hist_df)
+
+接口示例-历史行情数据-前复权
+
+
+
+stock_zh_a_hist_df = ak.stock_zh_a_hist(symbol="000001", period="daily", start_date="20170301", end_date='20240528', adjust="qfq")
+print(stock_zh_a_hist_df)
+
+接口示例-历史行情数据-后复权
+
+
+
+stock_zh_a_hist_df = ak.stock_zh_a_hist(symbol="000001", period="daily", start_date="20170301", end_date='20240528', adjust="hfq")
+print(stock_zh_a_hist_df)
+
+历史行情数据-新浪
+接口: stock_zh_a_daily
+
+P.S. 建议切换为 stock_zh_a_hist 接口使用(该接口数据质量高, 访问无限制)
+
+目标地址: https://finance.sina.com.cn/realstock/company/sh600006/nc.shtml(示例)
+
+描述: 新浪财经-沪深京 A 股的数据, 历史数据按日频率更新; 注意其中的 sh689009 为 CDR, 请 通过 ak.stock_zh_a_cdr_daily 接口获取
+
+限量: 单次返回指定沪深京 A 股上市公司指定日期间的历史行情日频率数据, 多次获取容易封禁 IP
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='sh600000'; 股票代码可以在 ak.stock_zh_a_spot() 中获取
+start_date	str	start_date='20201103'; 开始查询的日期
+end_date	str	end_date='20201116'; 结束查询的日期
+adjust	str	默认返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据; hfq-factor
+
+输出参数-历史行情数据
+
+名称	类型	描述
+date	object	交易日
+open	float64	开盘价
+high	float64	最高价
+low	float64	最低价
+close	float64	收盘价
+volume	float64	成交量; 注意单位: 股
+amount	float64	成交额; 注意单位: 元
+outstanding_share	float64	流动股本; 注意单位: 股
+turnover	float64	换手率=成交量/流动股本
+
+接口示例-历史行情数据(前复权)
+
+
+
+stock_zh_a_daily_qfq_df = ak.stock_zh_a_daily(symbol="sz000001", start_date="19910403", end_date="20231027", adjust="qfq")
+print(stock_zh_a_daily_qfq_df)
+
+接口示例-历史行情数据(后复权)
+
+
+
+stock_zh_a_daily_hfq_df = ak.stock_zh_a_daily(symbol="sz000001", start_date="19910403", end_date="20231027", adjust="hfq")
+print(stock_zh_a_daily_hfq_df)
+
+接口示例-前复权因子
+
+
+
+qfq_factor_df = ak.stock_zh_a_daily(symbol="sz000002", adjust="qfq-factor")
+print(qfq_factor_df)
+
+接口示例-后复权因子
+
+
+
+hfq_factor_df = ak.stock_zh_a_daily(symbol="sz000002", adjust="hfq-factor")
+print(hfq_factor_df)
+
+历史行情数据-腾讯
+接口: stock_zh_a_hist_tx
+
+目标地址: https://gu.qq.com/sh000919/zs
+
+描述: 腾讯证券-日频-股票历史数据; 历史数据按日频率更新, 当日收盘价请在收盘后获取
+
+限量: 单次返回指定沪深京 A 股上市公司、指定周期和指定日期间的历史行情日频率数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='sz000001'; 带市场标识
+start_date	str	start_date='19000101'; 开始查询的日期
+end_date	str	end_date='20500101'; 结束查询的日期
+adjust	str	默认返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据
+timeout	float	timeout=None; 默认不设置超时参数
+
+输出参数-历史行情数据
+
+名称	类型	描述
+date	object	交易日
+open	float64	开盘价
+close	float64	收盘价
+high	float64	最高价
+low	float64	最低价
+amount	int64	注意单位: 手
+
+接口示例-不复权
+
+
+
+stock_zh_a_hist_tx_df = ak.stock_zh_a_hist_tx(symbol="sz000001", start_date="20200101", end_date="20231027", adjust="")
+print(stock_zh_a_hist_tx_df)
+
+接口示例-前复权
+
+
+
+stock_zh_a_hist_tx_df = ak.stock_zh_a_hist_tx(symbol="sz000001", start_date="20200101", end_date="20231027", adjust="qfq")
+print(stock_zh_a_hist_tx_df)
+
+接口示例-后复权
+
+
+
+stock_zh_a_hist_tx_df = ak.stock_zh_a_hist_tx(symbol="sz000001", start_date="20200101", end_date="20231027", adjust="hfq")
+print(stock_zh_a_hist_tx_df)
+
+分时数据-新浪
+接口: stock_zh_a_minute
+
+目标地址: http://finance.sina.com.cn/realstock/company/sh600519/nc.shtml
+
+描述: 新浪财经-沪深京 A 股股票或者指数的分时数据，目前可以获取 1, 5, 15, 30, 60 分钟的数据频率, 可以指定是否复权
+
+限量: 单次返回指定股票或指数的指定频率的最近交易日的历史分时行情数据; 注意调用频率
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='sh000300'; 同日频率数据接口
+period	str	period='1'; 获取 1, 5, 15, 30, 60 分钟的数据频率
+adjust	str	adjust=""; 默认为空: 返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据;
+输出参数
+
+名称	类型	描述
+day	object	-
+open	float64	-
+high	float64	-
+low	float64	-
+close	float64	-
+volume	float64	-
+接口示例
+
+
+
+stock_zh_a_minute_df = ak.stock_zh_a_minute(symbol='sh600751', period='1', adjust="qfq")
+print(stock_zh_a_minute_df)
+
+分时数据-东财
+接口: stock_zh_a_hist_min_em
+
+目标地址: https://quote.eastmoney.com/concept/sh603777.html
+
+描述: 东方财富网-行情首页-沪深京 A 股-每日分时行情; 该接口只能获取近期的分时数据，注意时间周期的设置
+
+限量: 单次返回指定股票、频率、复权调整和时间区间的分时数据, 其中 1 分钟数据只返回近 5 个交易日数据且不复权
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='000300'; 股票代码
+start_date	str	start_date="1979-09-01 09:32:00"; 日期时间; 默认返回所有数据
+end_date	str	end_date="2222-01-01 09:32:00"; 日期时间; 默认返回所有数据
+period	str	period='5'; choice of {'1', '5', '15', '30', '60'}; 其中 1 分钟数据返回近 5 个交易日数据且不复权
+adjust	str	adjust=''; choice of {'', 'qfq', 'hfq'}; '': 不复权, 'qfq': 前复权, 'hfq': 后复权, 其中 1 分钟数据返回近 5 个交易日数据且不复权
+输出参数-1分钟数据
+
+名称	类型	描述
+时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	float64	注意单位: 手
+成交额	float64	-
+均价	float64	-
+接口示例-1分钟数据
+
+
+
+# 注意：该接口返回的数据只有最近一个交易日的有开盘价，其他日期开盘价为 0
+stock_zh_a_hist_min_em_df = ak.stock_zh_a_hist_min_em(symbol="000001", start_date="2024-03-20 09:30:00", end_date="2024-03-20 15:00:00", period="1", adjust="")
+print(stock_zh_a_hist_min_em_df)
+
+历史行情数据
+接口: stock_zh_kcb_daily
+
+目标地址: https://finance.sina.com.cn/realstock/company/sh688001/nc.shtml(示例)
+
+描述: 新浪财经-科创板股票历史行情数据
+
+限量: 单次返回指定 symbol 和 adjust 的所有历史行情数据; 请控制采集的频率, 大量抓取容易封IP
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="sh688008"; 带市场标识的股票代码
+adjust	str	默认不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据; hfq-factor: 返回后复权因子; qfq-factor: 返回前复权因子
+输出参数
+
+名称	类型	描述
+date	object	-
+close	float64	收盘价
+high	float64	最高价
+low	float64	最低价
+open	float64	开盘价
+volume	float64	成交量(股)
+after_volume	float64	盘后量; 参见科创板盘后固定价格交易
+after_amount	float64	盘后额; 参见科创板盘后固定价格交易
+outstanding_share	float64	流通股本(股)
+turnover	float64	换手率=成交量(股)/流通股本(股)
+接口示例
+
+
+
+stock_zh_kcb_daily_df = ak.stock_zh_kcb_daily(symbol="sh688399", adjust="hfq")
+print(stock_zh_kcb_daily_df)
+
+东方财富-成份股
+接口: stock_board_concept_cons_em
+
+目标地址: http://quote.eastmoney.com/center/boardlist.html#boards-BK06551
+
+描述: 东方财富-沪深板块-概念板块-板块成份
+
+限量: 单次返回当前时刻所有成份股
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="融资融券"; 支持传入板块代码比如：BK0655，可以通过调用 ak.stock_board_concept_name_em() 查看东方财富-概念板块的所有行业名称
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+最新价	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	float64	注意单位: 手
+成交额	float64	-
+振幅	float64	注意单位: %
+最高	float64	-
+最低	float64	-
+今开	float64	-
+昨收	float64	-
+换手率	float64	注意单位: %
+市盈率-动态	float64	-
+市净率	float64	-
+接口示例
+
+
+
+stock_board_concept_cons_em_df = ak.stock_board_concept_cons_em(symbol="融资融券")
+print(stock_board_concept_cons_em_df)
+
+东方财富-指数
+接口: stock_board_concept_hist_em
+
+目标地址: http://quote.eastmoney.com/bk/90.BK0715.html
+
+描述: 东方财富-沪深板块-概念板块-历史行情数据
+
+限量: 单次返回指定 symbol 和 adjust 的历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="绿色电力"; 可以通过调用 ak.stock_board_concept_name_em() 查看东方财富-概念板块的所有概念代码
+period	str	period="daily"; choice of {"daily", "weekly", "monthly"}
+start_date	str	start_date="20220101"
+end_date	str	end_date="20221128"
+adjust	str	adjust=""; choice of {'': 不复权, 默认; "qfq": 前复权, "hfq": 后复权}
+输出参数
+
+名称	类型	描述
+日期	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例
+
+
+
+stock_board_concept_hist_em_df = ak.stock_board_concept_hist_em(symbol="绿色电力", period="daily", start_date="20220101", end_date="20250227", adjust="")
+print(stock_board_concept_hist_em_df)
+
+东方财富-指数-分时
+接口: stock_board_concept_hist_min_em
+
+目标地址: http://quote.eastmoney.com/bk/90.BK0715.html
+
+描述: 东方财富-沪深板块-概念板块-分时历史行情数据
+
+限量: 单次返回指定 symbol 和 period 的历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="长寿药"; 可以通过调用 ak.stock_board_concept_name_em() 查看东方财富-概念板块的所有概念代码
+period	str	period="5"; choice of {"1", "5", "15", "30", "60"}
+输出参数-1分钟
+
+名称	类型	描述
+日期时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	int64	-
+成交额	float64	-
+最新价	float64	-
+接口示例-1分钟
+
+
+
+stock_board_concept_hist_min_em_df = ak.stock_board_concept_hist_min_em(symbol="长寿药", period="1")
+print(stock_board_concept_hist_min_em_df)
+
+输出参数-其他
+
+名称	类型	描述
+日期时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例-其他
+
+
+
+stock_board_concept_hist_min_em_df = ak.stock_board_concept_hist_min_em(symbol="长寿药", period="5")
+print(stock_board_concept_hist_min_em_df)
+
+行业板块
+同花顺-同花顺行业一览表
+接口: stock_board_industry_summary_ths
+
+目标地址: https://q.10jqka.com.cn/thshy/
+
+描述: 同花顺-同花顺行业一览表
+
+限量: 单次返回当前时刻同花顺行业一览表
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+序号	int64	-
+板块	object	-
+涨跌幅	object	注意单位: %
+总成交量	float64	注意单位: 万手
+总成交额	float64	注意单位: 亿元
+净流入	float64	注意单位: 亿元
+上涨家数	float64	-
+下跌家数	float64	-
+均价	float64	-
+领涨股	float64	-
+领涨股-最新价	object	-
+领涨股-涨跌幅	object	注意单位: %
+接口示例
+
+
+
+stock_board_industry_summary_ths_df = ak.stock_board_industry_summary_ths()
+print(stock_board_industry_summary_ths_df)
+
+同花顺-指数
+接口: stock_board_industry_index_ths
+
+目标地址: https://q.10jqka.com.cn/thshy/detail/code/881270/
+
+描述: 同花顺-板块-行业板块-指数日频率数据
+
+限量: 单次返回所有日频指数数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="元件"; 可以通过调用 ak.stock_board_industry_name_ths() 查看同花顺的所有行业名称
+start_date	str	start_date="20200101"; 开始时间
+end_date	str	end_date="20211027"; 结束时间
+输出参数
+
+名称	类型	描述
+日期	object	-
+开盘价	float64	-
+最高价	float64	-
+最低价	float64	-
+收盘价	float64	-
+成交量	int64	-
+成交额	float64	-
+接口示例
+
+
+
+stock_board_industry_index_ths_df = ak.stock_board_industry_index_ths(symbol="元件", start_date="20240101", end_date="20240718")
+print(stock_board_industry_index_ths_df)
+
+东方财富-行业板块
+接口: stock_board_industry_name_em
+
+目标地址: https://quote.eastmoney.com/center/boardlist.html#industry_board
+
+描述: 东方财富-沪深京板块-行业板块
+
+限量: 单次返回当前时刻所有行业板的实时行情数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+排名	int64	-
+板块名称	object	-
+板块代码	object	-
+最新价	float64	-
+涨跌额	float64	-
+涨跌幅	float64	注意单位：%
+总市值	int64	-
+换手率	float64	注意单位：%
+上涨家数	int64	-
+下跌家数	int64	-
+领涨股票	object	-
+领涨股票-涨跌幅	float64	注意单位：%
+接口示例
+
+
+
+stock_board_industry_name_em_df = ak.stock_board_industry_name_em()
+print(stock_board_industry_name_em_df)
+
+东方财富-行业板块-实时行情
+接口: stock_board_industry_spot_em
+
+目标地址: https://quote.eastmoney.com/bk/90.BK1027.html
+
+描述: 东方财富网-沪深板块-行业板块-实时行情
+
+限量: 单次返回指定板块的实时行情数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="小金属"
+输出参数
+
+名称	类型	描述
+item	object	-
+value	float64	-
+接口示例
+
+
+
+stock_board_industry_spot_em_df = ak.stock_board_industry_spot_em(symbol="小金属")
+print(stock_board_industry_spot_em_df)
+
+东方财富-成份股
+接口: stock_board_industry_cons_em
+
+目标地址: https://data.eastmoney.com/bkzj/BK1027.html
+
+描述: 东方财富-沪深板块-行业板块-板块成份
+
+限量: 单次返回指定 symbol 的所有成份股
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="小金属"; 支持传入板块代码比如：BK1027，可以通过调用 ak.stock_board_industry_name_em() 查看东方财富-行业板块的所有行业代码
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+最新价	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	float64	注意单位: 手
+成交额	float64	-
+振幅	float64	注意单位: %
+最高	float64	-
+最低	float64	-
+今开	float64	-
+昨收	float64	-
+换手率	float64	注意单位: %
+市盈率-动态	float64	-
+市净率	float64	-
+接口示例
+
+
+
+stock_board_industry_cons_em_df = ak.stock_board_industry_cons_em(symbol="小金属")
+print(stock_board_industry_cons_em_df)
+
+东方财富-成份股
+接口: stock_board_industry_cons_em
+
+目标地址: https://data.eastmoney.com/bkzj/BK1027.html
+
+描述: 东方财富-沪深板块-行业板块-板块成份
+
+限量: 单次返回指定 symbol 的所有成份股
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="小金属"; 支持传入板块代码比如：BK1027，可以通过调用 ak.stock_board_industry_name_em() 查看东方财富-行业板块的所有行业代码
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+最新价	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	float64	注意单位: 手
+成交额	float64	-
+振幅	float64	注意单位: %
+最高	float64	-
+最低	float64	-
+今开	float64	-
+昨收	float64	-
+换手率	float64	注意单位: %
+市盈率-动态	float64	-
+市净率	float64	-
+接口示例
+
+
+
+stock_board_industry_cons_em_df = ak.stock_board_industry_cons_em(symbol="小金属")
+print(stock_board_industry_cons_em_df)
+数据示例
+
+    序号  代码   名称    最新价   涨跌幅  ...  今开 昨收    换手率   市盈率-动态 市净率
+0    1  300811  铂科新材  53.34  5.17  ...  52.18  50.72   2.93     42.12  5.82
+1    2  002842  翔鹭钨业   5.36  3.68  ...   5.16   5.17   5.22    -27.42  1.77
+2    3  000962  东方钽业   9.89  3.13  ...   9.58   9.59   1.94     25.59  2.15
+3    4  600980  北矿科技  13.21  2.72  ...  12.76  12.86   2.96     26.17  1.95
+4    5  300328  宜安科技   4.92  2.71  ...   4.77   4.79   1.37    495.38  3.10
+5    6  002428  云南锗业   9.84  2.29  ...   9.63   9.62   2.53   -991.04  4.58
+6    7  603993  洛阳钼业   6.13  2.17  ...   5.98   6.00   0.59     40.65  2.48
+7    8  600281  华阳新材   2.95  2.08  ...   2.85   2.89   4.80     -9.12  4.74
+8    9  688077   大地熊  15.40  2.05  ...  15.17  15.09   1.26    -38.03  1.58
+9   10  300127  银河磁体  13.90  1.98  ...  13.56  13.63   2.18     23.07  3.17
+10  11  000831  中国稀土  28.14  1.74  ...  26.90  27.66   3.43    178.41  5.76
+11  12  000960  锡业股份  13.26  1.69  ...  13.00  13.04   0.82     14.94  1.25
+12  13  605376  博迁新材  19.39  1.52  ...  18.99  19.10   0.73    296.20  3.12
+13  14  301141  中科磁业  45.27  1.39  ...  43.90  44.65  19.94     78.91  3.19
+14  15  600259  广晟有色  29.04  1.29  ...  28.50  28.67   1.07     44.03  2.71
+15  16  002149  西部材料  12.68  1.20  ...  12.47  12.53   0.87     30.81  2.14
+16  17  600206  有研新材  10.22  1.19  ...  10.11  10.10   0.94     46.45  2.34
+17  18  603399  吉翔股份   6.96  1.16  ...   6.83   6.88   2.23    -13.83  1.80
+18  19  300835  龙磁科技  23.70  1.11  ...  23.23  23.44   2.30     32.74  2.73
+19  20  600111  北方稀土  18.59  1.03  ...  18.28  18.40   0.88     36.51  3.25
+20  21  301026  浩通科技  21.66  1.03  ...  21.44  21.44   1.76     17.86  1.70
+21  22  002167  东方锆业   4.94  1.02  ...   4.87   4.89   1.46   -380.23  2.53
+22  23  600456  宝钛股份  26.40  0.92  ...  26.30  26.16   0.83     17.22  1.93
+23  24  300224  正海磁材  10.32  0.58  ...  10.20  10.26   0.66     17.27  2.43
+24  25  002378  章源钨业   4.73  0.42  ...   4.71   4.71   0.52     38.67  2.83
+25  26  601958  金钼股份   9.86  0.41  ...   9.82   9.82   0.57     10.18  2.07
+26  27  600366  宁波韵升   5.86  0.34  ...   5.85   5.84   0.78    -19.79  1.12
+27  28  000970  中科三环   8.95  0.34  ...   8.89   8.92   1.04     36.51  1.67
+28  29  600549  厦门钨业  16.19  0.31  ...  16.05  16.14   0.68     14.36  2.05
+29  30  600392  盛和资源   8.93  0.22  ...   8.87   8.91   1.01     74.21  1.77
+30  31  600459  贵研铂业  13.54  0.22  ...  13.50  13.51   0.44     19.26  1.63
+31  32  600615  丰华股份   9.44  0.21  ...   9.35   9.42   2.03 -20739.46  2.80
+32  33  000657  中钨高新   8.08  0.12  ...   8.02   8.07   0.89     26.84  1.97
+33  34  300748  金力永磁  16.25  0.00  ...  16.10  16.25   1.02     33.16  3.09
+34  35  000795   英洛华   5.04  0.00  ...   5.04   5.04   1.00     52.08  2.16
+35  36  688190  云路股份  61.66 -0.48  ...  61.99  61.96   0.67     23.29  3.38
+36  37  002738  中矿资源  32.29 -1.10  ...  32.10  32.65   2.25      8.54  1.96
+[37 rows x 16 columns]
+东方财富-指数-日频
+接口: stock_board_industry_hist_em
+
+目标地址: https://quote.eastmoney.com/bk/90.BK1027.html
+
+描述: 东方财富-沪深板块-行业板块-历史行情数据
+
+限量: 单次返回指定 symbol 和 adjust 的所有历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="小金属"; 可以通过调用 ak.stock_board_industry_name_em() 查看东方财富-行业板块的所有行业代码
+start_date	str	start_date="20211201";
+end_date	str	end_date="20220401";
+period	str	period="日k"; 周期; choice of {"日k", "周k", "月k"}
+adjust	str	adjust=""; choice of {'': 不复权, 默认; "qfq": 前复权, "hfq": 后复权}
+输出参数
+
+名称	类型	描述
+日期	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例
+
+
+
+stock_board_industry_hist_em_df = ak.stock_board_industry_hist_em(symbol="小金属", start_date="20211201", end_date="20240222", period="日k", adjust="")
+print(stock_board_industry_hist_em_df)
+
+东方财富-指数-分时
+接口: stock_board_industry_hist_min_em
+
+目标地址: http://quote.eastmoney.com/bk/90.BK1027.html
+
+描述: 东方财富-沪深板块-行业板块-分时历史行情数据
+
+限量: 单次返回指定 symbol 和 period 的所有历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="小金属"; 可以通过调用 ak.stock_board_industry_name_em() 查看东方财富-行业板块的所有行业代码
+period	str	period=""; choice of {"1", "5", "15", "30", "60"}
+输出参数-1分钟
+
+名称	类型	描述
+日期时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	int64	-
+成交额	float64	-
+最新价	float64	-
+接口示例-1分钟
+
+
+
+stock_board_industry_hist_min_em_df = ak.stock_board_industry_hist_min_em(symbol="小金属", period="1")
+print(stock_board_industry_hist_min_em_df)
+
+输出参数-其他
+
+名称	类型	描述
+日期时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例-其他
+
+
+
+stock_board_industry_hist_min_em_df = ak.stock_board_industry_hist_min_em(symbol="小金属", period="5")
+print(stock_board_industry_hist_min_em_df)
+
+涨停板行情
+涨停股池
+接口: stock_zt_pool_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=ztgc
+
+描述: 东方财富网-行情中心-涨停板行情-涨停股池
+
+限量: 单次返回指定 date 的涨停股池数据; 该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20241008'
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	float64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+换手率	float64	注意单位: %
+封板资金	int64	-
+首次封板时间	object	注意格式: 09:25:00
+最后封板时间	object	注意格式: 09:25:00
+炸板次数	int64	-
+涨停统计	object	-
+连板数	int64	注意格式: 1 为首板
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_em_df = ak.stock_zt_pool_em(date='20241008')
+print(stock_zt_pool_em_df)
+
+昨日涨停股池
+接口: stock_zt_pool_previous_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=zrzt
+
+描述: 东方财富网-行情中心-涨停板行情-昨日涨停股池
+
+限量: 单次返回指定 date 的昨日涨停股池数据; 该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20240415'
+输出参数
+
+名称	类型	描述
+序号	int32	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	int64	-
+涨停价	int64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+换手率	float64	注意单位: %
+涨速	float64	注意单位: %
+振幅	float64	注意单位: %
+昨日封板时间	int64	注意格式: 09:25:00
+昨日连板数	int64	注意格式: 1 为首板
+涨停统计	object	-
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_previous_em_df = ak.stock_zt_pool_previous_em(date='20240415')
+print(stock_zt_pool_previous_em_df)
+
+强势股池
+接口: stock_zt_pool_strong_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=qsgc
+
+描述: 东方财富网-行情中心-涨停板行情-强势股池
+
+限量: 单次返回指定 date 的强势股池数据；该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20241009'
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	float64	-
+涨停价	float64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+换手率	float64	注意单位: %
+涨速	float64	注意单位: %
+是否新高	object	-
+量比	float64	-
+涨停统计	object	-
+入选理由	object	-
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_strong_em_df = ak.stock_zt_pool_strong_em(date='20241231')
+print(stock_zt_pool_strong_em_df)
+
+次新股池
+接口: stock_zt_pool_sub_new_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=cxgc
+
+描述: 东方财富网-行情中心-涨停板行情-次新股池
+
+限量: 单次返回指定 date 的次新股池数据；该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20241231'
+输出参数
+
+名称	类型	描述
+序号	int32	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	float64	-
+涨停价	float64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+转手率	float64	注意单位: %
+开板几日	int64	-
+开板日期	int64	-
+上市日期	int64	-
+是否新高	int64	-
+涨停统计	object	-
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_sub_new_em_df = ak.stock_zt_pool_sub_new_em(date='20241231')
+print(stock_zt_pool_sub_new_em_df)
+
+炸板股池
+接口: stock_zt_pool_zbgc_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=zbgc
+
+描述: 东方财富网-行情中心-涨停板行情-炸板股池
+
+限量: 单次返回指定 date 的炸板股池数据；该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20241011'
+输出参数
+
+名称	类型	描述
+序号	int32	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	float64	-
+涨停价	float64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+换手率	float64	注意单位: %
+涨速	int64	-
+首次封板时间	object	注意格式: 09:25:00
+炸板次数	int64	-
+涨停统计	int64	-
+振幅	object	-
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_zbgc_em_df = ak.stock_zt_pool_zbgc_em(date='20241011')
+print(stock_zt_pool_zbgc_em_df)
+
+跌停股池
+接口: stock_zt_pool_dtgc_em
+
+目标地址: https://quote.eastmoney.com/ztb/detail#type=zbgc
+
+描述: 东方财富网-行情中心-涨停板行情-跌停股池
+
+限量: 单次返回指定 date 的跌停股池数据；该接口只能获取近期的数据
+
+输入参数
+
+名称	类型	描述
+date	str	date='20241011'
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+涨跌幅	float64	注意单位: %
+最新价	float64	-
+成交额	int64	-
+流通市值	float64	-
+总市值	float64	-
+动态市盈率	float64	-
+换手率	float64	注意单位: %
+封单资金	int64	-
+最后封板时间	object	注意格式: 09:25:00
+板上成交额	int64	-
+连续跌停	int64	-
+开板次数	int64	-
+所属行业	object	-
+接口示例
+
+
+
+stock_zt_pool_dtgc_em_df = ak.stock_zt_pool_dtgc_em(date='20241011')
+print(stock_zt_pool_dtgc_em_df)
+
+基金基本信息
+接口: fund_name_em
+
+目标地址: http://fund.eastmoney.com/fund.html
+
+描述: 东方财富网-天天基金网-基金数据-所有基金的基本信息数据
+
+限量: 单次返回当前时刻所有历史数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+基金代码	object	-
+拼音缩写	object	-
+基金简称	object	-
+基金类型	object	-
+拼音全称	object	-
+接口示例
+
+
+
+fund_name_em_df = ak.fund_name_em()
+print(fund_name_em_df)
+
+基金基本信息-雪球
+接口: fund_individual_basic_info_xq
+
+目标地址: https://danjuanfunds.com/funding/000001
+
+描述: 雪球基金-基金详情
+
+限量: 单次返回单只基金基本信息
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="000001"; 基金代码
+timeout	float	timeout=None; 默认不设置超时参数
+输出参数
+
+名称	类型	描述
+item	object	-
+value	object	-
+接口示例
+
+
+
+fund_individual_basic_info_xq_df = ak.fund_individual_basic_info_xq(symbol="000001")
+print(fund_individual_basic_info_xq_df)
+
+数据示例
+
+      item                                              value
+0     基金代码                                             000001
+1     基金名称                                             华夏成长混合
+2     基金全称                                            华夏成长前收费
+3     成立时间                                         2001-12-18
+4     最新规模                                             27.30亿
+5     基金公司                                         华夏基金管理有限公司
+6     基金经理                                            王泽实 万方方
+7     托管银行                                       中国建设银行股份有限公司
+8     基金类型                                             混合型-偏股
+9     评级机构                                               晨星评级
+10    基金评级                                               一星基金
+11    投资策略  在股票投资方面，本基金重点投资于预期利润或收入具有良好增长潜力的成长型上市公司发行的股票，从...
+12    投资目标  本基金属成长型基金，主要通过投资于具有良好成长性的上市公司的股票，在保持基金资产安全性和流动...
+13  业绩比较基准                                       本基金暂不设业绩比较基准
+
+基金基本信息-指数型
+接口: fund_info_index_em
+
+目标地址: http://fund.eastmoney.com/trade/zs.html
+
+描述: 东方财富网-天天基金网-基金数据-基金基本信息-指数型
+
+限量: 单次返回当前时刻所有历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="全部"; choice of {"全部", "沪深指数", "行业主题", "大盘指数", "中盘指数", "小盘指数", "股票指数", "债券指数"}
+indicator	str	indicator="全部"; choice of {"全部", "被动指数型", "增强指数型"}
+输出参数
+
+名称	类型	描述
+基金代码	object	-
+基金名称	object	-
+单位净值	float64	-
+日期	object	-
+日增长率	float64	注意单位: %
+近1周	float64	注意单位: %
+近1月	float64	注意单位: %
+近3月	float64	注意单位: %
+近6月	float64	注意单位: %
+近1年	float64	注意单位: %
+近2年	float64	注意单位: %
+近3年	float64	注意单位: %
+今年来	float64	注意单位: %
+成立来	float64	注意单位: %
+手续费	float64	注意单位: %
+起购金额	object	-
+跟踪标的	object	-
+跟踪方式	object	-
+接口示例
+
+
+
+fund_info_index_em_df = ak.fund_info_index_em(symbol="沪深指数", indicator="增强指数型")
+print(fund_info_index_em_df)
+数据示例
+
+     基金代码            基金名称         单位净值    日期  ...   手续费  起购金额  跟踪标的   跟踪方式
+0    005313        万家中证1000指数增强A  1.3029  2022-07-26  ...  0.15   10元  沪深指数  增强指数型
+1    005314        万家中证1000指数增强C  1.2988  2022-07-26  ...  0.00   10元  沪深指数  增强指数型
+2    004194        招商中证1000指数增强A  1.5630  2022-07-26  ...  0.12   10元  沪深指数  增强指数型
+
+ETF基金分时行情-东财
+接口: fund_etf_hist_min_em
+
+目标地址: https://quote.eastmoney.com/sz159707.html
+
+描述: 东方财富-ETF 分时行情; 该接口只能获取近期的分时数据，注意时间周期的设置
+
+限量: 单次返回指定 ETF、频率、复权调整和时间区间的分时数据, 其中 1 分钟数据只返回近 5 个交易日数据且不复权
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='513500'; ETF 代码可以在 ak.fund_etf_spot_em() 中获取
+start_date	str	start_date="1979-09-01 09:32:00"; 日期时间; 默认返回所有数据
+end_date	str	end_date="2222-01-01 09:32:00"; 日期时间; 默认返回所有数据
+period	str	period='5'; choice of {'1', '5', '15', '30', '60'}; 其中 1 分钟数据返回近 5 个交易日数据且不复权
+adjust	str	adjust=''; choice of {'', 'qfq', 'hfq'}; '': 不复权, 'qfq': 前复权, 'hfq': 后复权, 其中 1 分钟数据返回近 5 个交易日数据且不复权
+输出参数-1分钟数据
+
+名称	类型	描述
+时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	float64	-
+成交额	float64	-
+均价	float64	-
+接口示例-1分钟数据
+
+
+
+fund_etf_hist_min_em_df = ak.fund_etf_hist_min_em(symbol="511220", period="1", adjust="", start_date="2024-03-20 09:30:00", end_date="2024-03-20 17:40:00")
+print(fund_etf_hist_min_em_df)
+
+输出参数-其他
+
+名称	类型	描述
+时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	float64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例-其他
+
+
+
+fund_etf_hist_min_em_df = ak.fund_etf_hist_min_em(symbol="513500", period="5", adjust="hfq", start_date="2023-12-11 09:32:00", end_date="2023-12-11 17:40:00")
+print(fund_etf_hist_min_em_df)
+
+LOF基金分时行情-东财
+接口: fund_lof_hist_min_em
+
+目标地址: https://quote.eastmoney.com/sz166009.html
+
+描述: 东方财富-LOF 分时行情; 该接口只能获取近期的分时数据，注意时间周期的设置
+
+限量: 单次返回指定 LOF、频率、复权调整和时间区间的分时数据, 其中 1 分钟数据只返回近 5 个交易日数据且不复权
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='166009'; LOF 代码可以在 ak.fund_lof_spot_em() 中获取
+start_date	str	start_date="1979-09-01 09:32:00"; 日期时间; 默认返回所有数据
+end_date	str	end_date="2222-01-01 09:32:00"; 日期时间; 默认返回所有数据
+period	str	period='5'; choice of {'1', '5', '15', '30', '60'}; 其中 1 分钟数据返回近 5 个交易日数据且不复权
+adjust	str	adjust=''; choice of {'', 'qfq', 'hfq'}; '': 不复权, 'qfq': 前复权, 'hfq': 后复权, 其中 1 分钟数据返回近 5 个交易日数据且不复权
+输出参数-1分钟数据
+
+名称	类型	描述
+时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	float64	-
+成交额	float64	-
+均价	float64	-
+接口示例-1分钟数据
+
+
+
+fund_lof_hist_min_em_df = ak.fund_lof_hist_min_em(symbol="166009", period="1", adjust="", start_date="2024-03-20 09:30:00", end_date="2024-03-20 14:40:00")
+print(fund_lof_hist_min_em_df)
+
+输出参数-其他
+
+名称	类型	描述
+时间	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+涨跌幅	float64	注意单位: %
+涨跌额	float64	-
+成交量	float64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+换手率	float64	注意单位: %
+接口示例-其他
+
+
+
+fund_lof_hist_min_em_df = ak.fund_lof_hist_min_em(symbol="166009", period="5", adjust="hfq", start_date="2023-07-01 09:32:00", end_date="2023-07-04 14:40:00")
+print(fund_lof_hist_min_em_df)
+
+ETF基金历史行情-东财
+接口: fund_etf_hist_em
+
+目标地址: http://quote.eastmoney.com/sz159707.html
+
+描述: 东方财富-ETF 行情; 历史数据按日频率更新, 当日收盘价请在收盘后获取
+
+限量: 单次返回指定 ETF、指定周期和指定日期间的历史行情日频率数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='159707'; ETF 代码可以在 ak.fund_etf_spot_em() 中获取或查看东财主页
+period	str	period='daily'; choice of {'daily', 'weekly', 'monthly'}
+start_date	str	start_date='20000101'; 开始查询的日期
+end_date	str	end_date='20230104'; 结束查询的日期
+adjust	str	默认返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据
+
+输出参数
+
+名称	类型	描述
+日期	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	-
+涨跌幅	float64	-
+涨跌额	float64	-
+换手率	float64	-
+接口示例-不复权
+
+
+
+fund_etf_hist_em_df = ak.fund_etf_hist_em(symbol="513500", period="daily", start_date="20000101", end_date="20230201", adjust="")
+print(fund_etf_hist_em_df)
+
+接口示例-前复权
+
+
+
+fund_etf_hist_em_df = ak.fund_etf_hist_em(symbol="513500", period="daily", start_date="20000101", end_date="20230201", adjust="qfq")
+print(fund_etf_hist_em_df)
+
+接口示例-后复权
+
+
+
+fund_etf_hist_em_df = ak.fund_etf_hist_em(symbol="513500", period="daily", start_date="20000101", end_date="20230201", adjust="hfq")
+print(fund_etf_hist_em_df)
+
+LOF基金历史行情-东财
+接口: fund_lof_hist_em
+
+目标地址: https://quote.eastmoney.com/sz166009.html
+
+描述: 东方财富-LOF 行情; 历史数据按日频率更新, 当日收盘价请在收盘后获取
+
+限量: 单次返回指定 LOF、指定周期和指定日期间的历史行情日频率数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol='166009'; LOF 代码可以在 ak.fund_lof_spot_em() 中获取
+period	str	period='daily'; choice of {'daily', 'weekly', 'monthly'}
+start_date	str	start_date='20000101'; 开始查询的日期
+end_date	str	end_date='20230104'; 结束查询的日期
+adjust	str	默认返回不复权的数据; qfq: 返回前复权后的数据; hfq: 返回后复权后的数据
+
+
+输出参数
+
+名称	类型	描述
+日期	object	-
+开盘	float64	-
+收盘	float64	-
+最高	float64	-
+最低	float64	-
+成交量	int64	-
+成交额	float64	-
+振幅	float64	-
+涨跌幅	float64	-
+涨跌额	float64	-
+换手率	float64	-
+接口示例-不复权
+
+
+
+fund_lof_hist_em_df = ak.fund_lof_hist_em(symbol="166009", period="daily", start_date="20000101", end_date="20230703", adjust="")
+print(fund_lof_hist_em_df)
+
+接口示例-前复权
+
+
+
+fund_lof_hist_em_df = ak.fund_lof_hist_em(symbol="166009", period="daily", start_date="20000101", end_date="20230703", adjust="qfq")
+print(fund_lof_hist_em_df)
+
+接口示例-后复权
+
+
+
+fund_lof_hist_em_df = ak.fund_lof_hist_em(symbol="166009", period="daily", start_date="20000101", end_date="20230703", adjust="hfq")
+print(fund_lof_hist_em_df)
+
+基金历史行情-新浪
+接口: fund_etf_hist_sina
+
+目标地址: http://vip.stock.finance.sina.com.cn/fund_center/index.html#jjhqetf
+
+描述: 新浪财经-基金行情的日频率行情数据
+
+限量: 单次返回指定基金的所有数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="sh510050"; 基金列表可以通过 ak.fund_etf_category_sina(symbol="LOF基金") 可选参数为: 封闭式基金, ETF基金, LOF基金 查询
+输出参数
+
+名称	类型	描述
+date	object	-
+open	float64	-
+high	float64	-
+low	float64	-
+close	float64	-
+volume	int64	注意单位: 手
+接口示例
+
+
+
+fund_etf_hist_sina_df = ak.fund_etf_hist_sina(symbol="sh510050")
+print(fund_etf_hist_sina_df)
+
+A股股票指数
+实时行情数据-东财
+接口: stock_zh_index_spot_em
+
+目标地址: https://quote.eastmoney.com/center/gridlist.html#index_sz
+
+描述: 东方财富网-行情中心-沪深京指数
+
+限量: 单次返回所有指数的实时行情数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="上证系列指数"；choice of {"沪深重要指数", "上证系列指数", "深证系列指数", "指数成份", "中证系列指数"}
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+最新价	float64	-
+涨跌额	float64	-
+涨跌幅	float64	注意单位: %
+成交量	float64	-
+成交额	float64	-
+振幅	float64	注意单位: %
+最高	float64	-
+最低	float64	-
+今开	float64	-
+昨收	float64	-
+量比	float64	-
+接口示例
+
+
+
+stock_zh_index_spot_em_df = ak.stock_zh_index_spot_em(symbol="上证系列指数")
+print(stock_zh_index_spot_em_df)
+数据示例
+
+      序号  代码     名称    最新价   涨跌幅   涨跌额  ... 振幅  最高  最低 今开 昨收  量比
+0      1  000116  信用100   183.69  0.01  0.02  ...  0.0 NaN NaN NaN   183.67 NaN
+1      2  000101   5年信用   233.04  0.01  0.02  ...  0.0 NaN NaN NaN   233.02 NaN
+
+实时行情数据-新浪
+接口: stock_zh_index_spot_sina
+
+目标地址: https://vip.stock.finance.sina.com.cn/mkt/#hs_s
+
+描述: 新浪财经-中国股票指数数据
+
+限量: 单次返回所有指数的实时行情数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+代码	object	-
+名称	object	-
+最新价	float64	-
+涨跌额	float64	-
+涨跌幅	float64	注意单位: %
+昨收	float64	-
+今开	float64	-
+最高	float64	-
+最低	float64	-
+成交量	float64	注意单位: 手
+成交额	float64	注意单位: 元
+接口示例
+
+
+
+stock_zh_index_spot_sina_df = ak.stock_zh_index_spot_sina()
+print(stock_zh_index_spot_sina_df)
+
+历史行情数据
+历史行情数据-新浪
+接口: stock_zh_index_daily
+
+目标地址: https://finance.sina.com.cn/realstock/company/sz399552/nc.shtml(示例)
+
+描述: 股票指数的历史数据按日频率更新
+
+限量: 单次返回指定 symbol 的所有历史行情数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="sz399552"
+输出参数-历史行情数据
+
+名称	类型	描述
+date	object	新浪的数据开始时间, 不是该指数的上市时间
+open	float64	-
+high	float64	-
+low	float64	-
+close	float64	-
+volume	int64	-
+接口示例-历史行情数据
+
+
+
+stock_zh_index_daily_df = ak.stock_zh_index_daily(symbol="sz399552")
+print(stock_zh_index_daily_df)
+数据示例-历史行情数据
+
+            date      open      high       low     close       volume
+0     2005-01-04   996.682   996.682   984.795   986.927    232376203
+1     2005-01-05   986.570  1008.855   985.677  1003.633    348610113
+
+历史行情数据-腾讯
+接口: stock_zh_index_daily_tx
+
+目标地址: https://gu.qq.com/sh000919/zs
+
+描述: 股票指数(或者股票)历史行情数据
+
+限量: 单次返回具体某个股票指数(或者股票)的所有历史行情数据
+
+输入参数-历史行情数据
+
+名称	类型	描述
+symbol	str	symbol="sh000919"
+输出参数-历史行情数据
+
+名称	类型	描述
+date	object	腾讯的数据开始时间, 不是证券上市时间
+open	float64	-
+close	float64	-
+high	float64	-
+low	float64	-
+amount	float64	注意单位: 手
+接口示例
+
+
+
+stock_zh_index_daily_tx_df = ak.stock_zh_index_daily_tx(symbol="sh000919")
+print(stock_zh_index_daily_tx_df)
+数据示例
+
+            date     open    close     high      low       amount
+0     2005-01-04   993.11   978.14   993.11   976.82   4235501.99
+1     2005-01-05   976.94   981.50   985.52   972.80   3366738.80
+
+历史行情数据-东方财富
+接口: stock_zh_index_daily_em
+
+目标地址: http://quote.eastmoney.com/center/hszs.html
+
+描述: 东方财富股票指数数据, 历史数据按日频率更新
+
+限量: 单次返回具体指数的所有历史行情数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="sz399552"; 支持 sz: 深交所, sh: 上交所, bj: 北交所, csi: 中证指数 + id(000905)
+start_date	str	start_date="19900101"
+end_date	str	end_date="20500101"
+输出参数
+
+名称	类型	描述
+date	object	东方财富的数据开始时间, 不是证券上市时间
+open	float64	-
+close	float64	-
+high	float64	-
+low	float64	-
+volume	int64	-
+amount	float64	-
+接口示例
+
+
+
+stock_zh_index_daily_em_df = ak.stock_zh_index_daily_em(symbol="sz399812")
+print(stock_zh_index_daily_em_df)
+数据示例
+
+            date     open    close     high      low    volume        amount
+0     2005-01-04   996.03   989.56   996.03   986.46    675733  4.986503e+08
+1     2005-01-05   989.87  1008.59  1011.29   989.46   1037894  9.068431e+08
+2     2005-01-06  1008.88  1002.81  1008.88   999.76    779152  5.631133e+08
+
+历史行情数据-通用
+接口: index_zh_a_hist
+
+目标地址: http://quote.eastmoney.com/center/hszs.html
+
+描述: 东方财富网-中国股票指数-行情数据
+
+限量: 单次返回具体指数指定 period 从 start_date 到 end_date 的之间的近期数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="399282"; 指数代码，此处不用市场标识
+period	str	period="daily"; choice of {'daily', 'weekly', 'monthly'}
+start_date	str	start_date="19700101"; 开始日期
+end_date	str	end_date="22220101"; 结束时间
+输出参数
+
+名称	类型	描述
+日期	object	交易日
+开盘	float64	开盘价
+收盘	float64	收盘价
+最高	float64	最高价
+最低	float64	最低价
+成交量	int32	注意单位: 手
+成交额	float64	注意单位: 元
+振幅	float64	注意单位: %
+涨跌幅	float64	注意单位: %
+涨跌额	float64	注意单位: 元
+换手率	float64	注意单位: %
+接口示例
+
+
+
+index_zh_a_hist_df = ak.index_zh_a_hist(symbol="000016", period="daily", start_date="19700101", end_date="22220101")
+print(index_zh_a_hist_df)
+数据示例
+
+       日期       开盘       收盘       最高  ...   振幅   涨跌幅 涨跌额   换手率
+0     2004-01-02   997.00  1011.35  1021.57  ...  0.00  0.00   0.00  0.00
+1     2004-01-05  1008.28  1060.80  1060.90  ...  5.20  4.89  49.45  0.00
+
+分时行情数据
+接口: index_zh_a_hist_min_em
+
+目标地址: https://quote.eastmoney.com/center/hszs.html
+
+描述: 东方财富网-指数数据-分时行情
+
+限量: 单次返回具体指数指定 period 从 start_date 到 end_date 的之间的近期数据，该接口不能返回所有历史数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="399006"; 指数代码，此处不用市场标识
+period	str	period="1"; choice of {'1', '5', '15', '30', '60'}, 其中 1 分钟数据只能返回当前的, 其余只能返回近期的数据
+start_date	str	start_date="1979-09-01 09:32:00"; 开始日期时间
+end_date	str	end_date="2222-01-01 09:32:00"; 结束时间时间
+输出参数
+
+名称	类型	描述
+时间	object	交易日
+开盘	float64	开盘价
+收盘	float64	收盘价
+最高	float64	最高价
+最低	float64	最低价
+成交量	int64	注意单位: 手
+成交额	float64	注意单位: 元
+均价	float64	-
+接口示例
+
+
+
+index_zh_a_hist_min_em_df = ak.index_zh_a_hist_min_em(symbol="000001", period="1", start_date="2023-12-11 09:30:00", end_date="2023-12-11 19:00:00")
+print(index_zh_a_hist_min_em_df)
+数据示例
+
+           时间       开盘       收盘  ...       成交量           成交额       均价
+0    2023-12-11 09:30:00  2956.29  2956.29  ...   3198631  3.394971e+09  2957.681
+1    2023-12-11 09:31:00  2955.35  2937.70  ...  12531907  1.227149e+10  2945.626
+
+股票列表-A股
+接口: stock_info_a_code_name
+
+目标地址: 沪深京三个交易所
+
+描述: 沪深京 A 股股票代码和股票简称数据
+
+限量: 单次获取所有 A 股股票代码和简称数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+code	object	-
+name	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_a_code_name_df = ak.stock_info_a_code_name()
+print(stock_info_a_code_name_df)
+数据示例
+
+        code   name
+0     000001   平安银行
+1     000002  万  科Ａ
+2     000004   国华网安
+
+股票列表-上证
+接口: stock_info_sh_name_code
+
+目标地址: https://www.sse.com.cn/assortment/stock/list/share/
+
+描述: 上海证券交易所股票代码和简称数据
+
+限量: 单次获取所有上海证券交易所股票代码和简称数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="主板A股"; choice of {"主板A股", "主板B股", "科创板"}
+输出参数
+
+名称	类型	描述
+证券代码	object	-
+证券简称	object	-
+公司全称	object	-
+上市日期	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_sh_name_code_df = ak.stock_info_sh_name_code(symbol="主板A股")
+print(stock_info_sh_name_code_df)
+数据示例
+
+        证券代码  证券简称                公司全称        上市日期
+0     600000  浦发银行      上海浦东发展银行股份有限公司  1999-11-10
+1     600004  白云机场      广州白云国际机场股份有限公司  2003-04-28
+2     600006  东风汽车          东风汽车股份有限公司  1999-07-27
+
+股票列表-深证
+接口: stock_info_sz_name_code
+
+目标地址: https://www.szse.cn/market/product/stock/list/index.html
+
+描述: 深证证券交易所股票代码和股票简称数据
+
+限量: 单次获取深证证券交易所股票代码和简称数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="A股列表"; choice of {"A股列表", "B股列表", "CDR列表", "AB股列表"}
+输出参数-A股列表
+
+名称	类型	描述
+板块	object	-
+A股代码	object	-
+A股简称	object	-
+A股上市日期	object	-
+A股总股本	object	-
+A股流通股本	object	-
+所属行业	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_sz_name_code_df = ak.stock_info_sz_name_code(symbol="A股列表")
+print(stock_info_sz_name_code_df)
+数据示例
+
+       板块   A股代码  A股简称   A股上市日期     A股总股本        A股流通股本    所属行业
+0      主板  000001   平安银行  1991-04-03  19,405,918,198  19,405,513,424   J 金融业
+1      主板  000002  万  科Ａ  1991-01-29   9,724,196,533   9,716,935,865   K 房地产
+2      主板  000004   国华网安  1990-12-01     132,380,282     126,288,093  I 信息技术
+
+股票列表-北证
+接口: stock_info_bj_name_code
+
+目标地址: https://www.bse.cn/nq/listedcompany.html
+
+描述: 北京证券交易所股票代码和简称数据
+
+限量: 单次获取北京证券交易所所有的股票代码和简称数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+证券代码	object	-
+证券简称	object	-
+总股本	int64	注意单位: 股
+流通股本	int64	注意单位: 股
+上市日期	object	-
+所属行业	object	-
+地区	object	-
+报告日期	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_bj_name_code_df = ak.stock_info_bj_name_code()
+print(stock_info_bj_name_code_df)
+数据示例
+
+       证券代码  证券简称   总股本  ...              所属行业   地区        报告日期
+0    430017  星昊医药  122577200  ...             医药制造业  北京市  2024-02-29
+1    430047  诺思兰德  274873974  ...             医药制造业  北京市  2024-02-29
+2    430090  同辉信息  199333546  ...        软件和信息技术服务业  北京市  2024-02-29
+
+终止/暂停上市-深证
+接口: stock_info_sz_delist
+
+目标地址: https://www.szse.cn/market/stock/suspend/index.html
+
+描述: 深证证券交易所终止/暂停上市股票
+
+限量: 单次获取深证证券交易所终止/暂停上市数据
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="终止上市公司"; choice of {"暂停上市公司", "终止上市公司"}
+输出参数
+
+名称	类型	描述
+证券代码	object	-
+证券简称	object	-
+上市日期	object	-
+终止上市日期	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_sz_delist_df = ak.stock_info_sz_delist(symbol="终止上市公司")
+print(stock_info_sz_delist_df)
+数据示例
+
+      证券代码   证券简称  上市日期    终止上市日期
+0    000003   PT金田Ａ  1991-01-14  2002-06-14
+1    000013  *ST石化A  1992-05-06  2004-09-20
+2    000015   PT中浩Ａ  1992-06-25  2001-10-25
+3    000018    神城A退  1992-06-16  2020-01-07
+
+两网及退市
+接口: stock_staq_net_stop
+
+目标地址: https://quote.eastmoney.com/center/gridlist.html#staq_net_board
+
+描述: 东方财富网-行情中心-沪深个股-两网及退市
+
+限量: 单次获取所有两网及退市的股票数据
+
+输入参数
+
+名称	类型	描述
+-	-	-
+输出参数
+
+名称	类型	描述
+序号	int64	-
+代码	object	-
+名称	object	-
+接口示例
+
+import akshare as ak
+
+stock_staq_net_stop_df = ak.stock_staq_net_stop()
+print(stock_staq_net_stop_df)
+数据示例
+
+      序号   代码      名称
+0      1  400199    阳光城5
+1      2  400170     运盛5
+2      3  400039  华  圣 5
+
+暂停/终止上市-上证
+接口: stock_info_sh_delist
+
+目标地址: https://www.sse.com.cn/assortment/stock/list/delisting/
+
+描述: 上海证券交易所暂停/终止上市股票
+
+限量: 单次获取上海证券交易所暂停/终止上市股票
+
+输入参数
+
+名称	类型	描述
+symbol	str	symbol="全部"; choice of {"全部", "沪市", "科创板"}
+输出参数
+
+名称	类型	描述
+公司代码	object	-
+公司简称	object	-
+上市日期	object	-
+暂停上市日期	object	-
+接口示例
+
+import akshare as ak
+
+stock_info_sh_delist_df = ak.stock_info_sh_delist(symbol="全部")
+print(stock_info_sh_delist_df)
+数据示例
+
+     公司代码    公司简称   上市日期      暂停上市日期
+0    600001    邯郸钢铁  1998-01-22  2009-12-29
+1    600002    齐鲁退市  1998-04-08  2006-04-24
+2    600003   ST东北高  1999-08-10  2010-02-26
+

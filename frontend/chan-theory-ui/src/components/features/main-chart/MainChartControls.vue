@@ -437,30 +437,6 @@ function applyBarsInline() {
 .time-cell.short { width: 50px; }
 .bars-input { width: 64px; }
 
-/* 
- * FIX: 移除以下 :deep() 样式块。
- * 这些样式强制给子组件的 input 添加了边框，导致了视觉上的分割线。
- * NumberSpinner 组件自身的样式已能正确处理边框和背景，无需外部覆盖。
- */
-/*
-:deep(.numspin-input) {
-  background: #0f0f0f !important;
-  border: 1px solid #333 !important;
-  border-radius: 6px;
-  height: 28px !important;
-  line-height: 28px !important;
-  padding: 0 4px 0 8px !important;
-  text-align: center !important;
-  color: #ddd !important;
-}
-:deep(.numspin) {
-  border-radius: 6px;
-}
-:deep(.numspin .numspin-input) {
-    padding-left: 4px !important;
-}
-*/
-
 .sep {
   color: #888;
 }

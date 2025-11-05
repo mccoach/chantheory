@@ -1,6 +1,6 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\WatchlistMenu.vue -->
 <!-- 说明：封装自选池的按钮和下拉菜单，包含“暂存式编辑”的完整逻辑。 -->
-<!-- FIX: 增加对 wl.items 的 watch，确保在菜单打开时能响应外部对自选池的修改，实现实时同步。 -->
+<!-- FIX: 修复 wl.items 的映射，确保将对象数组映射为 symbol 字符串 Set。 -->
 <template>
   <div class="watchlist-wrapper">
     <button
@@ -42,13 +42,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from "vue"; // NEW: 引入 watch
+import { ref, computed, onMounted, watch } from "vue";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import DropdownContainer from "./DropdownContainer.vue";
 import SymbolListItem from "./SymbolListItem.vue";
 
-const emit = defineEmits(["selectSymbol", "opened", "closed"]); // MODIFIED: 增加 opened/closed 事件
+const emit = defineEmits(["selectSymbol", "opened", "closed"]);
 defineExpose({ close });
 
 const wl = useWatchlist();
@@ -65,21 +65,23 @@ const favoritesDisplay = computed(() => {
   return Array.from(favInitialSet.value).sort((a, b) => a.localeCompare(b));
 });
 
-// NEW: 监听 useWatchlist 的 items 变化，在菜单打开时实时同步
+// FIX: 监听 useWatchlist 的 items 变化，在菜单打开时正确同步
 watch(
   () => wl.items.value,
   (newItems) => {
     // 只有当菜单是打开状态时，才进行同步
     if (isOpen.value) {
-      const itemsSet = new Set((newItems || []).map(s => String(s || "").trim()));
+      // (FIX) 将对象数组转换为 symbol 字符串集合
+      const itemsSet = new Set((newItems || [])
+        .map(x => String((x && x.symbol) || "").trim())
+        .filter(Boolean));
       // 使用最新的数据重置内部的初始状态和暂存状态
       favInitialSet.value = itemsSet;
       favStagedSet.value = new Set(itemsSet);
     }
   },
-  { deep: true } // 深度监听数组的变化
+  { deep: true }
 );
-
 
 function isFavStarOn(sym) {
   return favStagedSet.value.has(String(sym || "").trim());
@@ -94,12 +96,16 @@ function toggleFavStage(sym) {
   favStagedSet.value = next;
 }
 
-// MODIFIED: 打开菜单时，不再手动同步数据，交由 watch 统一处理
+// FIX: 打开菜单时，正确同步数据
 async function open() {
   // 确保在打开前获取最新列表
   await wl.refresh();
-  const now = Array.isArray(wl.items.value) ? wl.items.value : [];
-  favInitialSet.value = new Set(now.map((x) => String(x || "").trim()));
+  const nowArr = Array.isArray(wl.items.value) ? wl.items.value : [];
+  // (FIX) 与 watch 保持一致：映射为 symbol 字符串集合
+  const itemsSet = new Set(nowArr
+    .map(x => String((x && x.symbol) || "").trim())
+    .filter(Boolean));
+  favInitialSet.value = itemsSet;
   favStagedSet.value = new Set(favInitialSet.value);
   isOpen.value = true;
   emit("opened");

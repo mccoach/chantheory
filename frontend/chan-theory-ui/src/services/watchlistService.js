@@ -1,45 +1,39 @@
 // src/services/watchlistService.js
 // ==============================
-// 说明：自选池服务，对接 /api/watchlist*
-// - list(): 获取自选与状态
-// - add(symbol)
-// - remove(symbol)
-// - syncAll()
-// - syncOne(symbol)
+// 说明：自选池服务 (REFACTORED)
+// - 移除 `syncAll` 和 `syncOne`，因为同步由后台统一管理。
+// - 路由路径更新为 `/api/user/watchlist/*`
 // ==============================
 
-import { api } from "@/api/client"; // 统一客户端
+import { api } from "@/api/client";
 
+/**
+ * 获取自选池列表
+ * @returns {Promise<object>}
+ */
 export async function list() {
-  // GET /api/watchlist
-  const { data } = await api.get("/api/watchlist");
+  const { data } = await api.get("/api/user/watchlist");
   return data;
 }
 
+/**
+ * 添加一个标的到自选池
+ * @param {string} symbol
+ * @returns {Promise<object>}
+ */
 export async function add(symbol) {
-  // POST /api/watchlist
-  const { data } = await api.post("/api/watchlist", { symbol });
+  const { data } = await api.post("/api/user/watchlist", { symbol });
   return data;
 }
 
+/**
+ * 从自选池移除一个标的
+ * @param {string} symbol
+ * @returns {Promise<object>}
+ */
 export async function remove(symbol) {
-  // DELETE /api/watchlist/{symbol}
   const { data } = await api.delete(
-    `/api/watchlist/${encodeURIComponent(symbol)}`
-  );
-  return data;
-}
-
-export async function syncAll() {
-  // POST /api/watchlist/sync
-  const { data } = await api.post("/api/watchlist/sync");
-  return data;
-}
-
-export async function syncOne(symbol) {
-  // POST /api/watchlist/sync/{symbol}
-  const { data } = await api.post(
-    `/api/watchlist/sync/${encodeURIComponent(symbol)}`
+    `/api/user/watchlist/${encodeURIComponent(symbol)}`
   );
   return data;
 }

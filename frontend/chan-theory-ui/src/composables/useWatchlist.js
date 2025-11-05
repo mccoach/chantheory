@@ -1,32 +1,30 @@
 // src/composables/useWatchlist.js
 // ==============================
-// 说明：自选池组合式 (单例模式修复)
-// - 状态：items, status, loading, error
-// - 行为：refresh, addOne, removeOne, syncAll, syncOne
-// - FIX: 将所有状态变量 (items, status, loading, error) 移到函数外部，
-//        确保 useWatchlist 在整个应用中作为单例存在，所有组件共享同一份数据。
+// 说明：自选池组合式 (REFACTORED)
+// - 移除 `status` 和同步相关的函数 (`syncAll`, `syncOne`)，因为同步逻辑
+//   已由后台 `HistoricalSyncManager` 统一管理。
+// - `refresh` 函数现在只从 `/api/user/watchlist` 获取列表。
+// - 采用单例模式，确保全局共享同一份自选池状态。
 // ==============================
 
-import { ref } from "vue"; // 响应式
-import * as api from "@/services/watchlistService"; // 自选服务
+import { ref, readonly } from "vue";
+import * as api from "@/services/watchlistService";
 
-// --- 将状态定义在函数外部，实现单例模式 ---
-const items = ref([]); // 自选列表 (共享)
-const status = ref({}); // 同步状态快照 (共享)
-const loading = ref(false); // 加载中 (共享)
-const error = ref(""); // 错误信息 (共享)
+const items = ref([]);
+const loading = ref(false);
+const error = ref("");
+
+let _singleton = null;
 
 export function useWatchlist() {
-  // --- 方法现在操作的是模块级的共享状态 ---
+  if (_singleton) return _singleton;
 
-  // 刷新自选与状态
   async function refresh() {
     loading.value = true;
     error.value = "";
     try {
       const data = await api.list();
       items.value = data?.items || [];
-      status.value = data?.status || {};
     } catch (e) {
       error.value = e?.message || "加载失败";
     } finally {
@@ -34,61 +32,43 @@ export function useWatchlist() {
     }
   }
 
-  // 添加一个
   async function addOne(symbol) {
     loading.value = true;
     error.value = "";
     try {
-      await api.add(symbol);
-      await refresh();
+      const data = await api.add(symbol);
+      items.value = data?.items || items.value;
     } catch (e) {
       error.value = e?.message || "添加失败";
+      // 即使失败也刷新一次，确保与后端状态同步
+      await refresh();
     } finally {
       loading.value = false;
     }
   }
 
-  // 移除一个
   async function removeOne(symbol) {
     loading.value = true;
     error.value = "";
     try {
-      await api.remove(symbol);
-      await refresh();
+      const data = await api.remove(symbol);
+      items.value = data?.items || items.value;
     } catch (e) {
       error.value = e?.message || "移除失败";
+      await refresh();
     } finally {
       loading.value = false;
     }
   }
-
-  // 同步全部
-  async function syncAll() {
-    try {
-      await api.syncAll();
-    } catch {}
-    // 提交后不阻塞，稍后刷新状态
-    setTimeout(refresh, 800);
-  }
-
-  // 同步单个
-  async function syncOne(symbol) {
-    try {
-      await api.syncOne(symbol);
-    } catch {}
-    setTimeout(refresh, 800);
-  }
-
-  // 返回共享的状态和方法
-  return {
-    items,
-    status,
-    loading,
-    error,
+  
+  _singleton = {
+    items: readonly(items),
+    loading: readonly(loading),
+    error: readonly(error),
     refresh,
     addOne,
     removeOne,
-    syncAll,
-    syncOne,
   };
+  
+  return _singleton;
 }

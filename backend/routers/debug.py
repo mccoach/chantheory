@@ -1,116 +1,226 @@
 # backend/routers/debug.py
 # ==============================
-# 说明：调试与诊断路由（AkShare 原始日线列名/样例）
-# - 本轮变更：将原先的 print 调试输出替换为结构化日志 log_event，符合 NDJSON/trace_id 规范；
-#   其余业务逻辑与返回不变。
+# 说明：调试路由（V4.0 - 精简版）
+# 保留功能：
+#   1. 查看原始字段
+#   2. 一键全量同步
 # ==============================
 
-from __future__ import annotations  # 允许前置注解（兼容 3.8+）
+from __future__ import annotations
 
-from fastapi import APIRouter, Query, Request  # FastAPI 路由与参数
-from typing import Optional, Dict, Any         # 类型注解
-import importlib                                # 动态导入
+import asyncio
+from fastapi import APIRouter, Query, Request
+from typing import Dict, Any, Optional
+import importlib
 
-from backend.utils.errors import http_500_from_exc  # 统一错误包装
-from backend.utils.time import normalize_yyyymmdd_range  # 统一时间窗解析/规范
+from backend.utils.errors import http_500_from_exc
+from backend.utils.time import normalize_date_range
+from backend.utils.logger import get_logger, log_event
+from backend.settings import settings, DATA_TYPE_DEFINITIONS
 
-# 结构化日志（替代 print）
-from backend.utils.logger import get_logger, log_event  # 统一 NDJSON 日志工具
-_LOG = get_logger("debug")  # 命名 logger
+_LOG = get_logger("debug")
 
-router = APIRouter(prefix="/api/debug", tags=["debug"])  # 路由前缀/分组
+router = APIRouter(prefix="/api/debug", tags=["debug"])
 
 def _lazy_import_ak():
-    """延迟导入 akshare，避免冷启动阻塞。"""
+    """懒加载 akshare"""
     return importlib.import_module("akshare")
 
+@router.post("/sync-all")
+async def trigger_full_sync_route(request: Request) -> Dict[str, Any]:
+    """
+    一键全量同步（调试用）
+    
+    功能：
+      - 同步标的列表
+      - 同步自选池数据（6个频率 + 档案 + 因子）
+      - 同步全量档案补缺
+    """
+    tid = request.headers.get("x-trace-id")
+    
+    log_event(
+        logger=_LOG,
+        service="debug",
+        level="INFO",
+        file=__file__,
+        func="trigger_full_sync_route",
+        line=0,
+        trace_id=tid,
+        event="api.debug.sync_all.start",
+        message="触发完整同步"
+    )
+    
+    try:
+        from backend.services.data_requirement_parser import get_requirement_parser
+        from backend.services.priority_queue import get_priority_queue
+        from backend.db.watchlist import select_user_watchlist
+        
+        parser = get_requirement_parser()
+        queue = get_priority_queue()
+        
+        watchlist = await asyncio.to_thread(select_user_watchlist)
+        watchlist_symbols = [w['symbol'] for w in watchlist]
+        
+        requirements = []
+        
+        # 1. 标的列表
+        requirements.append({
+            'scope': 'global',
+            'includes': [{
+                'type': 'symbol_index',
+                'priority': DATA_TYPE_DEFINITIONS['symbol_index']['priority']
+            }]
+        })
+        
+        # 2. 自选池数据
+        if watchlist_symbols:
+            includes = []
+            for freq in settings.sync_standard_freqs:
+                dt_id = f'watchlist_kline_{freq}'
+                includes.append({
+                    'type': dt_id,
+                    'freq': freq,
+                    'priority': DATA_TYPE_DEFINITIONS[dt_id]['priority']
+                })
+            includes.append({'type': 'watchlist_profile', 'priority': DATA_TYPE_DEFINITIONS['watchlist_profile']['priority']})
+            includes.append({'type': 'watchlist_factors', 'priority': DATA_TYPE_DEFINITIONS['watchlist_factors']['priority']})
+            
+            requirements.append({
+                'scope': 'watchlist',
+                'symbols': watchlist_symbols,
+                'includes': includes
+            })
+        
+        # 3. 全量档案补缺
+        requirements.append({
+            'scope': 'all_symbols',
+            'includes': [{
+                'type': 'all_symbols_profile',
+                'priority': DATA_TYPE_DEFINITIONS['all_symbols_profile']['priority']
+            }]
+        })
+        
+        tasks = parser.parse_requirements(requirements)
+        
+        for task in tasks:
+            await queue.enqueue(task)
+        
+        log_event(
+            logger=_LOG,
+            service="debug",
+            level="INFO",
+            file=__file__,
+            func="trigger_full_sync_route",
+            line=0,
+            trace_id=tid,
+            event="api.debug.sync_all.done",
+            message=f"完整同步已触发，共生成 {len(tasks)} 个任务"
+        )
+        
+        return {
+            "ok": True,
+            "tasks_generated": len(tasks),
+            "message": "完整同步已触发，请通过SSE监听进度"
+        }
+    
+    except Exception as e:
+        log_event(
+            logger=_LOG,
+            service="debug",
+            level="ERROR",
+            file=__file__,
+            func="trigger_full_sync_route",
+            line=0,
+            trace_id=tid,
+            event="api.debug.sync_all.fail",
+            message=f"触发失败: {e}",
+            extra={"error": str(e)}
+        )
+        raise http_500_from_exc(e, trace_id=tid)
+
 @router.get("/daily_columns")
-def api_debug_daily_columns(
-    request: Request,  # 请求对象（可取 headers/trace_id）
-    code: str = Query(..., description="股票代码，如 600519"),  # 标的代码
-    start: Optional[str] = Query(None, description="YYYYMMDD|YYYY-MM-DD|毫秒（可选）"),  # 开始
-    end: Optional[str] = Query(None, description="YYYYMMDD|YYYY-MM-DD|毫秒（可选）"),    # 结束
-    adjust: str = Query("none", description="复权：none|qfq|hfq"),  # 复权类型
+async def api_debug_daily_columns(
+    request: Request,
+    code: str = Query(..., description="股票代码"),
+    start: Optional[str] = Query(None, description="起始日期"),
+    end: Optional[str] = Query(None, description="结束日期"),
 ) -> Dict[str, Any]:
     """
-    调试：直接走 AkShare 拉日线，回传原始列名与样例。
-    - 仅用于诊断，无缓存与落库行为。
-    - 变更点：使用结构化日志记录入参与规范化后的出参，不再使用 print。
+    调试：直接走 AkShare 拉日线，查看原始字段
+    
+    用途：
+      - 验证数据源返回的字段名
+      - 排查标准化问题
     """
-    tid = request.headers.get("x-trace-id")  # 追踪 ID（贯通前后端）
+    tid = request.headers.get("x-trace-id")
+    
     try:
-        ak = _lazy_import_ak()  # 延迟导入 AkShare
-
-        # 入参日志（结构化 INFO）
-        log_event(
-            _LOG, service="debug", level="INFO",
-            file=__file__, func="api_debug_daily_columns", line=0, trace_id=tid,
-            event="api.debug.daily_columns.start",
-            message="incoming request",
-            extra={"category": "api", "action": "start", "request": {"code": code, "start": start, "end": end, "adjust": adjust}}
-        )
-
-        # 统一补齐/交换：缺省则 start=19900101，end=今天；若 start>end 自动交换
-        s_ymd, e_ymd = normalize_yyyymmdd_range(start, end, default_start=19900101)
-        start_s = f"{s_ymd:08d}"  # AkShare 需要 YYYYMMDD 字符串
+        ak = _lazy_import_ak()
+        
+        s_ymd, e_ymd = normalize_date_range(start, end, default_start=19900101)
+        start_s = f"{s_ymd:08d}"
         end_s = f"{e_ymd:08d}"
-
-        # adjust 参数：AkShare 对不复权使用 ""（空串）；qfq/hfq 原样传递
-        adj = "" if adjust == "none" else adjust
-
-        # 出参日志（将要发往 AkShare 的参数快照）
+        
         log_event(
-            _LOG, service="debug", level="INFO",
-            file=__file__, func="api_debug_daily_columns", line=0, trace_id=tid,
-            event="api.debug.daily_columns.normalized",
-            message="normalized params for akshare",
-            extra={"category": "api", "action": "normalized", "request": {"code": code, "start": start_s, "end": end_s, "adjust_sent": adj}}
+            logger=_LOG,
+            service="debug",
+            level="INFO",
+            file=__file__,
+            func="api_debug_daily_columns",
+            line=0,
+            trace_id=tid,
+            event="api.debug.daily_columns.start",
+            message="查询原始字段",
+            extra={"code": code, "start": start_s, "end": end_s}
         )
-
-        # 调用 AkShare（直接取原始日线）
-        df = ak.stock_zh_a_hist(
+        
+        df = await asyncio.to_thread(
+            ak.stock_zh_a_hist,
             symbol=code,
             period="daily",
             start_date=start_s,
             end_date=end_s,
-            adjust=adj,  # 关键修复：不再传 None
+            adjust=''  # 固定查询不复权数据
         )
-
-        # 整理输出：原始列名与去空白列名
-        cols_raw = [str(c) for c in (df.columns.tolist() if df is not None else [])]  # 原列名
-        cols_trim = [str(c).strip() for c in (df.columns.tolist() if df is not None else [])]  # 去空白
-        sample = df.head(5).to_dict(orient="records") if (df is not None and not df.empty) else []  # 前 5 行样例
-
-        # 成功日志（行数简要）
+        
+        cols_raw = df.columns.tolist() if df is not None else []
+        sample = df.head(5).to_dict(orient="records") if (df is not None and not df.empty) else []
+        
         log_event(
-            _LOG, service="debug", level="INFO",
-            file=__file__, func="api_debug_daily_columns", line=0, trace_id=tid,
+            logger=_LOG,
+            service="debug",
+            level="INFO",
+            file=__file__,
+            func="api_debug_daily_columns",
+            line=0,
+            trace_id=tid,
             event="api.debug.daily_columns.done",
-            message="akshare fetched",
-            extra={"category": "api", "action": "done", "result": {"rows": int(len(df) if df is not None else 0)}}
+            message="查询完成",
+            extra={"rows": len(df) if df is not None else 0}
         )
-
-        # 回传数据（与原逻辑一致）
+        
         return {
             "ok": True,
             "symbol": code,
-            "adjust": adjust,
             "start": start_s,
             "end": end_s,
-            "columns_raw": cols_raw,
-            "columns_trimmed": cols_trim,
-            "rows": int(len(df) if df is not None else 0),
-            "sample_head": sample,
-            "trace_id": tid,
+            "columns": cols_raw,
+            "rows": len(df) if df is not None else 0,
+            "sample": sample,
+            "trace_id": tid
         }
+        
     except Exception as e:
-        # 失败日志（ERROR）
         log_event(
-            _LOG, service="debug", level="ERROR",
-            file=__file__, func="api_debug_daily_columns", line=0, trace_id=tid,
+            logger=_LOG,
+            service="debug",
+            level="ERROR",
+            file=__file__,
+            func="api_debug_daily_columns",
+            line=0,
+            trace_id=tid,
             event="api.debug.daily_columns.fail",
-            message="debug daily_columns failed",
-            extra={"category": "api", "action": "fail", "error_code": "DEBUG_DAILY_COLUMNS_FAIL", "error_message": str(e)}
+            message="查询失败",
+            extra={"error": str(e)}
         )
-        # 统一错误包装（DEBUG=True 时含回溯）
         raise http_500_from_exc(e, trace_id=tid)
