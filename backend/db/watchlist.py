@@ -139,3 +139,54 @@ def update_watchlist_sort_order(symbol: str, sort_order: int) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+def select_user_watchlist_with_details() -> List[Dict[str, Any]]:
+    """
+    查询用户自选池（包含标的详细信息）
+    
+    Returns:
+        List[Dict]: 自选标的列表，包含：
+            自选池字段：
+              - symbol, added_at, source, note, tags, sort_order, updated_at
+            标的索引字段：
+              - name, market, type, listing_date
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    cur.execute("""
+    SELECT 
+        w.symbol,
+        w.added_at,
+        w.source,
+        w.note,
+        w.tags,
+        w.sort_order,
+        w.updated_at,
+        s.name,
+        s.market,
+        s.type,
+        s.listing_date
+    FROM user_watchlist w
+    LEFT JOIN symbol_index s ON w.symbol = s.symbol
+    ORDER BY w.sort_order ASC, w.added_at ASC;
+    """)
+    
+    rows = cur.fetchall()
+    
+    results = []
+    for row in rows:
+        result = dict(row)
+        
+        # tags: 解析JSON
+        if result.get('tags'):
+            try:
+                result['tags'] = json.loads(result['tags'])
+            except (json.JSONDecodeError, TypeError):
+                result['tags'] = []
+        else:
+            result['tags'] = []
+        
+        results.append(result)
+    
+    return results

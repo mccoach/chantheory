@@ -1,26 +1,32 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\builders\common.js
+// src/charts/options/skeleton/tech.js
 // ==============================
-// 说明：通用的 ECharts Option 构造器辅助函数
-// - createBaseTechOption: 创建所有技术指标副图通用的 Option 骨架。
-// - 目的：消除在 macd.js, kdjRsi.js, boll.js, volume.js 中的重复配置。
+// 说明：技术指标图表骨架生成器（重命名自 common.js）
+// 职责：生成副图的通用 Option 结构
+// 设计：纯函数，不包含具体指标逻辑
+// 
+// 重命名理由：
+//   - "common" 过于宽泛，不表达实际职责
+//   - "tech" 明确指向技术指标副图
+//   - "skeleton" 强调其为骨架生成器
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
-import { applyUi } from "../ui/applyUi";
+import { applyLayout } from "../positioning/layout";  // ← 新路径
 import { formatNumberScaled } from "@/utils/numberUtils";
 
 /**
- * 创建技术指标图表的基础 Option 配置
- * @param {object} params
- * @param {Array} params.dates - 日期数组
- * @param {string} params.freq - 周期
- * @param {Function} params.tooltipFormatter - Tooltip 的格式化函数
- * @param {object} ui - UI 相关的配置
- * @param {Function} [yAxisLabelFormatter] - Y轴标签的格式化函数
- * @returns {object} - 一个包含通用配置的 ECharts Option 对象
+ * 创建技术指标图表的骨架配置
+ * 
+ * @param {Object} params
+ * @param {Array} params.candles - K线数据
+ * @param {string} params.freq - 频率
+ * @param {Function} params.tooltipFormatter - Tooltip格式化函数
+ * @param {Object} ui - UI配置
+ * @param {Function} [yAxisLabelFormatter] - Y轴标签格式化函数
+ * @returns {Object} ECharts Option骨架
  */
-export function createBaseTechOption(
-  { dates, freq, tooltipFormatter },
+export function createTechSkeleton(
+  { candles, freq, tooltipFormatter },
   ui,
   yAxisLabelFormatter
 ) {
@@ -50,11 +56,10 @@ export function createBaseTechOption(
     },
     xAxis: {
       type: "category",
-      data: dates,
+      data: [],
     },
     yAxis: [
       {
-        // 主Y轴，用于显示指标线
         scale: true,
         axisLabel: {
           color: theme.axisLabelColor,
@@ -63,16 +68,14 @@ export function createBaseTechOption(
           margin: ui?.isHovered ? 6 : 6,
         },
         axisPointer: {
-          show: true, // 保持为 true, 由 link 机制统一控制
+          show: true,
           label: { show: !!ui?.isHovered },
-          // 通过颜色控制可见性, 悬浮时可见, 否则透明
           lineStyle: {
             color: ui?.isHovered ? theme.axisLineColor : "transparent",
           },
         },
       },
       {
-        // 隐藏的第二Y轴，用于承载图外的标记（如量窗的放量/缩量标记）
         type: "value",
         min: 0,
         max: 1,
@@ -81,27 +84,21 @@ export function createBaseTechOption(
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
-        // 显式禁用第二Y轴的指针
         axisPointer: {
           show: false,
         },
       },
     ],
-    series: [], // series 由各个具体的 builder 填充
+    series: [],
   };
 
   if (ui?.tooltipPositioner) {
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  // 应用通用的 grid, dataZoom 等UI配置
-  return applyUi(
+  return applyLayout(
     option,
-    {
-      ...ui,
-      isMain: false,
-      leftPx: 72,
-    },
-    { dates, freq }
+    { ...ui, isMain: false, leftPx: 72 },
+    { candles: Array.isArray(candles) ? candles : [], freq }
   );
 }

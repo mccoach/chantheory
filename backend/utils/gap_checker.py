@@ -1,6 +1,9 @@
 # backend/utils/gap_checker.py
 # ==============================
-# 说明：缺口判断器（V4.0 - 使用统一时间标准）
+# 缺口判断器（V6.0 - 新增标的列表判断）
+# 改动：
+#   - 新增 check_symbol_index_gap 函数
+#   - 遵循现有函数的命名、参数、日志风格
 # ==============================
 
 from __future__ import annotations
@@ -8,76 +11,95 @@ from __future__ import annotations
 from typing import Optional
 
 from backend.db.candles import get_latest_ts_from_raw
-from backend.db.symbols import select_symbol_profile, get_profile_updated_at
-from backend.db.factors import get_latest_factor_date, get_factors_latest_updated_at
-from backend.utils.time_helper import (
-    calculate_theoretical_latest_for_frontend,
-    calculate_theoretical_latest_for_backend
-)
+from backend.db.symbols import get_profile_updated_at
+from backend.db.factors import get_factors_latest_updated_at
+from backend.db.calendar import get_latest_date
+from backend.db.connection import get_conn
+from backend.utils.time_helper import calculate_theoretical_latest_for_frontend
 from backend.utils.time import today_ymd, to_yyyymmdd_from_iso
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("gap_checker")
 
-def check_kline_gap_to_current(symbol: str, freq: str, **kwargs) -> bool:
-    """K线缺口判断（到当前时刻）- 用于前端数据"""
+def check_calendar_gap(**kwargs) -> bool:
+    """
+    交易日历缺口判断
+    
+    规则：
+      - 本地最晚日期 >= 今日 → 无缺口（跳过）
+      - 本地最晚日期 < 今日 → 有缺口（拉新）
+      - 本地无数据 → 有缺口
+    """
+    local_latest = get_latest_date()
+    today = today_ymd()
+    
+    if local_latest is None:
+        _LOG.debug("[缺口] 交易日历无数据 → 有缺口")
+        return True
+    
+    has_gap = local_latest < today
+    
+    _LOG.debug(
+        f"[缺口] 交易日历 本地最晚={local_latest} 今日={today} "
+        f"→ {'有缺口' if has_gap else '无缺口'}"
+    )
+    
+    return has_gap
+
+
+def check_kline_gap_to_current(
+    symbol: str, 
+    freq: str, 
+    force_fetch: bool = False,  # ← 新增参数
+    **kwargs
+) -> bool:
+    """K线缺口判断（支持强制拉取）"""
+    
+    # ===== 强制拉取：绕过判断 =====
+    if force_fetch:
+        _LOG.debug(f"[缺口] {symbol} {freq} 强制拉取模式 → 有缺口")
+        return True
+    
+    # ===== 正常判断 =====
     local_latest_ts = get_latest_ts_from_raw(symbol, freq)
     
     if local_latest_ts is None:
-        _LOG.debug(f"[缺口判断] {symbol} {freq} 本地无数据 → 有缺口")
+        _LOG.debug(f"[缺口] {symbol} {freq} 本地无数据 → 有缺口")
         return True
     
     theoretical_ts = calculate_theoretical_latest_for_frontend(freq)
     has_gap = local_latest_ts < theoretical_ts
     
     _LOG.debug(
-        f"[缺口判断] {symbol} {freq} "
+        f"[缺口] {symbol} {freq} "
         f"本地={local_latest_ts} 理论={theoretical_ts} "
         f"→ {'有缺口' if has_gap else '无缺口'}"
     )
     
     return has_gap
 
-def check_kline_gap_to_last_close(symbol: str, freq: str, **kwargs) -> bool:
-    """K线缺口判断（到前一交易日收盘）- 用于后台数据"""
-    local_latest_ts = get_latest_ts_from_raw(symbol, freq)
-    
-    if local_latest_ts is None:
-        _LOG.debug(f"[缺口判断] {symbol} {freq} 本地无数据 → 有缺口")
-        return True
-    
-    theoretical_ts = calculate_theoretical_latest_for_backend(freq)
-    has_gap = local_latest_ts < theoretical_ts
-    
-    _LOG.debug(
-        f"[缺口判断] {symbol} {freq} "
-        f"本地={local_latest_ts} 理论={theoretical_ts} "
-        f"→ {'有缺口' if has_gap else '无缺口'}"
-    )
-    
-    return has_gap
 
 def check_info_updated_today(symbol: str, data_type_id: str, **kwargs) -> bool:
-    """信息缺口判断（是否今日已更新）- 用于档案/因子"""
+    """信息缺口判断（是否今日已更新）"""
     today = today_ymd()
     
     if 'profile' in data_type_id:
         updated_at = get_profile_updated_at(symbol)
         
         if not updated_at:
-            _LOG.debug(f"[缺口判断] {symbol} 档案不存在 → 有缺口")
+            _LOG.debug(f"[缺口] {symbol} 档案不存在 → 有缺口")
             return True
         
         try:
             updated_ymd = to_yyyymmdd_from_iso(updated_at)
         except Exception:
-            _LOG.debug(f"[缺口判断] {symbol} 档案updated_at解析失败 → 有缺口")
+            _LOG.debug(f"[缺口] {symbol} 档案时间解析失败 → 有缺口")
             return True
         
         has_gap = updated_ymd < today
         
         _LOG.debug(
-            f"[缺口判断] {symbol} 档案 "
+            f"[缺口] {symbol} 档案 "
             f"更新日期={updated_ymd} 今日={today} "
             f"→ {'有缺口' if has_gap else '无缺口'}"
         )
@@ -88,19 +110,19 @@ def check_info_updated_today(symbol: str, data_type_id: str, **kwargs) -> bool:
         updated_at = get_factors_latest_updated_at(symbol)
         
         if not updated_at:
-            _LOG.debug(f"[缺口判断] {symbol} 因子不存在 → 有缺口")
+            _LOG.debug(f"[缺口] {symbol} 因子不存在 → 有缺口")
             return True
         
         try:
             updated_ymd = to_yyyymmdd_from_iso(updated_at)
         except Exception:
-            _LOG.debug(f"[缺口判断] {symbol} 因子updated_at解析失败 → 有缺口")
+            _LOG.debug(f"[缺口] {symbol} 因子时间解析失败 → 有缺口")
             return True
         
         has_gap = updated_ymd < today
         
         _LOG.debug(
-            f"[缺口判断] {symbol} 因子 "
+            f"[缺口] {symbol} 因子 "
             f"更新日期={updated_ymd} 今日={today} "
             f"→ {'有缺口' if has_gap else '无缺口'}"
         )
@@ -108,33 +130,51 @@ def check_info_updated_today(symbol: str, data_type_id: str, **kwargs) -> bool:
         return has_gap
     
     else:
-        _LOG.warning(f"[缺口判断] 未知数据类型 {data_type_id}")
+        _LOG.warning(f"[缺口] 未知数据类型 {data_type_id}")
         return True
 
-def check_record_not_exists(symbol: str, data_type_id: str, **kwargs) -> bool:
-    """记录缺口判断（是否存在）- 用于全量档案补缺"""
-    if 'profile' in data_type_id:
-        exists = select_symbol_profile(symbol) is not None
-        
-        _LOG.debug(
-            f"[缺口判断] {symbol} 档案 "
-            f"{'已存在' if exists else '不存在'} "
-            f"→ {'无缺口' if exists else '有缺口'}"
-        )
-        
-        return not exists
+
+# ===== 新增：标的列表缺口判断 =====
+def check_symbol_index_gap(**kwargs) -> bool:
+    """
+    标的列表缺口判断（简洁版）
     
-    elif 'factors' in data_type_id:
-        exists = get_latest_factor_date(symbol) is not None
-        
-        _LOG.debug(
-            f"[缺口判断] {symbol} 因子 "
-            f"{'已存在' if exists else '不存在'} "
-            f"→ {'无缺口' if exists else '有缺口'}"
-        )
-        
-        return not exists
+    规则：
+      - 查询 MAX(updated_at)
+      - 提取日期部分（YYYYMMDD）
+      - 如果 = 今日 → 无缺口（跳过拉取）
+      - 如果 < 今日 → 有缺口（拉新）
+      - 如果无数据 → 有缺口
     
-    else:
-        _LOG.warning(f"[缺口判断] 未知数据类型 {data_type_id}")
+    设计理念：
+      - 每日首次自动更新
+      - 个别缺失由手动强制刷新补全
+      - 不做复杂防御（奥卡姆剃刀）
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT MAX(updated_at) FROM symbol_index;")
+    result = cur.fetchone()
+    
+    if not result or not result[0]:
+        _LOG.debug("[缺口] 标的列表无数据 → 有缺口")
         return True
+    
+    try:
+        updated_at = result[0]
+        updated_ymd = to_yyyymmdd_from_iso(updated_at)
+    except Exception as e:
+        _LOG.debug(f"[缺口] 标的列表时间解析失败 → 有缺口, error={e}")
+        return True
+    
+    today = today_ymd()
+    has_gap = updated_ymd < today
+    
+    _LOG.debug(
+        f"[缺口] 标的列表 "
+        f"更新日期={updated_ymd} 今日={today} "
+        f"→ {'有缺口' if has_gap else '无缺口'}"
+    )
+    
+    return has_gap

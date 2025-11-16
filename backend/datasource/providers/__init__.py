@@ -1,2 +1,8 @@
 # backend/datasource/providers/__init__.py
-# 空文件，用于将 providers 目录声明为 Python 包。
+# ==============================
+# providers 模块导出接口
+# ==============================
+
+from backend.datasource.providers import akshare_adapter
+
+__all__ = ['akshare_adapter']

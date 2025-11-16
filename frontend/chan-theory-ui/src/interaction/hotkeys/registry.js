@@ -1,12 +1,10 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\interaction\hotkeys\registry.js
 // ==============================
-// 说明：热键服务（作用域栈 + 键位映射 + 命令处理 + 内置默认行为）
-// 变更点：扩展输入白名单，允许在输入框内触发额外组合（Ctrl+Comma / F1 / Alt+R / Alt+E / ArrowDown / ArrowUp / Enter）。
-// - FIX: setUserOverrides 和 getBindings 方法将使用结构化的 userOverrides 对象。
+// V2.0 - 增强调试日志
 // ==============================
 
-import { ref } from "vue"; // 引入响应式
-import { toCombo, isReservedBrowserCombo } from "./core.js"; // 引入归一化与保留判断
+import { ref } from "vue";
+import { toCombo, isReservedBrowserCombo } from "./core.js";
 
 export class HotkeyService {
   // 定义热键服务类
@@ -22,12 +20,19 @@ export class HotkeyService {
       // 注册键盘监听（捕获阶段）
       capture: true,
     });
-  } // 结束构造
+    
+    // ===== 新增：调试日志 =====
+    console.log('[HotkeyService] 🎹 服务已创建', {
+      defaultScopes: Object.keys(defaultKeymap),
+      initialScope: this.scopeStack.value
+    });
+  }
 
   destroy() {
     // 销毁（移除监听）
     window.removeEventListener("keydown", this._onKeydown, { capture: true });
-  } // 结束销毁
+    console.log('[HotkeyService] 🎹 服务已销毁');
+  }
 
   get keymap() {
     // 计算属性：合并后的键位表
@@ -45,9 +50,9 @@ export class HotkeyService {
         this.defaultKeymap[s] || {},
         this.userOverrides[s] || {}
       );
-    }); // 结束遍历
-    return merged; // 返回合并映射
-  } // 结束 keymap
+    });
+    return merged;
+  }
 
   registerHandlers(scope, map) {
     // 注册命令处理器
@@ -57,33 +62,38 @@ export class HotkeyService {
       this.handlers[scope] || {},
       map || {}
     );
-  } // 结束注册
+    
+    // ===== 新增：注册成功日志 =====
+    const cmdCount = Object.keys(map || {}).length;
+    console.log(`[HotkeyService] ✅ 已注册 ${scope} 作用域（${cmdCount} 个命令）`, Object.keys(map || {}));
+  }
 
   unregisterHandlers(scope) {
-    // 注销某 scope 处理器
-    delete this.handlers[scope]; // 删除映射
-  } // 结束注销
+    delete this.handlers[scope];
+    console.log(`[HotkeyService] 🗑️ 已注销 ${scope} 作用域`);
+  }
 
   pushScope(scope) {
-    // 压入作用域
-    const s = this.scopeStack.value.slice(); // 拷贝当前栈
-    s.push(scope); // 追加
-    this.scopeStack.value = s; // 写回
-  } // 结束 pushScope
+    const s = this.scopeStack.value.slice();
+    s.push(scope);
+    this.scopeStack.value = s;
+    console.log(`[HotkeyService] 📌 压入作用域: ${scope}，当前栈:`, this.scopeStack.value);
+  }
 
   popScope(scope) {
     // 弹出作用域
     if (!scope) {
-      // 无参数：弹最顶层（保留 global）
-      const s = this.scopeStack.value.slice(); // 拷贝
-      if (s.length > 1) s.pop(); // 弹出顶层
-      this.scopeStack.value = s; // 写回
-      return; // 返回
-    } // 结束无参分支
-    const s = this.scopeStack.value.filter((x) => x !== scope); // 过滤指定 scope
-    if (!s.length) s.push("global"); // 保底 global
-    this.scopeStack.value = s; // 写回
-  } // 结束 popScope
+      const s = this.scopeStack.value.slice();
+      if (s.length > 1) s.pop();
+      this.scopeStack.value = s;
+      console.log(`[HotkeyService] 📌 弹出作用域，当前栈:`, this.scopeStack.value);
+      return;
+    }
+    const s = this.scopeStack.value.filter((x) => x !== scope);
+    if (!s.length) s.push("global");
+    this.scopeStack.value = s;
+    console.log(`[HotkeyService] 📌 移除作用域: ${scope}，当前栈:`, this.scopeStack.value);
+  }
 
   setBinding(scope, command, combo) {
     // 这个方法现在逻辑上被 setUserOverrides 覆盖，但保留以防未来需要单点修改
@@ -104,6 +114,7 @@ export class HotkeyService {
   setUserOverrides(overrides) {
     // 接收完整的、按 scope 组织的 overrides 对象
     this.userOverrides = overrides || {};
+    console.log('[HotkeyService] 🔄 用户覆盖已更新', Object.keys(overrides || {}));
   }
 
   getBindings(scope) {
@@ -177,7 +188,13 @@ export class HotkeyService {
     ]); // 结束白名单
     if (inInput && !inputWhitelist.has(combo)) return; // 输入环境且不在白名单 → 忽略
 
-    const stack = [...this.scopeStack.value].reverse(); // 作用域（顶层优先）
+    const stack = [...this.scopeStack.value].reverse();
+    
+    // ===== 新增：调试日志（仅开发环境）=====
+    if (import.meta.env.DEV) {
+      console.log(`[HotkeyService] 🎹 按键: ${combo}，作用域栈:`, stack);
+    }
+    
     for (const scope of stack) {
       // 逐层匹配
       const map = this.keymap[scope] || {}; // 合并映射
@@ -189,7 +206,9 @@ export class HotkeyService {
         (this.handlers["global"] || {})[cmd]; // 再找 global
 
       if (!handler) {
-        // 没有处理器 → 尝试内置
+        // ===== 新增：未找到处理器的警告 =====
+        console.warn(`[HotkeyService] ⚠️ 未找到处理器: scope=${scope}, cmd=${cmd}`);
+        
         if (cmd === "focusNextField") {
           // 内置：下一个输入
           e.preventDefault(); // 阻止默认
@@ -208,16 +227,24 @@ export class HotkeyService {
           this.ui.showSettings.value = true; // 显示设置
           return; // 返回
         }
-        continue; // 没有处理器也非内置 → 查下一作用域
-      } // 结束无处理器分支
+        continue;
+      }
 
-      e.preventDefault(); // 有处理器 → 阻止默认
+      // ===== 新增：执行处理器的日志 =====
+      console.log(`[HotkeyService] ✅ 执行: scope=${scope}, cmd=${cmd}, combo=${combo}`);
+      
+      e.preventDefault();
       try {
         handler(e, { scope, cmd, combo }); // 调用处理器
       } catch (err) {
-        console.error("hotkey handler error:", err); // 错误日志
+        console.error(`[HotkeyService] ❌ 处理器执行失败: ${cmd}`, err);
       }
-      return; // 已处理 → 结束
-    } // 结束作用域遍历
-  } // 结束 _onKeydown
-} // 结束 HotkeyService 类
+      return;
+    }
+    
+    // ===== 新增：未匹配任何处理器的日志 =====
+    if (import.meta.env.DEV) {
+      console.log(`[HotkeyService] 🔇 未匹配: combo=${combo}`);
+    }
+  }
+}

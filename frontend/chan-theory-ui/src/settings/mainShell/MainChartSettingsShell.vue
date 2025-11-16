@@ -20,7 +20,7 @@
 </template>
 
 <script setup>
-import { inject, ref, watch, provide, defineExpose } from "vue";
+import { inject, ref, watch, provide, } from "vue";
 import MarketDisplaySettings from "@/settings/panels/MarketDisplaySettings.vue";
 import ChanTheorySettings from "@/settings/panels/ChanTheorySettings.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";

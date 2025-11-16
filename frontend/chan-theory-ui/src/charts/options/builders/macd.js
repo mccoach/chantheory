@@ -1,16 +1,12 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\builders\macd.js
+// src/charts/options/builders/macd.js
 // ==============================
-// 说明：MACD 窗 option 构造器（HIST 柱 + DIF/DEA 线）
-// - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
-// - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
-// - FIX: 精确控制双Y轴的 axisPointer 可见性，实现“悬浮窗十字，其余竖线”效果。
+// V2.0 - 清理冗余导入
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
 import { STYLE_PALETTE } from "@/constants";
-import { applyUi } from "../ui/applyUi";
 import { makeMacdTooltipFormatter } from "../tooltips/index";
-import { createBaseTechOption } from "./common"; // NEW
+import { createTechSkeleton } from "../skeleton/tech";  // ← 唯一导入
 
 function asArray(x) {
   return Array.isArray(x) ? x : [];
@@ -23,7 +19,6 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
   const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
-  const dates = list.map((d) => d.t);
   const series = [];
 
   if (inds.MACD_DIF && inds.MACD_DEA && inds.MACD_HIST) {
@@ -61,17 +56,15 @@ export function buildMacdOption({ candles, indicators, freq }, ui) {
     });
   }
 
-  // MODIFIED: Use createBaseTechOption to generate the skeleton
-  const option = createBaseTechOption(
+  const option = createTechSkeleton(
     {
-      dates,
+      candles: list,
       freq,
       tooltipFormatter: makeMacdTooltipFormatter({ freq }),
     },
     ui
   );
 
-  // Fill in the series
   option.series = series;
 
   return option;

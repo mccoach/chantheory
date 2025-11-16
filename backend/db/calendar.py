@@ -1,28 +1,15 @@
 # backend/db/calendar.py
 # ==============================
-# 说明：交易日历表操作模块
-# - 职责：trade_calendar 表的所有CRUD操作
+# 交易日历表操作模块（V2.0 - 新增get_latest_date）
 # ==============================
 
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
-from datetime import datetime, date, timedelta
 
 from backend.db.connection import get_conn
 
 def upsert_trade_calendar(records: List[Dict[str, Any]]) -> int:
-    """
-    批量插入或更新交易日历。
-    
-    Args:
-        records: 字典列表，每个字典包含：
-                date (int): YYYYMMDD
-                market (str): 市场标识，默认 'CN'
-                is_trading_day (int): 1=交易日, 0=非交易日
-    
-    Returns:
-        int: 影响的行数
-    """
+    """批量插入或更新交易日历"""
     if not records:
         return 0
     
@@ -46,16 +33,7 @@ def upsert_trade_calendar(records: List[Dict[str, Any]]) -> int:
 
 
 def is_trading_day(date_ymd: int, market: str = 'CN') -> bool:
-    """
-    判断指定日期是否为交易日。
-    
-    Args:
-        date_ymd: 日期（YYYYMMDD）
-        market: 市场标识，默认 'CN'
-    
-    Returns:
-        bool: True=交易日, False=非交易日或数据不存在
-    """
+    """判断指定日期是否为交易日"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -67,16 +45,7 @@ def is_trading_day(date_ymd: int, market: str = 'CN') -> bool:
 
 
 def get_recent_trading_days(n: int = 10, market: str = 'CN') -> List[int]:
-    """
-    获取最近N个交易日的日期列表（倒序）。
-    
-    Args:
-        n: 数量
-        market: 市场标识
-    
-    Returns:
-        List[int]: 交易日列表（YYYYMMDD），按日期倒序
-    """
+    """获取最近N个交易日"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -93,12 +62,7 @@ def get_recent_trading_days(n: int = 10, market: str = 'CN') -> List[int]:
 
 
 def select_trading_days_in_range(start_ymd: int, end_ymd: int, market: str = 'CN') -> List[int]:
-    """
-    查询指定日期范围内的所有交易日。
-    
-    Returns:
-        List[int]: 交易日列表（YYYYMMDD），按日期升序
-    """
+    """查询指定日期范围内的所有交易日"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -111,3 +75,23 @@ def select_trading_days_in_range(start_ymd: int, end_ymd: int, market: str = 'CN
     )
     rows = cur.fetchall()
     return [row[0] for row in rows]
+
+
+def get_latest_date(market: str = 'CN') -> Optional[int]:
+    """
+    获取本地交易日历的最晚日期
+    
+    用途：
+      启动时判断是否需要更新日历
+    
+    Returns:
+        Optional[int]: 最晚日期（YYYYMMDD），不存在返回 None
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT MAX(date) FROM trade_calendar WHERE market=? AND is_trading_day=1;",
+        (market,)
+    )
+    result = cur.fetchone()
+    return result[0] if result and result[0] else None

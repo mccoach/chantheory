@@ -1,2 +1,20 @@
 # backend/datasource/__init__.py
-# 空文件，用于将 datasource 目录声明为 Python 包。
+# ==============================
+# datasource 模块导出接口
+# ==============================
+
+from backend.datasource import dispatcher
+from backend.datasource.registry import (
+    get_methods_for_category,
+    find_method_by_id,
+    METHOD_CATALOG,
+    MethodDescriptor
+)
+
+__all__ = [
+    'dispatcher',
+    'get_methods_for_category',
+    'find_method_by_id',
+    'METHOD_CATALOG',
+    'MethodDescriptor'
+]

@@ -1,45 +1,83 @@
 # backend/datasource/dispatcher.py
 # ==============================
-# 说明: 数据源统一调度器 (The Executor - 全异步版)
-# - 职责: 根据数据类别，按优先级依次尝试异步方法，直到成功或全部失败。
-# - 设计: 
-#   * 异步执行：与新的全异步数据链路保持一致。
-#   * 单次尝试：不内置重试（重试由上层使用 async_retry_call 控制）。
-#   * 极简逻辑：核心只有一个 for 循环。
+# V4.0 - 修复日/周/月路由
 # ==============================
 
 from __future__ import annotations
 from typing import Tuple, Optional, Any
 import pandas as pd
+import inspect
 
 from backend.utils.logger import get_logger, log_event
 from backend.datasource.registry import get_methods_for_category
 from backend.utils.error_classifier import classify_fetch_error, ErrorType
 
-_LOG = get_logger("datasource.dispatcher")
+_LOG = get_logger("dispatcher")
 
 async def fetch(
     data_category: str, 
+    freq: Optional[str] = None,
     **kwargs: Any
 ) -> Tuple[Optional[pd.DataFrame | Any], Optional[str]]:
     """
-    根据数据类别和参数，调度并获取原始数据（异步版本）。
-
-    Args:
-        data_category (str): 标准化的数据类别，如 'stock_bars', 'adj_factor'。
-        **kwargs: 传递给原子化调用函数的参数，如 symbol, start_date。
-
-    Returns:
-        Tuple[Optional[pd.DataFrame | Any], Optional[str]]: 
-            成功时返回 (原始数据, 使用的方法ID)
-            失败时返回 (None, None)
+    根据数据类别和参数，调度并获取原始数据（异步版本）
+    
+    V4.0 改动：
+      - 修复日/周/月路由逻辑
+      - 删除 period 参数的自动添加（由各自的适配器函数处理）
     """
-    methods = get_methods_for_category(data_category)
+    
+    # ===== 核心修复：日/周/月独立路由 =====
+    routed_category = data_category
+    
+    if data_category == 'stock_bars' and freq:
+        freq_str = str(freq).strip().lower()
+        
+        # 分钟线 → stock_minutely_bars
+        if freq_str in ['1m', '5m', '15m', '30m', '60m']:
+            routed_category = 'stock_minutely_bars'
+            _LOG.debug(f"[路由] stock_bars + {freq} → stock_minutely_bars")
+        
+        # 日K → stock_daily_bars
+        elif freq_str == '1d':
+            routed_category = 'stock_daily_bars'
+            kwargs['period'] = 'daily'  # ← 传递给 get_stock_daily_em
+            _LOG.debug(f"[路由] stock_bars + 1d → stock_daily_bars")
+        
+        # 周K → stock_weekly_bars
+        elif freq_str == '1w':
+            routed_category = 'stock_weekly_bars'
+            # ❌ 删除：不再传递 period（由 get_stock_weekly_em 内部固定）
+            _LOG.debug(f"[路由] stock_bars + 1w → stock_weekly_bars")
+        
+        # 月K → stock_monthly_bars
+        elif freq_str == '1M':
+            routed_category = 'stock_monthly_bars'
+            # ❌ 删除：不再传递 period（由 get_stock_monthly_em 内部固定）
+            _LOG.debug(f"[路由] stock_bars + 1M → stock_monthly_bars")
+    
+    # ===== 记录路由结果 =====
+    if routed_category != data_category or kwargs.get('period'):
+        _LOG.info(
+            f"[路由决策] {kwargs.get('symbol', 'N/A')} {freq}: "
+            f"类型={kwargs.get('symbol_type', 'N/A')} → "
+            f"category={routed_category} "
+            f"period={kwargs.get('period', 'N/A')}"
+        )
+    
+    # ===== 使用路由后的 category =====
+    methods = get_methods_for_category(routed_category)
     if not methods:
         log_event(
             logger=_LOG, service="dispatcher", level="ERROR",
-            event="fetch.no_methods", message=f"No methods for category: {data_category}",
-            extra={"category": data_category}, file=__file__, func="fetch", line=0, trace_id=None
+            event="fetch.no_methods", 
+            message=f"No methods for category: {routed_category}",
+            extra={
+                "category": routed_category, 
+                "original_category": data_category, 
+                "freq": freq
+            }, 
+            file=__file__, func="fetch", line=0, trace_id=None
         )
         return None, None
 
@@ -50,7 +88,11 @@ async def fetch(
         log_event(
             logger=_LOG, service="dispatcher", level="DEBUG",
             event="fetch.try", message=f"Trying {method.id}",
-            extra={"method_id": method.id, "priority": method.priority, "params": kwargs},
+            extra={
+                "method_id": method.id, 
+                "priority": method.priority, 
+                "params": kwargs
+            },
             file=__file__, func="fetch", line=0, trace_id=None
         )
         
@@ -58,8 +100,26 @@ async def fetch(
         exception_caught = None
         
         try:
-            # 核心：直接 await 异步的 callable
-            raw_data = await method.callable(**kwargs)
+            # ===== V3.0 新增：智能参数过滤 =====
+            sig = inspect.signature(method.callable)
+            accepted_params = set(sig.parameters.keys())
+            
+            # 只传入函数签名中存在的参数
+            filtered_kwargs = {
+                k: v for k, v in kwargs.items() 
+                if k in accepted_params
+            }
+            
+            # 记录参数过滤（调试用）
+            if len(filtered_kwargs) < len(kwargs):
+                removed = set(kwargs.keys()) - set(filtered_kwargs.keys())
+                _LOG.debug(
+                    f"[参数过滤] {method.id}: "
+                    f"移除 {removed} (函数不接受这些参数)"
+                )
+            
+            # ===== 核心调用（使用过滤后的参数）=====
+            raw_data = await method.callable(**filtered_kwargs)
             
         except Exception as e:
             exception_caught = e
@@ -71,8 +131,12 @@ async def fetch(
         if error_type == "success":
             log_event(
                 logger=_LOG, service="dispatcher", level="INFO",
-                event="fetch.success", message=f"Method {method.id} succeeded",
-                extra={"method_id": method.id, "data_rows": len(raw_data) if isinstance(raw_data, pd.DataFrame) else "N/A"},
+                event="fetch.success", 
+                message=f"Method {method.id} succeeded",
+                extra={
+                    "method_id": method.id, 
+                    "data_rows": len(raw_data) if isinstance(raw_data, pd.DataFrame) else "N/A"
+                },
                 file=__file__, func="fetch", line=0, trace_id=None
             )
             return raw_data, method.id
@@ -81,7 +145,8 @@ async def fetch(
         if error_type == ErrorType.EMPTY_RESPONSE:
             log_event(
                 logger=_LOG, service="dispatcher", level="WARN",
-                event="fetch.empty", message=f"Method {method.id} returned empty data",
+                event="fetch.empty", 
+                message=f"Method {method.id} returned empty data",
                 extra={
                     "method_id": method.id,
                     "error_type": error_type,
@@ -99,7 +164,8 @@ async def fetch(
         if error_type == ErrorType.ANTISPIDER:
             log_event(
                 logger=_LOG, service="dispatcher", level="CRITICAL",
-                event="fetch.antispider", message=f"ANTISPIDER DETECTED: {method.id}",
+                event="fetch.antispider", 
+                message=f"ANTISPIDER DETECTED: {method.id}",
                 extra={
                     "method_id": method.id,
                     "error_type": error_type,
@@ -130,7 +196,8 @@ async def fetch(
         log_level = "ERROR" if error_type == ErrorType.API_CHANGED else "WARN"
         log_event(
             logger=_LOG, service="dispatcher", level=log_level,
-            event=f"fetch.{error_type}", message=f"Method {method.id} failed",
+            event=f"fetch.{error_type}", 
+            message=f"Method {method.id} failed",
             extra={
                 "method_id": method.id,
                 "error_type": error_type,
@@ -149,9 +216,12 @@ async def fetch(
     # 全部方法都失败
     log_event(
         logger=_LOG, service="dispatcher", level="CRITICAL",
-        event="fetch.all_fail", message=f"All methods failed for category: {data_category}",
+        event="fetch.all_fail", 
+        message=f"All methods failed for category: {routed_category}",
         extra={
-            "category": data_category,
+            "category": routed_category,
+            "original_category": data_category,
+            "freq": freq,
             "last_error_type": last_error_type,
             "last_error": str(last_error),
             "params": kwargs,

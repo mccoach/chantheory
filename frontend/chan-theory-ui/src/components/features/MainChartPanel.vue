@@ -1,17 +1,22 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\MainChartPanel.vue -->
 <!-- ============================== -->
-<!-- 说明：主图组件（接入"上游统一渲染中枢 useViewRenderHub" · 一次订阅一次渲染）
-     - REFACTORED:
-       - 移除所有本地的 option 构建逻辑，简化为纯粹的 option 消费者。
-       - 将所有顶部控制UI和逻辑提取到新的 <MainChartControls /> 组件中。
-     - FIX: 确保"更新完成"提示的模板代码完整且 z-index 足够高。
-     - NEW: 消费 meta.completeness 字段，显示“数据不完整”警告。
+<!-- V6.0 - 纯展示层（彻底重构）
+     
+     核心改造：
+       1. 删除内部 watch(vm.loading) 业务逻辑
+       2. 改用 useRefreshStatus 独立管理刷新状态
+       3. 组件简化为纯UI消费者
+     
+     职责边界：
+       ✅ 渲染图表容器
+       ✅ 显示状态标签
+       ✅ 响应用户交互（双击/悬浮）
+       ❌ 业务逻辑（已移除）
+       ❌ 状态监听（已移除）
 -->
 <template>
-  <!-- REFACTORED: 顶部控制区已提取到 MainChartControls 组件 -->
   <MainChartControls />
 
-  <!-- 主图画布容器 -->
   <div
     ref="wrap"
     class="chart"
@@ -25,17 +30,26 @@
       <div class="right-box">
         <div class="status">
           <span v-if="vm.loading.value" class="badge busy">更新中…</span>
-          <!-- NEW: 根据 completeness 显示不同状态 -->
+          
+          <!-- ===== 核心修改：使用独立状态管理器 ===== -->
           <transition name="hintfade">
-            <span v-if="!vm.loading.value && showRefreshed && vm.meta.value?.completeness === 'complete'" class="badge done">
-              已刷新 {{ refreshedAtHHMMSS }}
+            <span 
+              v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'" 
+              class="badge done"
+            >
+              已刷新 {{ refreshStatus.refreshedAtHHMMSS.value }}
             </span>
           </transition>
-          <span v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" class="badge warn" title="近端数据更新失败，当前为历史缓存">
+          
+          <span 
+            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" 
+            class="badge warn" 
+            title="近端数据更新失败，当前为历史缓存"
+          >
             数据不完整
           </span>
         </div>
-        <!-- NEW: 主图设置按钮 -->
+        
         <button
           class="btn-settings"
           @click="openSettingsDialog"
@@ -45,7 +59,9 @@
         ></button>
       </div>
     </div>
+    
     <div ref="host" class="canvas-host"></div>
+    
     <div
       class="bottom-strip"
       title="上下拖拽调整窗体高度"
@@ -55,20 +71,21 @@
 </template>
 
 <script setup>
-import { inject, ref, computed, watch, onBeforeUnmount } from "vue";
+import { inject, ref, onBeforeUnmount } from "vue";
 import { openMainChartSettings } from "@/settings/mainShell";
 import { useChartPanel } from "@/composables/useChartPanel";
-import { pad2 } from "@/utils/timeFormat";
+import { useRefreshStatus } from "@/composables/useRefreshStatus";  // ← 新增导入
 import MainChartControls from "./main-chart/MainChartControls.vue";
-import { SETTINGS_ICON_SVG } from "@/constants/icons"; // NEW: Import SVG constant
+import { SETTINGS_ICON_SVG } from "@/constants/icons";
 
-// --- Injected Services ---
 const vm = inject("marketView");
 const renderHub = inject("renderHub");
 const hub = inject("viewCommandHub");
 const dialogManager = inject("dialogManager");
 
-// --- Use the common chart panel logic ---
+// ===== 核心重构：使用独立状态管理器 =====
+const refreshStatus = useRefreshStatus(vm.loading, vm.error);
+
 const {
   wrapRef: wrap,
   hostRef: host,
@@ -91,10 +108,12 @@ const {
       const unsubId = renderHub.onRender((snapshot) => {
         try {
           if (instance && snapshot.main?.option) {
+            console.log('[Render] 准备 setOption');
             instance.setOption(snapshot.main.option, {
               notMerge: true,
               silent: true,
             });
+            console.log('[Render] setOption 完成');
           }
         } catch (e) {
           console.error("MainChartPanel onRender error:", e);
@@ -104,33 +123,6 @@ const {
     } catch {}
   },
 });
-
-// --- Component-Specific Logic (Status Display) ---
-
-const showRefreshed = ref(false);
-const refreshedAt = ref(null);
-const refreshedAtHHMMSS = computed(() => {
-  if (!refreshedAt.value) return "";
-  const d = refreshedAt.value;
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(
-    d.getSeconds()
-  )}`;
-});
-
-watch(
-  () => vm.loading.value,
-  (isLoading, wasLoading) => {
-    if (wasLoading === true && isLoading === false) {
-      if (!vm.error.value) {
-        refreshedAt.value = new Date();
-        showRefreshed.value = true;
-        setTimeout(() => {
-          showRefreshed.value = false;
-        }, 2000);
-      }
-    }
-  }
-);
 
 function openSettingsDialog() {
   try {
@@ -144,7 +136,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 样式已精简，不再包含任何与 .controls-grid-2x2 相关的规则 */
+/* ===== 样式保持不变 ===== */
 .top-info {
   position: absolute;
   left: 0;
@@ -179,7 +171,6 @@ onBeforeUnmount(() => {
   gap: 8px;
   user-select: none;
 }
-/* NEW: 设置按钮样式 */
 .btn-settings {
   width: 24px;
   height: 24px;
@@ -205,14 +196,12 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(46, 204, 113, 0.35);
   color: #2ecc71;
 }
-/* NEW: "数据不完整" 警告样式 */
 .badge.warn {
   background: rgba(231, 76, 60, 0.15);
   border: 1px solid rgba(231, 76, 60, 0.4);
   color: #e74c3c;
   cursor: help;
 }
-/* NEW: 渐变淡出动画（已刷新提示） */
 .hintfade-leave-active {
   transition: opacity 1000ms ease;
 }

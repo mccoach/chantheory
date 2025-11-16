@@ -1227,7 +1227,7 @@ class TestBackendUltimate(unittest.IsolatedAsyncioTestCase):
         print("测试21：自选池变动触发同步")
         print("=" * 80)
         
-        from backend.routers.user import trigger_watchlist_sync
+        from backend.routers.watchlist import trigger_watchlist_sync
         
         test_symbol = "600519"
         queue = get_priority_queue()

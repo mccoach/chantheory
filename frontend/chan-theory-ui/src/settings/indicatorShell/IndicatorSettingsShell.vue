@@ -34,7 +34,7 @@
 </template>
 
 <script setup>
-import { inject, ref, watch, provide, defineExpose } from "vue";
+import { inject, ref, watch, provide, } from "vue";
 import VolumeSettingsPanel from "@/settings/panels/VolumeSettingsPanel.vue";
 import MacdSettingsPanel from "@/settings/panels/MacdSettingsPanel.vue";
 import KdjSettingsPanel from "@/settings/panels/KdjSettingsPanel.vue";
@@ -72,6 +72,10 @@ provide("volResetter", volResetter);
 const save = () => {
   // 目前只有量窗有可保存的设置
   volManager.save();
+  
+  // ===== 新增：主动触发持久化 =====
+  settings.saveAll();
+  
   // 保存后触发一次刷新
   hub.execute("Refresh", {});
 };

@@ -30,8 +30,8 @@ export function buildBarrierLines(barrierIdxList) {
       label: { show: false },
       lineStyle: {
         color: CONTINUITY_BARRIER.lineColor,
-        width: Number(CONTINUITY_BARRIER.lineWidth || 1.2),
-        type: CONTINUITY_BARRIER.lineStyle || "solid",
+        width: Number(CONTINUITY_BARRIER.lineWidth),
+        type: CONTINUITY_BARRIER.lineStyle,
       },
       data: lines,
     },

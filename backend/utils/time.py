@@ -606,3 +606,4 @@ def to_yyyymmdd_from_iso(iso_str: str) -> int:
     # 提取日期部分（兼容带/不带时区）
     date_part = iso_str.split('T')[0]
     return parse_yyyymmdd(date_part)
+

@@ -1,10 +1,6 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\builders\volume.js
+// src/charts/options/builders/volume.js
 // ==============================
-// 说明：量窗 option 构造器（成交量/成交额）
-// - 柱 + MAVOL + 放/缩量标记（尺寸来源 DEFAULT_VOL_MARKER_SIZE）
-// - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
-// - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
-// - FIX: 精确控制双Y轴的 axisPointer 可见性，实现“悬浮窗十字，其余竖线”效果。
+// V4.0 - 导入路径修复版
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -14,7 +10,8 @@ import {
   DEFAULT_VOL_SETTINGS,
   DEFAULT_VOL_MARKER_SIZE,
 } from "@/constants";
-import { applyUi } from "../ui/applyUi";
+import { applyLayout } from "../positioning/layout"; // ← 修复：新路径
+import { MAIN_CHART_LAYOUT } from "@/constants/chartLayout";
 import { makeVolumeTooltipFormatter } from "../tooltips/index";
 
 function asArray(x) {
@@ -31,7 +28,6 @@ export function buildVolumeOption(
   const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
-  const dates = list.map((d) => d.t);
 
   // 基础数据（量/额）
   const baseMode = volCfg && volCfg.mode === "amount" ? "amount" : "vol";
@@ -68,7 +64,6 @@ export function buildVolumeOption(
   // MAVOL 线
   const namePrefixCN = baseMode === "amount" ? "额MA" : "量MA";
   const mstyles = volCfg?.mavolStyles || {};
-  // `periods` 仅用于渲染显示的均线
   const periods = Object.keys(mstyles)
     .map((k) => mstyles[k])
     .filter(
@@ -125,17 +120,20 @@ export function buildVolumeOption(
     });
   }
 
-  // 放/缩量标记尺寸估算（按可视柱宽）
+  // 放/缩量标记尺寸估算
   const hostW = Math.max(1, Number(volEnv?.hostWidth || 0));
   const visCount = Math.max(1, Number(volEnv?.visCount || baseScaled.length));
   const overrideW = Number(volEnv?.overrideMarkWidth);
+  const layoutCfg = DEFAULT_VOL_SETTINGS.layout;
   const approxBarWidthPx =
     hostW > 1 && visCount > 0
       ? Math.max(
           1,
-          Math.floor(((hostW * 0.88) / visCount) * (barPercent / 100))
+          Math.floor(
+            ((hostW * layoutCfg.barUsableRatio) / visCount) * (barPercent / 100)
+          )
         )
-      : 8;
+      : layoutCfg.fallbackBarWidth;
   const MARKER_W_MIN = DEFAULT_VOL_MARKER_SIZE.minPx;
   const MARKER_W_MAX = DEFAULT_VOL_MARKER_SIZE.maxPx;
   const markerW = Number.isFinite(overrideW)
@@ -149,22 +147,22 @@ export function buildVolumeOption(
   const offsetDownPx = Math.round(markerH + markerYOffset);
   const symbolOffsetBelow = [0, offsetDownPx];
 
-  // 1. 从所有已配置的均线中（无论是否启用）找到周期最小的一条作为标记计算的基准。
+  // 基准均线（用于标记计算）
   const allConfiguredPeriods = Object.values(volCfg?.mavolStyles || {})
-      .filter(s => s && Number.isFinite(+s.period) && +s.period > 0)
-      .sort((a, b) => +a.period - +b.period);
-  
-  const primPeriodForMarkers = allConfiguredPeriods.length ? +allConfiguredPeriods[0].period : null;
+    .filter((s) => s && Number.isFinite(+s.period) && +s.period > 0)
+    .sort((a, b) => +a.period - +b.period);
 
-  // 2. 独立计算这条基准均线的SMA序列，仅用于标记判断。
+  const primPeriodForMarkers = allConfiguredPeriods.length
+    ? +allConfiguredPeriods[0].period
+    : null;
+
   let primSeriesForMarkers = null;
   if (primPeriodForMarkers) {
-      // 如果该均线已被启用并计算过，直接复用；否则，单独计算一次。
-      if (mavolMap[primPeriodForMarkers]) {
-          primSeriesForMarkers = mavolMap[primPeriodForMarkers];
-      } else {
-          primSeriesForMarkers = sma(baseScaled, primPeriodForMarkers);
-      }
+    if (mavolMap[primPeriodForMarkers]) {
+      primSeriesForMarkers = mavolMap[primPeriodForMarkers];
+    } else {
+      primSeriesForMarkers = sma(baseScaled, primPeriodForMarkers);
+    }
   }
 
   // 放/缩量散点
@@ -179,7 +177,6 @@ export function buildVolumeOption(
   const pumpPts = [];
   const dumpPts = [];
 
-  // FIX-1: 使用独立计算的 `primSeriesForMarkers` 作为基准，不再依赖于显示的均线。
   if (primSeriesForMarkers) {
     if (pumpEnabled && pumpK > 0) {
       for (let i = 0; i < baseScaled.length; i++) {
@@ -198,14 +195,15 @@ export function buildVolumeOption(
       }
     }
   }
+
   if (pumpEnabled && pumpPts.length) {
     series.push({
       id: "VOL_PUMP_MARK",
       type: "scatter",
       name: "放量标记",
-      yAxisIndex: 1, // 绑定到第二Y轴
+      yAxisIndex: 1,
       data: pumpPts,
-      symbol: volCfg?.markerPump?.shape || "triangle",
+      symbol: volCfg?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
       symbolSize: () => [markerW, markerH],
       symbolOffset: symbolOffsetBelow,
       itemStyle: {
@@ -221,10 +219,10 @@ export function buildVolumeOption(
       id: "VOL_DUMP_MARK",
       type: "scatter",
       name: "缩量标记",
-      yAxisIndex: 1, // 绑定到第二Y轴
+      yAxisIndex: 1,
       data: dumpPts,
-      symbol: volCfg?.markerDump?.shape || "diamond",
-      symbolRotate: 180, // 缩量标记符号旋转180度
+      symbol: volCfg?.markerDump?.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
+      symbolRotate: 180,
       symbolSize: () => [markerW, markerH],
       symbolOffset: symbolOffsetBelow,
       itemStyle: {
@@ -236,7 +234,7 @@ export function buildVolumeOption(
     });
   }
 
-  // 顶部空间与横轴 margin（按是否有标记略作增加）
+  // 布局参数
   const anyMarkers =
     (pumpEnabled && pumpPts.length > 0) || (dumpEnabled && dumpPts.length > 0);
   const extraBottomPx = anyMarkers ? offsetDownPx : 0;
@@ -264,7 +262,7 @@ export function buildVolumeOption(
       backgroundColor: "rgba(20,20,20,0.85)",
       textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
     },
-    xAxis: { type: "category", data: dates },
+    xAxis: { type: "category", data: [] },
     yAxis: [
       {
         min: 0,
@@ -272,13 +270,13 @@ export function buildVolumeOption(
         axisLabel: {
           color: theme.axisLabelColor,
           align: "right",
-          formatter: (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 }),
+          formatter: (val) =>
+            formatNumberScaled(val, { minIntDigitsToScale: 5 }),
           margin: ui?.isHovered ? 6 : 6,
         },
         axisPointer: {
-          show: true, // 保持为 true, 由 link 机制统一控制
+          show: true,
           label: { show: !!ui?.isHovered },
-          // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
           lineStyle: {
             color: ui?.isHovered ? theme.axisLineColor : "transparent",
           },
@@ -293,11 +291,10 @@ export function buildVolumeOption(
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { show: false },
-        // FIX: 显式禁用第二Y轴的指针
         axisPointer: {
           show: false,
         },
-      }
+      },
     ],
     series,
   };
@@ -306,7 +303,8 @@ export function buildVolumeOption(
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  return applyUi(
+  // ===== 核心修复：调用新函数 =====
+  return applyLayout(
     option,
     {
       ...ui,
@@ -315,6 +313,6 @@ export function buildVolumeOption(
       xAxisLabelMargin,
       leftPx: 72,
     },
-    { dates, freq }
+    { candles: list, freq }
   );
 }

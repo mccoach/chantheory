@@ -1,5 +1,7 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\SymbolActions.vue -->
-<!-- 说明：封装“刷新”与被“短路”的“导出”按钮。 -->
+<!-- ============================== -->
+<!-- V2.0 - 刷新按钮改为强制刷新 -->
+<!-- ============================== -->
 <template>
   <div class="actions-group">
     <div class="seg">
@@ -53,5 +55,9 @@ defineEmits(["refresh"]);
 .seg-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+.seg-btn:hover:not(:disabled) {
+  background: #2b4b7e;
+  color: #fff;
 }
 </style>

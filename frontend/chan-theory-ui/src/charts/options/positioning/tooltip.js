@@ -1,9 +1,8 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\tooltips\positioner.js
+// src/charts/options/positioning/tooltip.js
 // ==============================
-// 说明：统一固定 tooltip 定位器（主/量/指标复用）
-// - ESM 单例 GLOBAL_TIP_SIDE：在左右边缘自动切换“固定在左/右侧的容器内位置”
-// - getOffset 可选：返回 {x,y} 叠加偏移
+// V2.0 - 使用常量版
 // ==============================
+import { TOOLTIP_STYLE } from '@/constants/ui/tooltip'
 
 let GLOBAL_TIP_SIDE = "left";
 
@@ -14,8 +13,10 @@ export function createFixedTooltipPositioner(defaultSide = "left", getOffset) {
   return function (pos, _params, dom, _rect, size) {
     const host = dom && dom.parentElement ? dom.parentElement : null;
     const hostRect = host ? host.getBoundingClientRect() : { width: 800 };
-    const tipW = (size && size.contentSize && size.contentSize[0]) || 260;
-    const margin = 8;
+    
+    // ===== 修复：使用常量 =====
+    const tipW = (size && size.contentSize && size.contentSize[0]) || TOOLTIP_STYLE.defaultWidth;
+    const margin = TOOLTIP_STYLE.margin;
     const x = Array.isArray(pos) ? pos[0] : 0;
     const nearLeft = x <= tipW + margin + 12;
     const nearRight = hostRect.width - x <= tipW + margin + 12;
@@ -26,7 +27,7 @@ export function createFixedTooltipPositioner(defaultSide = "left", getOffset) {
       GLOBAL_TIP_SIDE === "left"
         ? margin
         : Math.max(margin, hostRect.width - tipW - margin);
-    const baseY = 8;
+    const baseY = TOOLTIP_STYLE.baseY;
 
     let off = { x: 0, y: 0 };
     try {

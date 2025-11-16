@@ -1,32 +1,40 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\ui\applyUi.js
+// src/charts/options/positioning/layout.js
 // ==============================
-// 说明：通用 UI 合并器（grid/xAxis/yAxis/dataZoom/axisLabelFormatter）
-// - 由各 builders 统一调用；不包含业务特有字段
-// - 仅依赖主题与时间格式化工具
+// 说明：图表布局配置应用器（拆分自 applyUi.js）
+// 职责：应用 grid/xAxis/yAxis/dataZoom 配置
+// 设计：纯函数，只做配置组装，不做计算
+// 
+// 拆分理由：
+//   - 原 applyUi.js 混合了布局和格式化，职责过重
+//   - 提取布局逻辑，提升可测试性
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
-import { fmtTimeByFreq, makeAxisLabelFormatter } from "@/utils/timeFormat";
+import { formatTimeByFreq } from "@/utils/timeFormat";
+import { MAIN_CHART_LAYOUT, TECH_CHART_LAYOUT } from "@/constants/chartLayout";  // ← 使用新常量
 
-const LAYOUT = {
-  LEFT_MARGIN_PX: 64,
-  RIGHT_MARGIN_PX: 10,
-  SLIDER_HEIGHT_PX: 26,
-  MAIN_AXIS_LABEL_SPACE_PX: 30,
-  MAIN_BOTTOM_EXTRA_PX: 2,
-};
-
-export function applyUi(option, ui, { dates, freq }) {
+/**
+ * 应用图表布局配置
+ * 
+ * @param {Object} option - ECharts原始配置
+ * @param {Object} ui - UI参数
+ * @param {Object} data - 数据参数 {candles, freq}
+ * @returns {Object} 应用布局后的配置
+ */
+export function applyLayout(option, ui, { candles, freq }) {
   const theme = getChartTheme();
 
-  const leftPx = ui?.leftPx ?? LAYOUT.LEFT_MARGIN_PX;
-  const rightPx = ui?.rightPx ?? LAYOUT.RIGHT_MARGIN_PX;
+  // ===== 使用统一布局常量 =====
+  const leftPx = ui?.leftPx ?? (ui?.isMain ? MAIN_CHART_LAYOUT.LEFT_PX : TECH_CHART_LAYOUT.LEFT_PX);
+  const rightPx = ui?.rightPx ?? (ui?.isMain ? MAIN_CHART_LAYOUT.RIGHT_PX : TECH_CHART_LAYOUT.RIGHT_PX);
+  
   const isMain = !!ui?.isMain;
   const nonMainExtra = ui?.extraBottomPx ? Number(ui.extraBottomPx) : 0;
+  
   const gridBottom = isMain
-    ? (ui?.sliderHeightPx ?? LAYOUT.SLIDER_HEIGHT_PX) +
-      (ui?.mainAxisLabelSpacePx ?? LAYOUT.MAIN_AXIS_LABEL_SPACE_PX) +
-      (ui?.mainBottomExtraPx ?? LAYOUT.MAIN_BOTTOM_EXTRA_PX)
+    ? (ui?.sliderHeightPx ?? MAIN_CHART_LAYOUT.SLIDER_HEIGHT_PX) +
+      (ui?.mainAxisLabelSpacePx ?? MAIN_CHART_LAYOUT.AXIS_LABEL_SPACE_PX) +
+      (ui?.mainBottomExtraPx ?? MAIN_CHART_LAYOUT.BOTTOM_EXTRA_PX)
     : nonMainExtra;
 
   option.grid = {
@@ -37,11 +45,14 @@ export function applyUi(option, ui, { dates, freq }) {
     containLabel: false,
   };
 
-  const len = Array.isArray(dates) ? dates.length : 0;
+  // ===== 预格式化时间（保持V2.0架构）=====
+  const list = Array.isArray(candles) ? candles : [];
+  const len = list.length;
+  const dates = list.map((d) => formatTimeByFreq(freq, d?.ts || 0));
 
   option.xAxis = Object.assign({}, option.xAxis || {}, {
     type: "category",
-    data: option.xAxis?.data || dates || [],
+    data: dates,
     boundaryGap: ["0%", "0%"],
     axisTick: Object.assign({}, option.xAxis?.axisTick || {}, {
       alignWithLabel: true,
@@ -49,7 +60,6 @@ export function applyUi(option, ui, { dates, freq }) {
     axisLabel: Object.assign({}, option.xAxis?.axisLabel || {}, {
       color: theme.axisLabelColor,
       margin: ui?.xAxisLabelMargin ?? 6,
-      formatter: makeAxisLabelFormatter(freq),
     }),
     axisLine: Object.assign({}, option.xAxis?.axisLine || {}, {
       lineStyle: Object.assign(
@@ -96,14 +106,15 @@ export function applyUi(option, ui, { dates, freq }) {
     })
   );
 
+  // ===== DataZoom配置 =====
   const labelFmt = (val) => {
     if (Array.isArray(dates) && dates.length) {
       const idx = Number(val);
       if (Number.isInteger(idx) && idx >= 0 && idx < dates.length) {
-        return fmtTimeByFreq(freq, dates[idx]);
+        return dates[idx];
       }
     }
-    return fmtTimeByFreq(freq, val);
+    return formatTimeByFreq(freq, val);
   };
 
   const hasInitialRange =
@@ -130,7 +141,7 @@ export function applyUi(option, ui, { dates, freq }) {
         Object.assign(
           {
             type: "slider",
-            height: ui?.sliderHeightPx ?? LAYOUT.SLIDER_HEIGHT_PX,
+            height: ui?.sliderHeightPx ?? MAIN_CHART_LAYOUT.SLIDER_HEIGHT_PX,
             bottom: 0,
             showDetail: true,
             labelFormatter: labelFmt,

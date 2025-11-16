@@ -1,8 +1,6 @@
 # backend/routers/data_sync.py
 # ==============================
-# 说明：数据同步API（声明式需求接口）
-# 路由：
-#   POST /api/ensure-data - 批量数据需求声明
+# 数据同步API（V5.0 - 确认兼容新数据类型）
 # ==============================
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ router = APIRouter(prefix="/api", tags=["data_sync"])
 
 class DataRequirement(BaseModel):
     """单个数据需求"""
-    scope: str  # 'symbol' / 'watchlist' / 'all_symbols' / 'global'
+    scope: str  # 'symbol' / 'global'
     symbol: str = None
     symbols: List[str] = None
     includes: List[Dict[str, Any]]
@@ -37,8 +35,6 @@ async def ensure_data(
     """
     确保数据可用（声明式API）
     
-    前端发送数据需求声明，后端判断缺口并按需拉取。
-    
     请求体示例：
     {
         "requirements": [
@@ -46,9 +42,9 @@ async def ensure_data(
                 "scope": "symbol",
                 "symbol": "600519",
                 "includes": [
-                    {"type": "frontend_kline_current", "freq": "1d", "priority": 5},
-                    {"type": "frontend_profile", "priority": 10},
-                    {"type": "frontend_factors", "priority": 10}
+                    {"type": "current_kline", "freq": "1d", "priority": 20},
+                    {"type": "current_factors", "priority": 20},
+                    {"type": "current_profile", "priority": 30}
                 ]
             }
         ]

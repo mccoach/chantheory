@@ -1,22 +1,23 @@
 # backend/routers/symbols.py
 # ==============================
-# 说明：符号索引路由（V4.0 - 基于新架构）
+# 说明：符号索引路由（V7.0 - 带档案信息版）
 # 改动：
-#   - 移除废弃依赖
-#   - 改用声明式API触发刷新
+#   - GET /api/symbols/index 改为 JOIN symbol_profile
+#   - 返回完整档案字段（total_shares/float_shares/listing_date/industry/region/concepts）
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
+import json
 from fastapi import APIRouter, Query, Request
 from typing import Dict, Any, Optional
+from datetime import datetime
 
 from backend.utils.errors import http_500_from_exc
-from backend.db import select_symbol_index
+from backend.db.connection import get_conn
 from backend.utils.logger import get_logger, log_event
 from backend.settings import DATA_TYPE_DEFINITIONS
-
 
 router = APIRouter(prefix="/api/symbols", tags=["symbols"])
 _LOG = get_logger("symbols.router")
@@ -26,7 +27,13 @@ async def api_get_symbol_index(
     request: Request,
     refresh: Optional[int] = Query(0, description="传 1 可后台触发刷新"),
 ) -> Dict[str, Any]:
-    """返回当前索引，可选触发后台刷新"""
+    """
+    返回标的索引（带档案信息）
+    
+    返回字段：
+      索引字段：symbol, name, market, type, listing_date, status, updated_at
+      档案字段：total_shares, float_shares, industry, region, concepts
+    """
     tid = request.headers.get("x-trace-id")
     
     log_event(
@@ -46,7 +53,8 @@ async def api_get_symbol_index(
         if refresh:
             await trigger_symbol_index_refresh()
         
-        db_items = await asyncio.to_thread(select_symbol_index)
+        # ===== 核心修改：JOIN symbol_profile =====
+        db_items = await asyncio.to_thread(_select_symbol_index_with_profile)
         
         payload = {
             "ok": True,
@@ -87,7 +95,7 @@ async def api_get_symbol_index(
 
 @router.post("/refresh")
 async def api_refresh_symbol_index(request: Request) -> Dict[str, Any]:
-    """手动触发标的列表刷新"""
+    """手动触发标的列表刷新（会判断缺口）"""
     tid = request.headers.get("x-trace-id")
     
     log_event(
@@ -140,6 +148,74 @@ async def api_refresh_symbol_index(request: Request) -> Dict[str, Any]:
         )
         raise http_500_from_exc(e, trace_id=tid)
 
+@router.post("/refresh-force")
+async def api_force_refresh_symbol_index(request: Request) -> Dict[str, Any]:
+    """
+    强制刷新标的列表（绕过缺口判断）
+    
+    用途：
+      - 用户发现个别标的缺失时手动触发
+      - 直接调用同步函数，不走任务队列
+      - 不判断缺口，总是执行完整同步
+    """
+    tid = request.headers.get("x-trace-id")
+    
+    log_event(
+        logger=_LOG,
+        service="symbols.router",
+        level="INFO",
+        file=__file__,
+        func="api_force_refresh_symbol_index",
+        line=0,
+        trace_id=tid,
+        event="api.write.start",
+        message="POST /symbols/refresh-force（强制模式）"
+    )
+    
+    try:
+        from backend.services.symbol_sync import sync_all_symbols
+        
+        _LOG.info("[强制刷新] 绕过缺口判断，直接执行同步")
+        
+        result = await sync_all_symbols()
+        
+        resp = {
+            "ok": True,
+            "message": "强制刷新完成",
+            "result": result,
+            "trace_id": tid
+        }
+        
+        log_event(
+            logger=_LOG,
+            service="symbols.router",
+            level="INFO",
+            file=__file__,
+            func="api_force_refresh_symbol_index",
+            line=0,
+            trace_id=tid,
+            event="api.write.done",
+            message="POST /symbols/refresh-force done",
+            extra={"success": result.get('success'), "total": result.get('total_in_db')}
+        )
+        
+        return resp
+        
+    except Exception as e:
+        log_event(
+            logger=_LOG,
+            service="symbols.router",
+            level="ERROR",
+            file=__file__,
+            func="api_force_refresh_symbol_index",
+            line=0,
+            trace_id=tid,
+            event="api.write.fail",
+            message="POST /symbols/refresh-force failed",
+            extra={"error": str(e)}
+        )
+        raise http_500_from_exc(e, trace_id=tid)
+
 @router.get("/summary")
 async def api_symbols_summary(request: Request) -> Dict[str, Any]:
     """标的列表摘要统计"""
@@ -158,8 +234,6 @@ async def api_symbols_summary(request: Request) -> Dict[str, Any]:
     )
     
     try:
-        from backend.db.connection import get_conn
-        
         conn = get_conn()
         cur = conn.cursor()
         
@@ -204,6 +278,55 @@ async def api_symbols_summary(request: Request) -> Dict[str, Any]:
             extra={"error": str(e)}
         )
         raise http_500_from_exc(e, trace_id=tid)
+
+# ===== 辅助函数：带档案信息的查询 =====
+def _select_symbol_index_with_profile() -> list:
+    """
+    查询标的索引（LEFT JOIN symbol_profile）
+    
+    Returns:
+        List[Dict]: 包含档案信息的标的列表
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    cur.execute("""
+    SELECT 
+        s.symbol,
+        s.name,
+        s.market,
+        s.type,
+        s.listing_date,
+        s.status,
+        s.updated_at,
+        p.total_shares,
+        p.float_shares,
+        p.industry,
+        p.region,
+        p.concepts
+    FROM symbol_index s
+    LEFT JOIN symbol_profile p ON s.symbol = p.symbol
+    ORDER BY s.symbol ASC;
+    """)
+    
+    rows = cur.fetchall()
+    
+    results = []
+    for row in rows:
+        result = dict(row)
+        
+        # 解析 concepts（JSON字符串 → 列表）
+        if result.get('concepts'):
+            try:
+                result['concepts'] = json.loads(result['concepts'])
+            except (json.JSONDecodeError, TypeError):
+                result['concepts'] = []
+        else:
+            result['concepts'] = []
+        
+        results.append(result)
+    
+    return results
 
 async def trigger_symbol_index_refresh():
     """触发标的列表刷新（内部函数）"""

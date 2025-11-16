@@ -62,7 +62,7 @@ def run_test(title, func, show_full=False):
 
 
 def main():
-    print("开始执行最终版全量接口极限测试 (V3.3 - 补全交易日历)...")
+    print("开始执行最终版全量接口极限测试 (V4.0 - 补全实时行情)...")
 
     # ================= 1. 标的资产列表 =================
     print("\n\n" + "#"*30 + " 1. 标的资产列表 (Asset Universe) " + "#"*30)
@@ -81,10 +81,10 @@ def main():
     # ================= 2. 历史行情数据 =================
     print("\n\n" + "#"*30 + " 2. 历史行情数据 (Historical Bars) " + "#"*30)
     run_test("2.1. A股-日K线-东财 (stock_zh_a_hist)", lambda: ak.stock_zh_a_hist(symbol="000001", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust="qfq"))
-    run_test("2.2. A股-日K线-新浪 (stock_zh_a_daily)", lambda: ak.stock_zh_a_daily(symbol="sz000001", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust="qfq"))
+    run_test("2.2. A股-日K线-新浪 (stock_zh_a_daily)", lambda: ak.stock_zh_a_daily(symbol="sz000001", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust=""))
     run_test("2.3. A股-日K线-腾讯 (stock_zh_a_hist_tx)", lambda: ak.stock_zh_a_hist_tx(symbol="sz000001", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust="qfq"))
     run_test("2.4. A股-分钟K线-东财 (stock_zh_a_hist_min_em)", lambda: ak.stock_zh_a_hist_min_em(symbol="000001", period="5", start_date=START_DATETIME_EXTREME, end_date=END_DATETIME_EXTREME, adjust="qfq"))
-    run_test("2.5. A股-分钟K线-新浪(通用) (stock_zh_a_minute)", lambda: ak.stock_zh_a_minute(symbol='sz000001', period='60', adjust="qfq"))
+    run_test("2.5. A股-分钟K线-新浪(通用) (stock_zh_a_minute)", lambda: ak.stock_zh_a_minute(symbol='sh510300', period='60', start_date=START_DATETIME_EXTREME, end_date=END_DATETIME_EXTREME, adjust="qfq"))
     run_test("2.6. 科创板-日K线-新浪 (stock_zh_kcb_daily)", lambda: ak.stock_zh_kcb_daily(symbol="sh688399", adjust="qfq"))
     run_test("2.7. ETF-日K线-东财 (fund_etf_hist_em)", lambda: ak.fund_etf_hist_em(symbol="510300", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust="qfq"))
     run_test("2.8. LOF-日K线-东财 (fund_lof_hist_em)", lambda: ak.fund_lof_hist_em(symbol="162411", start_date=START_DATE_EXTREME, end_date=END_DATE_EXTREME, adjust="qfq"))
@@ -108,7 +108,7 @@ def main():
     run_test("4.1. 行业板块列表-东财 (stock_board_industry_name_em)", lambda: ak.stock_board_industry_name_em())
     run_test("4.2. 概念板块列表-东财 (stock_board_concept_name_em)", lambda: ak.stock_board_concept_name_em())
     run_test("4.3. 行业板块列表-同花顺 (stock_board_industry_summary_ths)", lambda: ak.stock_board_industry_summary_ths())
-    run_test("4.4. 行业板块名称-同花顺 (stock_board_industry_name_ths)", lambda: ak.stock_board_industry_name_ths())  # <--- 新增
+    run_test("4.4. 行业板块名称-同花顺 (stock_board_industry_name_ths)", lambda: ak.stock_board_industry_name_ths())
     try:
         industry_board_name = ak.stock_board_industry_name_em().iloc[0]['板块名称']
         run_test("4.5. 行业板块成分股-东财 (stock_board_industry_cons_em)", lambda: ak.stock_board_industry_cons_em(symbol=industry_board_name))
@@ -134,24 +134,32 @@ def main():
     run_test("5.2. 个股档案-东财 (stock_individual_info_em)", lambda: ak.stock_individual_info_em(symbol="000001"), show_full=True)
     run_test("5.3. 个股档案-雪球 (stock_individual_basic_info_xq)", lambda: ak.stock_individual_basic_info_xq(symbol="SH600519"), show_full=True)
     run_test("5.4. 基金档案-雪球 (fund_individual_basic_info_xq)", lambda: ak.fund_individual_basic_info_xq(symbol="000001"), show_full=True)
-    run_test("5.5. 指数基金列表-东财 (fund_info_index_em)", lambda: ak.fund_info_index_em(symbol="全部", indicator="全部"))  # <--- 新增
+    run_test("5.5. 指数基金列表-东财 (fund_info_index_em)", lambda: ak.fund_info_index_em(symbol="全部", indicator="全部"))
 
     # ================= 6. 其他特色数据 =================
     print("\n\n" + "#"*30 + " 6. 其他特色数据 " + "#"*30)
     run_test("6.1. 全部公募基金列表-东财 (fund_name_em)", lambda: ak.fund_name_em())
     run_test("6.2. 涨停股池-东财 (stock_zt_pool_em)", lambda: ak.stock_zt_pool_em(date=ZT_POOL_DATE))
-    run_test("6.3. 昨日涨停股池-东财 (stock_zt_pool_previous_em)", lambda: ak.stock_zt_pool_previous_em(date=ZT_POOL_DATE))  # <--- 新增
-    run_test("6.4. 强势股池-东财 (stock_zt_pool_strong_em)", lambda: ak.stock_zt_pool_strong_em(date=ZT_POOL_DATE))  # <--- 新增
-    run_test("6.5. 次新股池-东财 (stock_zt_pool_sub_new_em)", lambda: ak.stock_zt_pool_sub_new_em(date=ZT_POOL_DATE))  # <--- 新增
-    run_test("6.6. 炸板股池-东财 (stock_zt_pool_zbgc_em)", lambda: ak.stock_zt_pool_zbgc_em(date=ZT_POOL_DATE))  # <--- 新增
-    run_test("6.7. 跌停股池-东财 (stock_zt_pool_dtgc_em)", lambda: ak.stock_zt_pool_dtgc_em(date=ZT_POOL_DATE))  # <--- 新增
+    run_test("6.3. 昨日涨停股池-东财 (stock_zt_pool_previous_em)", lambda: ak.stock_zt_pool_previous_em(date=ZT_POOL_DATE))
+    run_test("6.4. 强势股池-东财 (stock_zt_pool_strong_em)", lambda: ak.stock_zt_pool_strong_em(date=ZT_POOL_DATE))
+    run_test("6.5. 次新股池-东财 (stock_zt_pool_sub_new_em)", lambda: ak.stock_zt_pool_sub_new_em(date=ZT_POOL_DATE))
+    run_test("6.6. 炸板股池-东财 (stock_zt_pool_zbgc_em)", lambda: ak.stock_zt_pool_zbgc_em(date=ZT_POOL_DATE))
+    run_test("6.7. 跌停股池-东财 (stock_zt_pool_dtgc_em)", lambda: ak.stock_zt_pool_dtgc_em(date=ZT_POOL_DATE))
 
-    # =================================================================
-    #  7. 交易日历 (Trade Calendar)
-    # =================================================================
+    # ================= 7. 交易日历 =================
     print("\n\n" + "#"*30 + " 7. 交易日历 (Trade Calendar) " + "#"*30)
     run_test("7.1. 交易日历-新浪 (tool_trade_date_hist_sina)", lambda: ak.tool_trade_date_hist_sina())
 
+    # ================= 8. 实时行情数据（新增）=================
+    print("\n\n" + "#"*30 + " 8. 实时行情数据 (Real-time Spot) " + "#"*30)
+    run_test("8.1. 沪深京A股实时行情-东财 (stock_zh_a_spot_em)", lambda: ak.stock_zh_a_spot_em())
+    run_test("8.2. 沪A股实时行情-东财 (stock_sh_a_spot_em)", lambda: ak.stock_sh_a_spot_em())
+    run_test("8.3. 深A股实时行情-东财 (stock_sz_a_spot_em)", lambda: ak.stock_sz_a_spot_em())
+    run_test("8.4. 京A股实时行情-东财 (stock_bj_a_spot_em)", lambda: ak.stock_bj_a_spot_em())
+    run_test("8.5. 新股实时行情-东财 (stock_new_a_spot_em)", lambda: ak.stock_new_a_spot_em())
+    run_test("8.6. 创业板实时行情-东财 (stock_cy_a_spot_em)", lambda: ak.stock_cy_a_spot_em())
+    run_test("8.7. 科创板实时行情-东财 (stock_kc_a_spot_em)", lambda: ak.stock_kc_a_spot_em())
+    run_test("8.8. AB股比价-东财 (stock_zh_ab_comparison_em)", lambda: ak.stock_zh_ab_comparison_em())
 
     print("\n\n" + "="*80 + "\n所有最终版全量接口极限测试已完成！\n" + "="*80)
 

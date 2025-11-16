@@ -1,11 +1,16 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useSymbolIndex.js
-// 标的索引（Local-first）：优先本地缓存 → 后端 /api/symbols/index → 内置示例
-// - 可选动态加载 tiny-pinyin；若依赖缺失则自动降级（仅代码/中文匹配，不报错）
-// - API：ready, search(query, limit), findBySymbol(symbol), ensureIndexFresh(force)
+// frontend/chan-theory-ui/src/composables/useSymbolIndex.js
+// ==============================
+// V4.0 - 支持档案信息（最小化修改版）
+// 改动：
+//   - enrichPinyin 增加档案字段处理
+//   - buildIndex 传递档案字段
+//   - 其他逻辑完全保持不变
+// ==============================
 
 import { ref } from "vue";
 import { api } from "@/api/client";
 import RAW from "@/assets/symbols.index.json";
+import { useEventStream } from "./useEventStream";
 
 const LS_KEY = "chan_symbol_index_v1";
 const LS_TS_KEY = "chan_symbol_index_updated_at";
@@ -35,6 +40,7 @@ function loadCache() {
     return null;
   }
 }
+
 function saveCache(items, updatedAt) {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(items || []));
@@ -42,7 +48,7 @@ function saveCache(items, updatedAt) {
   } catch {}
 }
 
-// 为条目补齐拼音字段（如果可用）
+// ===== 核心修改：为条目补齐拼音字段 + 档案字段 =====
 function enrichPinyin(item) {
   const name = String(item.name || "");
   if (name && TinyPinyinMod?.isSupported?.()) {
@@ -58,9 +64,19 @@ function enrichPinyin(item) {
     item.pinyin = item.pinyin || "";
     item.pinyin_abbr = item.pinyin_abbr || "";
   }
+  
+  // ===== 新增：保留档案字段（驼峰命名，便于前端使用）=====
+  item.totalShares = item.total_shares || null;
+  item.floatShares = item.float_shares || null;
+  item.listingDate = item.listing_date || null;
+  item.industry = item.industry || null;
+  item.region = item.region || null;
+  item.concepts = Array.isArray(item.concepts) ? item.concepts : [];
+  
   return item;
 }
 
+// ===== 核心修改：buildIndex 传递档案字段 =====
 function buildIndex(raw) {
   const arr = Array.isArray(raw) ? raw : [];
   return arr
@@ -73,6 +89,14 @@ function buildIndex(raw) {
         type: String(x.type || "").toUpperCase(),
         pinyin: x.pinyin || "",
         pinyin_abbr: x.pinyin_abbr || "",
+        
+        // ===== 新增：传递档案字段 =====
+        total_shares: x.total_shares || null,
+        float_shares: x.float_shares || null,
+        listing_date: x.listing_date || null,
+        industry: x.industry || null,
+        region: x.region || null,
+        concepts: x.concepts || [],
       })
     );
 }
@@ -111,6 +135,9 @@ export async function ensureIndexFresh(force = false) {
       idx.value = buildIndex(data.items);
       ready.value = true;
       saveCache(data.items, data.updated_at || new Date().toISOString());
+      
+      console.log(`[SymbolIndex] ✅ 索引已刷新，共 ${data.items.length} 个标的`);
+      
       return true;
     }
   } catch {
@@ -118,6 +145,9 @@ export async function ensureIndexFresh(force = false) {
   }
   return useLocalOrBuiltin();
 }
+
+// ===== 单例初始化标记（避免重复订阅）=====
+let _sseSubscribed = false;
 
 export function useSymbolIndex() {
   if (!ready.value) {
@@ -135,6 +165,35 @@ export function useSymbolIndex() {
       }
     });
   }
+  
+  // ===== SSE订阅（原有逻辑保持不变）=====
+  if (!_sseSubscribed) {
+    _sseSubscribed = true;
+    
+    try {
+      const eventStream = useEventStream();
+      
+      eventStream.subscribe('symbol_index_ready', async (data) => {
+        console.log('[SymbolIndex] 📋 收到更新通知', {
+          total: data.total_count,
+          strategy: data.strategy
+        });
+        
+        try {
+          console.log('[SymbolIndex] 🔄 自动刷新中...');
+          await ensureIndexFresh(true);
+          console.log('[SymbolIndex] ✅ 自动刷新完成');
+        } catch (e) {
+          console.error('[SymbolIndex] ❌ 自动刷新失败', e);
+        }
+      });
+      
+      console.log('[SymbolIndex] 📡 已订阅 symbol_index_ready 事件');
+    } catch (e) {
+      console.warn('[SymbolIndex] ⚠️ SSE订阅失败（可能在服务端渲染环境）', e);
+    }
+  }
+  
   function search(query, limit = 20) {
     const q = String(query || "").trim();
     if (!q) return [];
@@ -147,10 +206,17 @@ export function useSymbolIndex() {
     }
     return out;
   }
+  
   function findBySymbol(symbol) {
     const q = String(symbol || "").trim();
     if (!q) return null;
     return idx.value.find((it) => it.symbol === q) || null;
   }
-  return { ready, search, findBySymbol, ensureIndexFresh };
+  
+  return { 
+    ready, 
+    search, 
+    findBySymbol, 
+    ensureIndexFresh
+  };
 }

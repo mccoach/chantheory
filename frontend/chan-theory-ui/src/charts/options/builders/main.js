@@ -1,20 +1,17 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\builders\main.js
+// src/charts/options/builders/main.js
 // ==============================
-// 说明：主图 option 构造器（K 线 / 合并K / MA）
-// - tooltip 内容统一来自 tooltips 模块；position 由外部 ui.tooltipPositioner 注入
-// - yAxis：主轴 + 覆盖轴（隐藏）
-// - 仅联动 X 轴（竖线），不联动 Y 轴（水平线）
-// - FIX: 保持主图与副图的 axisPointer 规则完全一致，实现“悬浮窗十字，其余竖线”效果。
+// V4.0 - 导入路径修复版
+//
+// 核心改造：
+//   - applyUi → applyLayout（文件已移动）
+//   - 保持所有功能回归
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
 import { hexToRgba } from "@/utils/colorUtils";
 import { formatNumberScaled } from "@/utils/numberUtils";
-import {
-  STYLE_PALETTE,
-  DEFAULT_KLINE_STYLE,
-} from "@/constants";
-import { applyUi } from "../ui/applyUi";
+import { STYLE_PALETTE, DEFAULT_KLINE_STYLE } from "@/constants";
+import { applyLayout } from "../positioning/layout"; // ← 修复：新路径
 import { makeMainTooltipFormatter } from "../tooltips/index";
 
 function asArray(x) {
@@ -29,9 +26,9 @@ export function buildMainChartOption(
     candles,
     indicators,
     chartType,
-    maConfigs, // <--- 注意：这个参数由 useViewRenderHub 从 settings 传入
+    maConfigs,
     freq,
-    klineStyle, // <--- 注意：这个参数由 useViewRenderHub 从 settings 传入
+    klineStyle,
     adjust,
     reducedBars,
     mapOrigToReduced,
@@ -41,7 +38,7 @@ export function buildMainChartOption(
   const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
-  const dates = list.map((d) => d.t);
+
   const series = [];
 
   const ks = klineStyle || DEFAULT_KLINE_STYLE || {};
@@ -76,7 +73,8 @@ export function buildMainChartOption(
           color0: downFill,
           borderColor: upColor,
           borderColor0: downColor,
-          borderWidth: 1.2,
+          borderWidth:
+            ks.originalBorderWidth ?? DEFAULT_KLINE_STYLE.originalBorderWidth,
         },
         z: originalZ,
       };
@@ -97,10 +95,12 @@ export function buildMainChartOption(
         Math.min(1, Number((MK.fillFadePercent ?? 0) / 100))
       );
 
-      const upFill = fillAlpha === 0 ? "transparent" : hexToRgba(upC, fillAlpha);
-      const dnFill = fillAlpha === 0 ? "transparent" : hexToRgba(dnC, fillAlpha);
+      const upFill =
+        fillAlpha === 0 ? "transparent" : hexToRgba(upC, fillAlpha);
+      const dnFill =
+        fillAlpha === 0 ? "transparent" : hexToRgba(dnC, fillAlpha);
 
-      const n = dates.length;
+      const n = list.length;
       const baseLow = new Array(n).fill(null);
       const hlSpan = new Array(n).fill(null);
       const upIndexSet = new Set();
@@ -204,7 +204,7 @@ export function buildMainChartOption(
   const mainYAxis = {
     scale: true,
     axisPointer: {
-      show: true, // 保持为 true, 由 link 机制统一控制
+      show: true,
       label: {
         show: !!ui?.isHovered,
         formatter: function (params) {
@@ -215,12 +215,12 @@ export function buildMainChartOption(
           return formatNumberScaled(val, { digits: 2, allowEmpty: true });
         },
       },
-      // FIX: 通过颜色控制可见性, 悬浮时可见, 否则透明
       lineStyle: {
         color: ui?.isHovered ? theme.axisLineColor : "transparent",
       },
     },
   };
+
   const overlayMarkerYAxis = {
     type: "value",
     min: 0,
@@ -230,7 +230,6 @@ export function buildMainChartOption(
     axisLine: { show: false },
     axisTick: { show: false },
     splitLine: { show: false },
-    // FIX: 显式禁用第二Y轴的指针
     axisPointer: {
       show: false,
     },
@@ -263,7 +262,7 @@ export function buildMainChartOption(
       backgroundColor: "rgba(20,20,20,0.85)",
       textStyle: { color: theme.textColor, fontSize: 12, align: "left" },
     },
-    xAxis: { type: "category", data: dates },
+    xAxis: { type: "category", data: [] },
     yAxis: [mainYAxis, overlayMarkerYAxis],
     series,
   };
@@ -272,14 +271,11 @@ export function buildMainChartOption(
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  option = applyUi(
+  // ===== 核心修复：调用新函数 =====
+  option = applyLayout(
     option,
-    {
-      ...ui,
-      isMain: true,
-      leftPx: 72,
-    },
-    { dates, freq }
+    { ...ui, isMain: true, leftPx: 72 },
+    { candles: list, freq }
   );
 
   return option;

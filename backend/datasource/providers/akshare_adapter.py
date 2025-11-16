@@ -1,9 +1,13 @@
 # backend/datasource/providers/akshare_adapter.py
 # ==============================
-# 说明: 原子化调用层 - AkShare 适配器 (V6.0 - 全异步化终极版)
+# 说明: 原子化调用层 - AkShare 适配器 (V7.0 - 删除组合方法版)
 # - 职责: 封装所有对 `akshare` 库的直接调用，并将同步阻塞调用转换为异步接口。
 # - 核心改造: 所有函数改为 async def，内部通过 asyncio.to_thread 执行同步的 akshare 调用。
 # - 设计哲学: 在最底层（适配器层）封装同步到异步的转换，对上层提供统一的异步接口。
+# 
+# V7.0 改动：
+#   - 删除 get_stock_list_all_exchanges 组合方法（违反单一职责）
+#   - 保留三个原子方法（get_stock_list_sh/sz/bj）
 # ==============================
 
 from __future__ import annotations
@@ -72,6 +76,10 @@ async def get_stock_list_sh() -> pd.DataFrame:
     """
     df_main = await _run_sync_in_thread(ak.stock_info_sh_name_code, symbol="主板A股")
     df_kcb = await _run_sync_in_thread(ak.stock_info_sh_name_code, symbol="科创板")
+    
+    df_main['_market_source'] = 'SH'
+    df_kcb['_market_source'] = 'SH'
+    
     return pd.concat([df_main, df_kcb], ignore_index=True)
 
 @limit_async_network_io
@@ -88,7 +96,11 @@ async def get_stock_list_sz() -> pd.DataFrame:
       - 字段及单位: {'板块': str, 'A股代码': str(不带市场前缀的六位数字编码), 'A股简称': str, 'A股上市日期': str('YYYY-MM-DD'), 'A股总股本': str(带逗号的数字, 股), 'A股流通股本': str(带逗号的数字, 股), '所属行业': str}
       - 示例: [{'板块': '主板', 'A股代码': '000001', 'A股简称': '平安银行', 'A股上市日期': '1991-04-03', 'A股总股本': '19,405,918,198', 'A股流通股本': '19,405,600,653', '所属行业': 'J 金融业'}]
     """
-    return await _run_sync_in_thread(ak.stock_info_sz_name_code, symbol="A股列表")
+    df = await _run_sync_in_thread(ak.stock_info_sz_name_code, symbol="A股列表")
+
+    df['_market_source'] = 'SZ'
+    
+    return df
 
 @limit_async_network_io
 async def get_stock_list_bj() -> pd.DataFrame:
@@ -101,7 +113,11 @@ async def get_stock_list_bj() -> pd.DataFrame:
       - 字段及单位: {'证券代码': str(不带市场前缀的六位数字编码), '证券简称': str, '总股本': int(股), '流通股本': int(股), '上市日期': datetime.date, '所属行业': str, '地区': str, '报告日期': datetime.date}
       - 示例: [{'证券代码': '835185', '证券简称': '贝特瑞', '总股本': 1026040186, '流通股本': 539581696, '上市日期': datetime.date(2021, 11, 15), ...}]
     """
-    return await _run_sync_in_thread(ak.stock_info_bj_name_code)
+    df = await _run_sync_in_thread(ak.stock_info_bj_name_code)
+    
+    df['_market_source'] = 'BJ'
+    
+    return df
 
 @limit_async_network_io
 async def get_etf_list_sina() -> pd.DataFrame:
@@ -181,66 +197,6 @@ async def get_delisted_list_em() -> pd.DataFrame:
     """
     return await _run_sync_in_thread(ak.stock_staq_net_stop)
 
-
-# ==============================================================================
-# 1.5 复合方法：三交易所A股列表打包获取（推荐主力）
-# ==============================================================================
-
-@limit_async_network_io
-async def get_stock_list_all_exchanges() -> pd.DataFrame:
-    """
-    [A股列表 推荐主力] 从三大交易所官网分别获取并合并（V2.0优化版）。
-    
-    优势:
-    - 市场归属明确（来自官方，无需推断）
-    - 包含上市日期、股本等档案信息（深交所/北交所提供）
-    - 官方第一手数据，稳定性最高
-    
-    执行流程:
-    1. 并发调用三个交易所的接口
-    2. 为每个DataFrame添加市场标记
-    3. 合并三个DataFrame
-    
-    Returns:
-        pd.DataFrame: 合并后的全市场A股列表
-                     核心字段: 代码/证券代码, 名称/证券简称, _market_source
-                     扩展字段(深/北): 上市日期, 总股本, 流通股本, 所属行业, 地区
-    """
-    # 并发执行三个交易所的获取
-    results = await asyncio.gather(
-        get_stock_list_sh(),
-        get_stock_list_sz(),
-        get_stock_list_bj(),
-        return_exceptions=True
-    )
-    
-    dfs_to_merge = []
-    
-    # 处理上交所结果
-    if not isinstance(results[0], Exception) and results[0] is not None and not results[0].empty:
-        df_sh = results[0].copy()
-        df_sh['_market_source'] = 'SH'  # 添加市场标记
-        dfs_to_merge.append(df_sh)
-    
-    # 处理深交所结果
-    if not isinstance(results[1], Exception) and results[1] is not None and not results[1].empty:
-        df_sz = results[1].copy()
-        df_sz['_market_source'] = 'SZ'
-        dfs_to_merge.append(df_sz)
-    
-    # 处理北交所结果
-    if not isinstance(results[2], Exception) and results[2] is not None and not results[2].empty:
-        df_bj = results[2].copy()
-        df_bj['_market_source'] = 'BJ'
-        dfs_to_merge.append(df_bj)
-    
-    if not dfs_to_merge:
-        # 所有交易所都失败了，返回空DataFrame
-        return pd.DataFrame()
-    
-    # 合并所有结果
-    return pd.concat(dfs_to_merge, ignore_index=True)
-
 # ==============================================================================
 # 2. 历史行情数据 (Historical Bars)
 # ==============================================================================
@@ -273,31 +229,61 @@ async def get_stock_daily_em(symbol: str, start_date: str, end_date: str, period
     )
 
 @limit_async_network_io
-async def get_stock_weekly_em(symbol: str, start_date: str, end_date: str, adjust: str = "") -> pd.DataFrame:
+async def get_stock_weekly_em(
+    symbol: str, 
+    start_date: str, 
+    end_date: str, 
+    period: str = 'weekly',  # ← 默认值
+    adjust: str = "",
+    **kwargs  # ← 吸收多余参数
+) -> pd.DataFrame:
     """
     [A股周K线] 从东方财富获取（使用period='weekly'）
     其余说明同上
     """
     return await _run_sync_in_thread(
         ak.stock_zh_a_hist,
-        symbol=symbol, period='weekly', start_date=start_date, end_date=end_date, adjust=adjust
+        symbol=symbol, 
+        period='weekly',  # ← 固定为 weekly
+        start_date=start_date, 
+        end_date=end_date, 
+        adjust=adjust
     )
 
 @limit_async_network_io
-async def get_stock_monthly_em(symbol: str, start_date: str, end_date: str, adjust: str = "") -> pd.DataFrame:
+async def get_stock_monthly_em(
+    symbol: str, 
+    start_date: str, 
+    end_date: str, 
+    period: str = 'monthly',  # ← 默认值
+    adjust: str = "",
+    **kwargs  # ← 吸收多余参数
+) -> pd.DataFrame:
     """
     [A股月K线] 从东方财富获取（使用period='monthly'）
     其余说明同上
     """
     return await _run_sync_in_thread(
         ak.stock_zh_a_hist,
-        symbol=symbol, period='monthly', start_date=start_date, end_date=end_date, adjust=adjust
+        symbol=symbol, 
+        period='monthly',  # ← 固定为 monthly
+        start_date=start_date, 
+        end_date=end_date, 
+        adjust=adjust
     )
 
 @limit_async_network_io
-async def get_stock_daily_sina(symbol: str, start_date: str, end_date: str, adjust: str = "") -> pd.DataFrame:
+async def get_stock_daily_sina(
+    symbol: str, 
+    start_date: str, 
+    end_date: str, 
+    period: str = 'daily',  # ← 新增参数（但不使用）
+    adjust: str = "",
+    **kwargs  # ← 新增（吸收多余参数）
+) -> pd.DataFrame:
     """
     [A股日K线 备用1] 从新浪财经获取A股日K线。
+    注意：新浪接口不支持 period 参数，内部固定为日K线。
     - 数据源: 新浪财经, 目标地址: https://finance.sina.com.cn/realstock/company/sh600006/nc.shtml
     - akshare接口: `stock_zh_a_daily`
     ---
@@ -318,13 +304,25 @@ async def get_stock_daily_sina(symbol: str, start_date: str, end_date: str, adju
     symbol_prefixed = ak_symbol_with_prefix(symbol)
     return await _run_sync_in_thread(
         ak.stock_zh_a_daily,
-        symbol=symbol_prefixed, start_date=start_date, end_date=end_date, adjust=adjust
+        symbol=symbol_prefixed, 
+        start_date=start_date, 
+        end_date=end_date, 
+        adjust=adjust
+        # period 不传（新浪不支持）
     )
     
 @limit_async_network_io
-async def get_stock_daily_tx(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+async def get_stock_daily_tx(
+    symbol: str, 
+    start_date: str, 
+    end_date: str,
+    period: str = 'daily',  # ← 新增（但不使用）
+    adjust: str = '',  # ← 新增（但不使用）
+    **kwargs  # ← 新增
+) -> pd.DataFrame:
     """
     [A股日K线 备用2] 从腾讯财经获取A股日K线。
+    注意：腾讯接口不支持 period 和 adjust 参数。
     - 数据源: 腾讯证券, 目标地址: https://gu.qq.com/sh000919/zs
     - akshare接口: `stock_zh_a_hist_tx`
     ---
@@ -346,7 +344,10 @@ async def get_stock_daily_tx(symbol: str, start_date: str, end_date: str) -> pd.
     symbol_prefixed = ak_symbol_with_prefix(symbol)
     return await _run_sync_in_thread(
         ak.stock_zh_a_hist_tx,
-        symbol=symbol_prefixed, start_date=start_date, end_date=end_date
+        symbol=symbol_prefixed,
+        start_date=start_date,
+        end_date=end_date
+        # period 和 adjust 都不传（腾讯不支持）
     )
 
 @limit_async_network_io

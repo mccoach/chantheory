@@ -1,22 +1,30 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers\geometry.js
+// src/charts/chan/layers/geometry.js
 // ==============================
 // 说明：缠论图层几何计算工具
-// - 核心职责：提供一个统一的函数 deriveSymbolSize 来计算图层标记（如分型、涨跌标记）的动态尺寸和偏移。
-// - 目的：消除在 upDownMarkers.js, fractals.js, volume.js 等模块中重复的尺寸计算逻辑。
+// 职责：提供统一的 deriveSymbolSize 函数计算标记尺寸
+// 设计：纯函数，零副作用
 // ==============================
+
+import { DEFAULT_VOL_SETTINGS } from '@/constants';  // ← 新增导入
 
 /**
  * 派生图层标记的尺寸
+ * 
  * @param {object} options
  * @param {number} options.hostWidth - 图表宿主容器的宽度 (px)
  * @param {number} options.visCount - 当前可见的K线/Bar数量
  * @param {number} options.minPx - 标记的最小宽度 (px)
  * @param {number} options.maxPx - 标记的最大宽度 (px)
- * @param {number} [options.overrideWidth] - 外部强制指定的宽度 (px)，例如来自 useViewRenderHub 的 markerWidthPx
- * @param {number} [options.heightPx] - 标记的固定高度 (px)
- * @param {number} [options.yOffsetPx] - 标记距离K线/Bar的Y轴偏移 (px)
+ * @param {number} [options.overrideWidth] - 外部强制指定的宽度 (px)，来自 renderHub
+ * @param {number} [options.heightPx=10] - 标记的固定高度 (px)
+ * @param {number} [options.yOffsetPx=2] - 标记距离K线/Bar的Y轴偏移 (px)
  * @param {number} [options.barPercent=100] - 如果基于Bar估算，Bar的宽度百分比
  * @returns {{widthPx: number, heightPx: number, offsetBottomPx: number}}
+ * 
+ * 算法：
+ *   1. 优先使用 overrideWidth（来自 renderHub 统一计算）
+ *   2. 否则基于可见根数估算：(宿主宽度 * 可用比例) / 可见根数 * 柱宽百分比
+ *   3. 应用 [minPx, maxPx] 限制
  */
 export function deriveSymbolSize({
   hostWidth,
@@ -37,8 +45,8 @@ export function deriveSymbolSize({
     // 优先使用外部覆盖宽度
     finalWidth = Math.round(overrideWidth);
   } else {
-    // 否则根据可见根数估算
-    const approxBarWidth = (hW * 0.88) / vC;
+    // ===== 修复：使用常量（未暴露参数）=====
+    const approxBarWidth = (hW * DEFAULT_VOL_SETTINGS.layout.barUsableRatio) / vC;
     const approxSymbolWidth = approxBarWidth * (barPercent / 100);
     finalWidth = Math.round(approxSymbolWidth);
   }

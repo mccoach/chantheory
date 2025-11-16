@@ -1,10 +1,8 @@
 // src/charts/theme.js
 // ==============================
-// 说明：从 CSS 变量读取主题色，映射到 ECharts 配置消费
-// - 暴露 getChartTheme()：返回颜色/轴线/背景等
-// - 主题切换时可重新读取并 setOption 覆盖
+// V2.0 - 使用常量兜底
 // ==============================
-
+import { DEFAULT_THEME_COLORS } from '@/constants/ui/theme'
 /** 读取根元素的 CSS 变量 */
 function cssVar(name) {
   // 通过 getComputedStyle 读取 CSS 变量
@@ -16,13 +14,13 @@ function cssVar(name) {
 /** 返回图表主题对象（供 options 生成器使用） */
 export function getChartTheme() {
   // 从 CSS 变量读取颜色
-  const bg = cssVar("--bg-main") || "#111";
-  const fg = cssVar("--fg-main") || "#ddd";
-  const axisLine = cssVar("--axis-line") || "#555";
-  const axisLabel = cssVar("--axis-label") || "#aaa";
-  const gridLine = cssVar("--grid-line") || "#2a2a2a";
-  const rise = cssVar("--rise-color") || "#f56c6c";
-  const fall = cssVar("--fall-color") || "#26a69a";
+  const bg = cssVar("--bg-main") || DEFAULT_THEME_COLORS.bgMain;
+  const fg = cssVar("--fg-main") || DEFAULT_THEME_COLORS.fgMain;
+  const axisLine = cssVar("--axis-line") || DEFAULT_THEME_COLORS.axisLine;
+  const axisLabel = cssVar("--axis-label") || DEFAULT_THEME_COLORS.axisLabel;
+  const gridLine = cssVar("--grid-line") || DEFAULT_THEME_COLORS.gridLine;
+  const rise = cssVar("--rise-color") || DEFAULT_THEME_COLORS.riseColor;
+  const fall = cssVar("--fall-color") || DEFAULT_THEME_COLORS.fallColor;
 
   // 返回统一主题对象
   return {

@@ -1,7 +1,9 @@
 # backend/db/connection.py
 # ==============================
-# 说明：数据库连接管理模块
-# - 职责：提供全局单例的数据库连接，管理连接配置
+# 说明：数据库连接管理模块（V2.0 - 添加全局写锁）
+# 改动：
+#   - 新增 _db_write_lock 全局锁
+#   - 新增 get_write_lock 函数供外部使用
 # ==============================
 
 from __future__ import annotations
@@ -13,6 +15,9 @@ from backend.settings import settings
 
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.Lock()
+
+# ===== 新增：全局写锁（解决并发冲突）=====
+_db_write_lock = threading.Lock()
 
 def get_conn() -> sqlite3.Connection:
     """
@@ -37,6 +42,19 @@ def get_conn() -> sqlite3.Connection:
             _conn.row_factory = sqlite3.Row
             _apply_pragmas(_conn)
         return _conn
+
+def get_write_lock() -> threading.Lock:
+    """
+    获取全局写锁（用于需要原子性的写操作）
+    
+    用途：
+      - upsert_symbol_index（标的列表并发写入）
+      - 其他需要串行化的数据库写操作
+    
+    Returns:
+        threading.Lock: 全局写锁对象
+    """
+    return _db_write_lock
 
 def _apply_pragmas(conn: sqlite3.Connection):
     """

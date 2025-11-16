@@ -73,7 +73,7 @@
 </template>
 
 <script setup>
-import { defineProps } from "vue";
+/* import { defineProps } from "vue"; 
 
 /**
  * props.rows 结构定义（UI-only）：

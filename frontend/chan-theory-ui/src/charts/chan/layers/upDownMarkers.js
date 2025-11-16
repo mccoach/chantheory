@@ -1,45 +1,54 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers\upDownMarkers.js
+// src/charts/chan/layers/upDownMarkers.js
 // ==============================
 // 缠论图层：涨跌标记 (Up/Down Markers)
-// - 从 layers.js 拆分而来。
-// - 核心职责：将合并K线中的方向信息（dir_int）转换为ECharts的散点图系列（scatter series）。
+// 职责：将合并K线的方向信息转换为散点图系列
+// 
+// 修复要点：
+//   - 已暴露参数：从 chan 配置读取（upShape/upColor等）
+//   - 未暴露参数：直接用常量（markerHeightPx/markerYOffsetPx等）
 // ==============================
+
 import { CHAN_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { deriveSymbolSize } from "./geometry"; // NEW
+import { deriveSymbolSize } from "./geometry";
 
-// 涨跌标记：横坐标 = anchor_idx_orig（承载点的原始索引），绑定隐藏 yAxis=1
 export function buildUpDownMarkers(reducedBars, env = {}) {
   const settings = useUserSettings();
+  
+  // ===== 合并设置：优先用户配置，兜底默认值 =====
   const chan = Object.assign(
     {},
     CHAN_DEFAULTS,
     (settings.chanTheory && settings.chanTheory.chanSettings) || {}
   );
 
-  // MODIFIED: Use deriveSymbolSize for unified geometry calculation
+  // ===== 几何计算：未暴露参数直接用常量 =====
   const { widthPx: markerW, heightPx: markerH, offsetBottomPx } = deriveSymbolSize({
     hostWidth: env.hostWidth,
     visCount: env.visCount,
-    minPx: chan.markerMinPx,
-    maxPx: chan.markerMaxPx,
+    minPx: CHAN_DEFAULTS.markerMinPx,      // ← 未暴露，直接用常量
+    maxPx: CHAN_DEFAULTS.markerMaxPx,      // ← 未暴露，直接用常量
     overrideWidth: env.symbolWidthPx,
-    heightPx: CHAN_DEFAULTS.markerHeightPx,
-    yOffsetPx: CHAN_DEFAULTS.markerYOffsetPx,
+    heightPx: CHAN_DEFAULTS.markerHeightPx,  // ← 未暴露，直接用常量
+    yOffsetPx: CHAN_DEFAULTS.markerYOffsetPx,  // ← 未暴露，直接用常量
   });
 
   const upPoints = [];
-  const downPoints = []; // 承载点集合
+  const downPoints = [];
+  
   for (let i = 0; i < (reducedBars || []).length; i++) {
     const rb = reducedBars[i];
     const d = Number(rb?.dir_int || 0);
     if (!Number.isFinite(d) || d === 0) continue;
+    
     const x = Number(rb?.anchor_idx_orig ?? rb?.end_idx_orig ?? i);
     const point = [x, 0];
+    
     if (d > 0) upPoints.push(point);
     else downPoints.push(point);
   }
 
+  // 降采样（未暴露参数）
   function downSample(arr, maxN) {
     const n = arr.length;
     if (n <= maxN) return arr;
@@ -48,20 +57,23 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     for (let i = 0; i < n; i += step) out.push(arr[i]);
     return out;
   }
-  const upArr = downSample(upPoints, chan.maxVisibleMarkers);
-  const dnArr = downSample(downPoints, chan.maxVisibleMarkers);
+  
+  const maxMarkers = CHAN_DEFAULTS.maxVisibleMarkers;  // ← 未暴露，直接用常量
+  const upArr = downSample(upPoints, maxMarkers);
+  const dnArr = downSample(downPoints, maxMarkers);
 
-  // -- 直接从合并后的 chan 设置中获取形状和颜色 --
-  const upShape = chan.upShape;
-  const downShape = chan.downShape;
-  const upFill = chan.upColor;
-  const downFill = chan.downColor;
+  // ===== 样式配置：已暴露参数从 chan 读取 =====
+  const upShape = chan.upShape;      // ← 已暴露，从设置读取
+  const downShape = chan.downShape;  // ← 已暴露，从设置读取
+  const upFill = chan.upColor;       // ← 已暴露，从设置读取
+  const downFill = chan.downColor;   // ← 已暴露，从设置读取
+  const opacity = CHAN_DEFAULTS.opacity;  // ← 未暴露，直接用常量
 
   const commonScatter = {
     type: "scatter",
-    yAxisIndex: 1, // 不变量：隐藏 y 轴 index=1
-    symbolSize: () => [markerW, markerH], // 宽高统一受中枢派生几何控制
-    symbolOffset: [0, offsetBottomPx], // 底部偏移
+    yAxisIndex: 1,  // 隐藏 y 轴
+    symbolSize: () => [markerW, markerH],
+    symbolOffset: [0, offsetBottomPx],
     clip: false,
     tooltip: { show: false },
     z: 2,
@@ -75,8 +87,9 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     data: upArr,
     symbol: upShape,
     symbolRotate: 0,
-    itemStyle: { color: upFill, opacity: chan.opacity },
+    itemStyle: { color: upFill, opacity },
   };
+  
   const downSeries = {
     ...commonScatter,
     id: "CHAN_DOWN",
@@ -84,7 +97,7 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
     data: dnArr,
     symbol: downShape,
     symbolRotate: 180,
-    itemStyle: { color: downFill, opacity: chan.opacity },
+    itemStyle: { color: downFill, opacity },
   };
 
   return {

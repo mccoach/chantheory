@@ -1,6 +1,6 @@
 # backend/db/__init__.py
 # ==============================
-# 说明：数据库模块统一导出接口
+# V3.0 - 删除废弃的 tasks 模块导出
 # ==============================
 
 from backend.db.connection import get_conn, close_all_connections
@@ -38,17 +38,6 @@ from backend.db.watchlist import (
     update_watchlist_sort_order,
 )
 
-# 任务管理操作
-from backend.db.tasks import (
-    bulk_insert_sync_tasks,
-    clear_all_tasks,
-    get_total_task_count,
-    populate_task_cursor,
-    get_task_by_cursor,
-    record_sync_failure,
-    get_recent_failures,
-)
-
 # 交易日历操作
 from backend.db.calendar import (
     upsert_trade_calendar,
@@ -74,11 +63,6 @@ __all__ = [
     # 自选池
     'insert_watchlist', 'delete_watchlist', 'select_user_watchlist',
     'update_watchlist_tags', 'update_watchlist_sort_order',
-    
-    # 任务
-    'bulk_insert_sync_tasks', 'clear_all_tasks', 'get_total_task_count',
-    'populate_task_cursor', 'get_task_by_cursor',
-    'record_sync_failure', 'get_recent_failures',
     
     # 日历
     'upsert_trade_calendar', 'is_trading_day', 'get_recent_trading_days',

@@ -1,13 +1,6 @@
 # backend/datasource/registry.py
 # ==============================
-# 说明: 数据源武器库 - 方法注册表 (The Catalog)
-# - 职责:
-#   1. 导入所有原子化调用层的适配器函数。
-#   2. 为每个函数创建标准化的 `MethodDescriptor`。
-#   3. 按数据类别分组，并按优先级排序，构建统一的方法目录 `METHOD_CATALOG`。
-# - 设计:
-#   - 这是一个静态的、声明式的配置文件，集中管理所有数据源的元数据和策略。
-#   - 外部调用者（如 dispatcher）通过查询 `METHOD_CATALOG` 获取执行方案。
+# V7.0 - 日/周/月独立分组
 # ==============================
 
 from __future__ import annotations
@@ -35,41 +28,55 @@ class MethodDescriptor:
     description: str = ""  # 详细描述
 
 # --- 2. 全部可用方法列表 (军火库清单) ---
-# 此列表将包含所有数据源的所有可用方法。
 
 _ALL_METHODS: List[MethodDescriptor] = [
     # ==========================================================================
     # 类别: 标的资产列表
     # ==========================================================================
     
-    # --- A股 ---
+    # --- A股（三交所分别注册）---
     MethodDescriptor(
-        id="akshare.get_stock_list_all_exchanges",
-        name="三交易所官网-A股列表(复合)",
+        id="akshare.get_stock_list_sh",
+        name="上交所-A股列表",
         provider="akshare",
-        category="stock_list",
-        callable=ak.get_stock_list_all_exchanges,
-        priority=5,  # 最高优先级
-        tags=('stock', 'list', 'official', 'composite'),
-        description="从上交所、深交所、北交所官网分别获取并合并，数据最完整"
+        category="stock_list_sh",
+        callable=ak.get_stock_list_sh,
+        priority=10,
+        tags=('stock', 'list', 'sh', 'official'),
+        description="从上交所官网获取沪市主板及科创板股票列表"
     ),
-    # 原有的单独接口降为备用
+    MethodDescriptor(
+        id="akshare.get_stock_list_sz",
+        name="深交所-A股列表",
+        provider="akshare",
+        category="stock_list_sz",
+        callable=ak.get_stock_list_sz,
+        priority=10,
+        tags=('stock', 'list', 'sz', 'official'),
+        description="从深交所官网获取深市A股列表"
+    ),
+    MethodDescriptor(
+        id="akshare.get_stock_list_bj",
+        name="北交所-A股列表",
+        provider="akshare",
+        category="stock_list_bj",
+        callable=ak.get_stock_list_bj,
+        priority=10,
+        tags=('stock', 'list', 'bj', 'official'),
+        description="从北交所官网获取北市A股列表"
+    ),
+    
+    # --- A股（东财备用）---
     MethodDescriptor(
         id="akshare.get_stock_list_a_em",
-        name="东方财富-A股列表",
+        name="东方财富-A股列表（备用）",
         provider="akshare",
         category="stock_list",
         callable=ak.get_stock_list_a_em,
-        priority=50,  # 降为备用
-        tags=('stock', 'list', 'em')
+        priority=50,
+        tags=('stock', 'list', 'em', 'fallback'),
+        description="从东方财富获取全市场A股列表（备用方案，数据可能不含北交所）"
     ),
-    # 以下接口可以作为"档案补充"单独保留，或移除（因为已被复合方法包含）
-    # MethodDescriptor(id="akshare.get_stock_list_sh", name="上交所-A股列表", provider="akshare", category="stock_list", callable=ak.get_stock_list_sh, priority=10, tags=('stock', 'list', 'sh')),
-    # MethodDescriptor(id="akshare.get_stock_list_sz", name="深交所-A股列表", provider="akshare", category="stock_list", callable=ak.get_stock_list_sz, priority=10, tags=('stock', 'list', 'sz')),
-    # MethodDescriptor(id="akshare.get_stock_list_bj", name="北交所-A股列表", provider="akshare", category="stock_list", callable=ak.get_stock_list_bj, priority=10, tags=('stock', 'list', 'bj')),
-    
-    # 以下接口可以作为"档案补充"单独保留，或移除（因为已被复合方法包含）
-    MethodDescriptor(id="akshare.get_stock_list_a_em", name="东方财富-A股列表", provider="akshare", category="stock_list", callable=ak.get_stock_list_a_em, priority=50, tags=('stock', 'list', 'em')),
     
     # --- ETF/LOF ---
     MethodDescriptor(id="akshare.get_etf_list_sina", name="新浪财经-ETF列表", provider="akshare", category="etf_list", callable=ak.get_etf_list_sina, priority=10, tags=('etf', 'list', 'sina')),
@@ -89,33 +96,86 @@ _ALL_METHODS: List[MethodDescriptor] = [
     # ==========================================================================
     # 类别: 历史行情数据
     # ==========================================================================
+
+    # ===== A股日K线（独立 category）=====
+    MethodDescriptor(
+        id="akshare.get_stock_daily_em",
+        name="东方财富-A股日K",
+        provider="akshare",
+        category="stock_daily_bars",
+        callable=ak.get_stock_daily_em,
+        priority=10,
+        tags=('stock', 'kline', 'daily', 'em'),
+        description="支持 period='daily'，主力方案",
+    ),
+    MethodDescriptor(
+        id="akshare.get_stock_daily_bars_sina",
+        name="新浪财经-A股日K",
+        provider="akshare",
+        category="stock_daily_bars",
+        callable=ak.get_stock_daily_sina,
+        priority=20,
+        tags=('stock', 'kline', 'daily', 'sina'),
+        description="仅支持日K，不支持 period 参数",
+    ),
+    MethodDescriptor(
+        id="akshare.get_stock_daily_bars_tx",
+        name="腾讯财经-A股日K",
+        provider="akshare",
+        category="stock_daily_bars",
+        callable=ak.get_stock_daily_tx,
+        priority=30,
+        tags=('stock', 'kline', 'daily', 'tx'),
+        description="仅支持日K，不支持 period 和 adjust 参数",
+    ),
     
-    # --- A股 ---
-    MethodDescriptor(id="akshare.get_stock_bars", name="东方财富-A股日/周/月K", provider="akshare", category="stock_bars", callable=ak.get_stock_daily_em, priority=10, tags=('stock', 'kline', 'em')),
-    MethodDescriptor(id="akshare.get_stock_daily_bars_sina", name="新浪财经-A股日K", provider="akshare", category="stock_bars", callable=ak.get_stock_daily_sina, priority=20, tags=('stock', 'kline', 'daily', 'sina')),
-    MethodDescriptor(id="akshare.get_stock_daily_bars_tx", name="腾讯财经-A股日K", provider="akshare", category="stock_bars", callable=ak.get_stock_daily_tx, priority=30, tags=('stock', 'kline', 'daily', 'tx')),
-    MethodDescriptor(id="akshare.get_stock_minutely_bars_sina", name="新浪财经-A股分钟K", provider="akshare", category="stock_minutely_bars", callable=ak.get_minutely_sina, priority=10, tags=('stock', 'kline', 'minutely', 'sina')),
-    MethodDescriptor(id="akshare.get_stock_minutely_bars_em", name="东方财富-A股分钟K(不稳定)", provider="akshare", category="stock_minutely_bars", callable=ak.get_minutely_em, priority=100, tags=('stock', 'kline', 'minutely', 'em', 'unstable')),
+    # ===== A股周K线（独立 category）=====
     MethodDescriptor(
         id="akshare.get_stock_weekly_em",
         name="东方财富-A股周K",
         provider="akshare",
-        category="stock_bars",
-        callable=ak.get_stock_daily_em,  # 复用daily方法，通过period参数区分
+        category="stock_weekly_bars",
+        callable=ak.get_stock_weekly_em,
         priority=10,
-        tags=('stock', 'kline', 'weekly', 'em')
+        tags=('stock', 'kline', 'weekly', 'em'),
+        description="仅支持周K，内部固定 period='weekly'",
     ),
+    
+    # ===== A股月K线（独立 category）=====
     MethodDescriptor(
         id="akshare.get_stock_monthly_em",
         name="东方财富-A股月K",
         provider="akshare",
-        category="stock_bars",
-        callable=ak.get_stock_daily_em,  # 复用daily方法
+        category="stock_monthly_bars",
+        callable=ak.get_stock_monthly_em,
         priority=10,
-        tags=('stock', 'kline', 'monthly', 'em')
+        tags=('stock', 'kline', 'monthly', 'em'),
+        description="仅支持月K，内部固定 period='monthly'",
     ),
     
-    # --- 基金 (ETF/LOF) ---
+    # ===== A股分钟K线（保持独立）=====
+    MethodDescriptor(
+        id="akshare.get_stock_minutely_bars_sina",
+        name="新浪财经-A股分钟K",
+        provider="akshare",
+        category="stock_minutely_bars",
+        callable=ak.get_minutely_sina,
+        priority=10,
+        tags=('stock', 'kline', 'minutely', 'sina'),
+        description="支持1,5,15,30,60各种分钟频率，各频稳定反馈1970条，主力接口",
+    ),
+    MethodDescriptor(
+        id="akshare.get_stock_minutely_bars_em",
+        name="东方财富-A股分钟K(不稳定)",
+        provider="akshare",
+        category="stock_minutely_bars",
+        callable=ak.get_minutely_em,
+        priority=100,
+        tags=('stock', 'kline', 'minutely', 'em', 'unstable'),
+        description="大概率被反爬，偶尔成功，极不稳定，仅做极端情况下备用接口",
+    ),
+    
+    # ===== 基金（ETF/LOF）=====
     MethodDescriptor(id="akshare.get_fund_bars_sina", name="新浪财经-ETF/LOF日K", provider="akshare", category="fund_bars", callable=ak.get_fund_daily_sina, priority=10, tags=('etf', 'lof', 'kline', 'daily', 'sina')),
     MethodDescriptor(id="akshare.get_fund_minutely_bars_sina", name="新浪财经-ETF/LOF分钟K", provider="akshare", category="fund_minutely_bars", callable=ak.get_minutely_sina, priority=10, tags=('etf', 'lof', 'kline', 'minutely', 'sina')),
     MethodDescriptor(id="akshare.get_etf_bars_em", name="东方财富-ETF日K(不稳定)", provider="akshare", category="fund_bars", callable=ak.get_etf_daily_em, priority=100, tags=('etf', 'kline', 'daily', 'em', 'unstable')),
@@ -134,16 +194,26 @@ _ALL_METHODS: List[MethodDescriptor] = [
     # 类别: 静态与衍生数据
     # ==========================================================================
     MethodDescriptor(
-        id="akshare.get_qfq_factor", name="新浪财经-前复权因子", provider="akshare", category="adj_factor",
-        callable=ak.get_adj_factor, priority=10, tags=('stock', 'factor', 'qfq', 'sina'),
+        id="akshare.get_qfq_factor",
+        name="新浪财经-前复权因子",
+        provider="akshare",
+        category="adj_factor",
+        callable=ak.get_adj_factor,
+        priority=10,
+        tags=('stock', 'factor', 'qfq', 'sina'),
         params_template={'symbol': str, 'adjust_type': 'qfq-factor'},
-        description="获取前复权因子"
+        description="获取前复权因子",
     ),
     MethodDescriptor(
-        id="akshare.get_hfq_factor", name="新浪财经-后复权因子", provider="akshare", category="adj_factor",
-        callable=ak.get_adj_factor, priority=10, tags=('stock', 'factor', 'hfq', 'sina'),
+        id="akshare.get_hfq_factor",
+        name="新浪财经-后复权因子",
+        provider="akshare",
+        category="adj_factor",
+        callable=ak.get_adj_factor,
+        priority=10,
+        tags=('stock', 'factor', 'hfq', 'sina'),
         params_template={'symbol': str, 'adjust_type': 'hfq-factor'},
-        description="获取后复权因子"
+        description="获取后复权因子",
     ),
     MethodDescriptor(id="akshare.get_stock_profile_em", name="东方财富-个股档案", provider="akshare", category="stock_profile", callable=ak.get_stock_profile_em, priority=10, tags=('stock', 'profile', 'em')),
     MethodDescriptor(id="akshare.get_fund_profile_xq", name="雪球-基金档案", provider="akshare", category="fund_profile", callable=ak.get_fund_profile_xq, priority=10, tags=('fund', 'profile', 'xq')),

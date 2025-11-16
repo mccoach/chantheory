@@ -1,22 +1,37 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\options\tooltips\index.js
+// frontend/src/charts/options/tooltips/index.js
 // ==============================
-// 说明：统一 tooltip 构造（单一模  ）
-// - 模板：首行（时间 + 可选附加） + 多条信息行（左：颜色圆点，可缺省；右：label：value）
-// - 导出：makeMainTooltipFormatter / makeVolumeTooltipFormatter / makeMacdTooltipFormatter
-//         makeBollTooltipFormatter / makeKdjRsiTooltipFormatter
+// V3.0 - 按需格式化架构（零冗余版）
+// 
+// 核心改动：
+//   1. 新增 extractTimeLabel() 统一时间提取逻辑
+//   2. 支持 xAxis.data 为对象数组或字符串数组
+//   3. 所有 formatter 复用统一提取函数
+// 
+// 职责：
+//   - 构造各类图表的 Tooltip 内容
+//   - 智能识别 axisValue 类型（对象/字符串/数字）
+//   - 格式化为统一的 HTML 模板
 // ==============================
 
-import { fmtTimeByFreq } from "@/utils/timeFormat";
+import { formatTimeByFreq } from "@/utils/timeFormat";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { DEFAULT_KLINE_STYLE, STYLE_PALETTE } from "@/constants";
 
-// 模板：首行
+// ==============================
+// 工具函数：模板渲染
+// ==============================
+
+/**
+ * 渲染 Tooltip 首行（时间 + 可选附加信息）
+ */
 function renderHeader(timeLabel, extraText) {
   const ext = extraText ? ` ${extraText}` : "";
   return `<div style="margin-bottom:4px;">${timeLabel}${ext}</div>`;
 }
 
-// 模板：行（点 + 文本）
+/**
+ * 渲染 Tooltip 数据行（颜色圆点 + 标签 + 值）
+ */
 function renderRow({ color, label, value }) {
   const dot =
     color && typeof color === "string"
@@ -25,12 +40,47 @@ function renderRow({ color, label, value }) {
   return `<div>${dot}${label}: ${value}</div>`;
 }
 
-// 工具：从 params 寻找 bar/line 项
+/**
+ * 从 params 数组中查找第一个匹配条件的项
+ */
 function findFirst(params, pred) {
   return Array.isArray(params) ? params.find(pred) : null;
 }
 
-// ========= 主图 =========
+// ==============================
+// 核心：统一时间提取逻辑（新增）
+// ==============================
+
+/**
+ * 智能提取 Tooltip 的时间标签
+ * 
+ * 职责：
+ *   - 从 ECharts params 中提取 axisValue
+ *   - 智能识别类型（对象/字符串/数字/时间戳）
+ *   - 格式化为可读时间字符串
+ * 
+ * 支持的数据源：
+ *   - xAxis.data = [{ts, o, h, l, c, v}, ...]  → axisValue 是对象
+ *   - xAxis.data = ["2003-10-09", ...]         → axisValue 是字符串
+ *   - xAxis.data = [1065682800000, ...]        → axisValue 是时间戳
+ * 
+ * @param {Array} params - ECharts tooltip params
+ * @param {string} freq - 频率（用于判断格式）
+ * @returns {string} 格式化后的时间字符串
+ */
+function extractTimeLabel(params, freq) {
+  if (!Array.isArray(params) || !params.length) return "";
+  
+  const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
+  
+  // ===== 修改：直接返回字符串，不再格式化 =====
+  return String(rawLabel);
+}
+
+// ==============================
+// 主图 Tooltip Formatter
+// ==============================
+
 export function makeMainTooltipFormatter({
   theme,
   chartType,
@@ -48,8 +98,9 @@ export function makeMainTooltipFormatter({
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-    const timeLabel = fmtTimeByFreq(freq, rawLabel);
+    
+    // ===== 使用统一提取函数 =====
+    const timeLabel = extractTimeLabel(params, freq);
     const adjLabel = { qfq: "前复权", hfq: "后复权" }[adjust] || "";
 
     const rows = [];
@@ -174,16 +225,21 @@ export function makeMainTooltipFormatter({
   };
 }
 
-// ========= 量窗 =========
+// ==============================
+// 量窗 Tooltip Formatter
+// ==============================
+
 export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap }) {
   const list = Array.isArray(candles) ? candles : [];
   const isVolMode = (baseName || "").toUpperCase() === "VOL";
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
+    
+    // ===== 使用统一提取函数 =====
+    const timeLabel = extractTimeLabel(params, freq);
+    
     const p0 = params[0];
-    const rawLabel = p0.axisValue || p0.axisValueLabel || "";
-    const timeLabel = fmtTimeByFreq(freq, rawLabel);
     const idx = p0.dataIndex || 0;
     const k = list[idx] || {};
     const isUp = Number(k.c) >= Number(k.o);
@@ -282,12 +338,16 @@ export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap }
   };
 }
 
-// ========= MACD =========
+// ==============================
+// MACD Tooltip Formatter
+// ==============================
+
 export function makeMacdTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-    const timeLabel = fmtTimeByFreq(freq, rawLabel);
+    
+    // ===== 使用统一提取函数 =====
+    const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {
@@ -318,12 +378,16 @@ export function makeMacdTooltipFormatter({ freq }) {
   };
 }
 
-// ========= BOLL =========
+// ==============================
+// BOLL Tooltip Formatter
+// ==============================
+
 export function makeBollTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-    const timeLabel = fmtTimeByFreq(freq, rawLabel);
+    
+    // ===== 使用统一提取函数 =====
+    const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {
@@ -340,12 +404,16 @@ export function makeBollTooltipFormatter({ freq }) {
   };
 }
 
-// ========= KDJ/RSI =========
+// ==============================
+// KDJ/RSI Tooltip Formatter
+// ==============================
+
 export function makeKdjRsiTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-    const timeLabel = fmtTimeByFreq(freq, rawLabel);
+    
+    // ===== 使用统一提取函数 =====
+    const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {

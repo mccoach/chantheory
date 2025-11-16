@@ -1,218 +1,223 @@
 # backend/services/symbol_sync.py
 # ==============================
-# 说明：标的列表同步服务（V3.1 完整版 - 支持A股/ETF/LOF）
-# 改动：
-#   1. 分别拉取A股、ETF、LOF三类
-#   2. 各自标准化后合并
-#   3. 统一落库
+# 说明：标的列表同步服务（V7.0 - 移除sync_symbol_categories）
+# 
+# 职责边界说明：
+#   - 编排拉取流程
+#   - 推送实时进度SSE（⚠️ 特例：本模块需要进度反馈）
+#   - 返回详细执行结果
+# 
+# V7.0 改动：
+#   - 删除所有 settings.sync_symbol_categories 引用
+#   - 改为固定同步 A/ETF/LOF（无条件执行）
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-import pandas as pd
+
+from backend.services.sync_helper import (
+    fetch_normalize_save,
+    build_exchange_event,
+    build_fallback_event
+)
 
 from backend.datasource import dispatcher
 from backend.services.normalizer import normalize_symbol_list_df
-from backend.db.symbols import upsert_symbol_index
+from backend.db.connection import get_conn
+from backend.utils.events import publish as publish_event
 from backend.utils.logger import get_logger, log_event
 from backend.settings import settings
 
 _LOG = get_logger("symbol_sync")
 
-async def sync_all_symbols() -> bool:
+
+async def sync_all_symbols() -> dict:
     """
-    同步全市场标的列表（A股 + ETF + LOF）
-    
-    策略：
-      1. 根据 settings.sync_symbol_categories 决定拉取哪些类别
-      2. 分别调用对应的 dispatcher category
-      3. 各自标准化后合并
-      4. 统一落库
+    同步全市场标的列表（固定同步 A/ETF/LOF）
     
     Returns:
-        bool: 同步是否成功
+        {
+            'success': bool,
+            'strategy': 'official' | 'fallback' | 'failed',
+            'exchanges': {
+                'sh': {'status': 'success', 'count': 2292},
+                'sz': {'status': 'success', 'count': 2875},
+                'bj': {'status': 'failed', 'error': '...'}
+            },
+            'fallback': {'status': 'success', 'count': 5400} | None,
+            'total_in_db': 5400
+        }
     """
     
     log_event(
-        logger=_LOG,
-        service="symbol_sync",
-        level="INFO",
-        file=__file__,
-        func="sync_all_symbols",
-        line=0,
-        trace_id=None,
-        event="sync.start",
-        message="开始同步标的列表",
-        extra={"categories": settings.sync_symbol_categories}
+        logger=_LOG, service="symbol_sync", level="INFO",
+        file=__file__, func="sync_all_symbols", line=0, trace_id=None,
+        event="sync.start", message="开始同步标的列表（固定同步A/ETF/LOF）",
+        extra={"categories": ["A", "ETF", "LOF"]}
     )
     
+    summary = {
+        'success': False,
+        'strategy': None,
+        'exchanges': {},
+        'fallback': None,
+        'total_in_db': 0
+    }
+    
     try:
-        all_dataframes = []
+        # ===== A股同步（无条件执行）=====
+        _LOG.info("[标的同步] 并发拉取三交所")
         
-        # 1. A股列表
-        if 'A' in settings.sync_symbol_categories:
-            _LOG.info("[标的同步] 拉取A股列表")
-            
-            a_raw, a_src = await dispatcher.fetch('stock_list')
-            
-            if a_raw is not None and not a_raw.empty:
-                a_clean = normalize_symbol_list_df(a_raw, category='A')
-                if a_clean is not None and not a_clean.empty:
-                    all_dataframes.append(a_clean)
-                    _LOG.info(f"[标的同步] A股：{len(a_clean)} 个")
-            else:
-                _LOG.warning("[标的同步] A股拉取失败或为空")
+        # 定义任务
+        tasks = [
+            ('stock_list_sh', 'sh', '上交所'),
+            ('stock_list_sz', 'sz', '深交所'),
+            ('stock_list_bj', 'bj', '北交所')
+        ]
         
-        # 2. ETF列表
-        if 'ETF' in settings.sync_symbol_categories:
-            _LOG.info("[标的同步] 拉取ETF列表")
-            
-            etf_raw, etf_src = await dispatcher.fetch('etf_list')
-            
-            if etf_raw is not None and not etf_raw.empty:
-                etf_clean = normalize_symbol_list_df(etf_raw, category='ETF')
-                if etf_clean is not None and not etf_clean.empty:
-                    all_dataframes.append(etf_clean)
-                    _LOG.info(f"[标的同步] ETF：{len(etf_clean)} 个")
-            else:
-                _LOG.warning("[标的同步] ETF拉取失败或为空")
+        # 并发执行（成功就落库+推送SSE）
+        results = await asyncio.gather(*[
+            _sync_with_sse(cat, code, name) for cat, code, name in tasks
+        ])
         
-        # 3. LOF列表
-        if 'LOF' in settings.sync_symbol_categories:
-            _LOG.info("[标的同步] 拉取LOF列表")
-            
-            lof_raw, lof_src = await dispatcher.fetch('lof_list')
-            
-            if lof_raw is not None and not lof_raw.empty:
-                lof_clean = normalize_symbol_list_df(lof_raw, category='LOF')
-                if lof_clean is not None and not lof_clean.empty:
-                    all_dataframes.append(lof_clean)
-                    _LOG.info(f"[标的同步] LOF：{len(lof_clean)} 个")
-            else:
-                _LOG.warning("[标的同步] LOF拉取失败或为空")
+        sh_result, sz_result, bj_result = results
+        summary['exchanges'] = {'sh': sh_result, 'sz': sz_result, 'bj': bj_result}
         
-        # 4. 合并所有类别
-        if not all_dataframes:
-            _LOG.error("[标的同步] 所有类别拉取失败")
-            return False
+        success_count = sum(1 for r in results if r['status'] == 'success')
+        _LOG.info(f"[标的同步] 三交所结果：{success_count}/3 成功")
         
-        merged = pd.concat(all_dataframes, ignore_index=True)
+        # 判定策略
+        if success_count == 3:
+            summary['strategy'] = 'official'
+            _LOG.info("[标的同步] 三交所全部成功 ✅")
+        elif success_count == 2 and bj_result['status'] == 'failed':
+            summary['strategy'] = 'official'
+            _LOG.warning("[标的同步] 仅北交所失败 ⚠️")
+        else:
+            # 降级
+            _LOG.warning(f"[标的同步] 降级备用方案")
+            fallback = await _sync_fallback_with_sse()
+            summary['fallback'] = fallback
+            summary['strategy'] = 'fallback' if fallback['status'] == 'success' else 'failed'
         
-        # 5. 补充updated_at
-        merged['updated_at'] = datetime.now().isoformat()
+        # ===== ETF/LOF同步（无条件执行）=====
+        await _sync_etf_lof()
         
-        # 6. 统一落库
-        await asyncio.to_thread(
-            upsert_symbol_index,
-            merged.to_dict('records')
-        )
+        # ===== 统计总数 =====
+        summary['total_in_db'] = await asyncio.to_thread(_count_symbols_in_db)
+        summary['success'] = summary['strategy'] in ['official', 'fallback']
         
         log_event(
-            logger=_LOG,
-            service="symbol_sync",
-            level="INFO",
-            file=__file__,
-            func="sync_all_symbols",
-            line=0,
-            trace_id=None,
-            event="sync.done",
-            message=f"标的列表同步完成，共 {len(merged)} 个标的",
-            extra={
-                "total": len(merged),
-                "by_category": {
-                    'A': len(all_dataframes[0]) if len(all_dataframes) > 0 else 0,
-                    'ETF': len(all_dataframes[1]) if len(all_dataframes) > 1 else 0,
-                    'LOF': len(all_dataframes[2]) if len(all_dataframes) > 2 else 0,
-                }
-            }
+            logger=_LOG, service="symbol_sync", level="INFO",
+            file=__file__, func="sync_all_symbols", line=0, trace_id=None,
+            event="sync.done", message="标的列表同步完成", extra=summary
         )
         
-        return True
+        return summary
     
     except Exception as e:
         log_event(
-            logger=_LOG,
-            service="symbol_sync",
-            level="ERROR",
-            file=__file__,
-            func="sync_all_symbols",
-            line=0,
-            trace_id=None,
-            event="sync.error",
-            message=f"标的列表同步失败: {e}",
-            extra={"error": str(e)}
+            logger=_LOG, service="symbol_sync", level="ERROR",
+            file=__file__, func="sync_all_symbols", line=0, trace_id=None,
+            event="sync.error", message=f"失败: {e}", extra={"error": str(e)}
         )
-        return False
+        
+        return {
+            'success': False, 'strategy': 'failed',
+            'exchanges': {}, 'fallback': None, 'total_in_db': 0
+        }
 
-# ========== NEW: 阻塞版交易日历同步 ==========
+
+async def _sync_with_sse(category: str, exchange_code: str, display_name: str) -> dict:
+    """同步单个交易所（复用通用流程+推送SSE）"""
+    result = await fetch_normalize_save(
+        category=category,
+        normalizer=normalize_symbol_list_df,
+        display_name=display_name,
+        symbol_type='A'
+    )
+    publish_event(build_exchange_event(exchange_code, display_name, result))
+    return result
+
+
+async def _sync_fallback_with_sse() -> dict:
+    """备用方案（复用通用流程+推送SSE）"""
+    result = await fetch_normalize_save(
+        category='stock_list',
+        normalizer=normalize_symbol_list_df,
+        display_name='东财（备用）',
+        symbol_type='A'
+    )
+    publish_event(build_fallback_event(result))
+    return result
+
+
+async def _sync_etf_lof():
+    """同步ETF/LOF（无条件执行）"""
+    _LOG.info("[标的同步] 拉取ETF")
+    await fetch_normalize_save(
+        category='etf_list',
+        normalizer=normalize_symbol_list_df,
+        display_name='ETF',
+        symbol_type='ETF'  
+    )
+    
+    _LOG.info("[标的同步] 拉取LOF")
+    await fetch_normalize_save(
+        category='lof_list',
+        normalizer=normalize_symbol_list_df,
+        display_name='LOF',
+        symbol_type='LOF'  
+    )
+
+
+def _count_symbols_in_db() -> int:
+    """统计数据库标的总数"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM symbol_index;")
+    result = cur.fetchone()
+    return result[0] if result else 0
+
+
+# ========== 交易日历同步 ==========
 
 async def sync_trade_calendar_blocking() -> bool:
-    """
-    同步交易日历（阻塞版，用于启动时优先执行）
+    """同步交易日历（阻塞版）"""
     
-    与普通任务的区别：
-      - 直接调用，不走任务队列
-      - 阻塞等待完成
-      - 确保交易日历表可用
-    
-    Returns:
-        bool: 同步是否成功
-    """
     log_event(
-        logger=_LOG,
-        service="symbol_sync",
-        level="INFO",
-        file=__file__,
-        func="sync_trade_calendar_blocking",
-        line=0,
-        trace_id=None,
-        event="calendar.sync.start",
-        message="开始同步交易日历（阻塞）"
+        logger=_LOG, service="symbol_sync", level="INFO",
+        file=__file__, func="sync_trade_calendar_blocking", line=0, trace_id=None,
+        event="calendar.sync.start", message="开始同步交易日历"
     )
     
     try:
         from backend.services.normalizer import normalize_trade_calendar_df
         from backend.db.calendar import upsert_trade_calendar
         
-        # 拉取
-        raw_df, source_id = await dispatcher.fetch('trade_calendar')
-        
+        raw_df, _ = await dispatcher.fetch('trade_calendar')
         if raw_df is None or raw_df.empty:
-            _LOG.error("[日历同步] 拉取失败，返回为空")
+            _LOG.error("[日历同步] 拉取失败")
             return False
         
-        # 标准化
         clean_df = normalize_trade_calendar_df(raw_df)
-        
         if clean_df is None or clean_df.empty:
-            _LOG.error("[日历同步] 标准化后为空失败")
+            _LOG.error("[日历同步] 标准化失败")
             return False
         
-        # 转为记录格式
         records = [
-            {
-                'date': int(row['date']),
-                'market': 'CN',
-                'is_trading_day': 1
-            }
+            {'date': int(row['date']), 'market': 'CN', 'is_trading_day': 1}
             for _, row in clean_df.iterrows()
         ]
         
-        # 落库
         await asyncio.to_thread(upsert_trade_calendar, records)
         
         log_event(
-            logger=_LOG,
-            service="symbol_sync",
-            level="INFO",
-            file=__file__,
-            func="sync_trade_calendar_blocking",
-            line=0,
-            trace_id=None,
-            event="calendar.sync.done",
-            message=f"交易日历同步完成，共 {len(records)} 个交易日",
+            logger=_LOG, service="symbol_sync", level="INFO",
+            file=__file__, func="sync_trade_calendar_blocking", line=0, trace_id=None,
+            event="calendar.sync.done", message=f"交易日历同步完成，共 {len(records)} 个",
             extra={"count": len(records)}
         )
         
@@ -220,15 +225,8 @@ async def sync_trade_calendar_blocking() -> bool:
     
     except Exception as e:
         log_event(
-            logger=_LOG,
-            service="symbol_sync",
-            level="ERROR",
-            file=__file__,
-            func="sync_trade_calendar_blocking",
-            line=0,
-            trace_id=None,
-            event="calendar.sync.error",
-            message=f"交易日历同步失败: {e}",
-            extra={"error": str(e)}
+            logger=_LOG, service="symbol_sync", level="ERROR",
+            file=__file__, func="sync_trade_calendar_blocking", line=0, trace_id=None,
+            event="calendar.sync.error", message=f"失败: {e}", extra={"error": str(e)}
         )
         return False

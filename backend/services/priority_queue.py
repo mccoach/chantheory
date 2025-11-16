@@ -5,6 +5,9 @@
 #   1. 支持任务动态插队（按优先级）
 #   2. 同优先级按时间FIFO
 #   3. 线程安全（asyncio兼容）
+# 
+# V2.0 改动：
+#   - PrioritizedTask 新增 symbol_type 字段
 # ==============================
 
 from __future__ import annotations
@@ -23,8 +26,8 @@ _LOG = get_logger("priority_queue")
 class PrioritizedTask:
     """优先级任务（可比较，用于堆排序）"""
     
-    priority: int  # 数值越小优先级越高
-    timestamp: float = field(compare=True)  # 同优先级按时间
+    priority: int
+    timestamp: float = field(compare=True)
     
     # 实际任务数据（不参与比较）
     data_type_id: str = field(compare=False)
@@ -32,6 +35,8 @@ class PrioritizedTask:
     freq: Optional[str] = field(default=None, compare=False)
     strategy: Optional[dict] = field(default=None, compare=False)
     task_id: Optional[str] = field(default=None, compare=False)
+    force_fetch: bool = field(default=False, compare=False)
+    symbol_type: Optional[str] = field(default=None, compare=False)  # ← V2.0 新增
 
 class AsyncPriorityQueue:
     """异步优先级队列"""
@@ -50,6 +55,7 @@ class AsyncPriorityQueue:
         _LOG.debug(
             f"[队列] 入队 P{task.priority} {task.data_type_id} "
             f"{task.symbol or ''} {task.freq or ''} "
+            f"类型={task.symbol_type or 'N/A'} "  # ← 新增日志
             f"队列长度={len(self._heap)}"
         )
     
@@ -68,6 +74,7 @@ class AsyncPriorityQueue:
             _LOG.debug(
                 f"[队列] 出队 P{task.priority} {task.data_type_id} "
                 f"{task.symbol or ''} {task.freq or ''} "
+                f"类型={task.symbol_type or 'N/A'} "  # ← 新增日志
                 f"剩余={len(self._heap)}"
             )
             

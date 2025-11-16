@@ -1,24 +1,24 @@
-// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\main.js
+// src/main.js
 // ==============================
-// 说明：前端入口文件（修复快捷键响应式）
-// - 快捷键插件：传入整个 reactive 的 settings.hotkeyOverrides 对象，而不是它的 .value，保证插件内部能 watch 到变更。
+// V2.0 - 增加构造器启动
 // ==============================
 
-import { createApp } from "vue"; // Vue 应用创建
-import App from "./App.vue"; // 根组件
-import "@/styles/global.css"; // 全局样式
+import { createApp } from "vue";
+import App from "./App.vue";
+import "@/styles/global.css";
 
-import InteractionPlugin from "@/interaction/plugin/vue"; // 快捷键插件
-import { useUserSettings } from "@/composables/useUserSettings"; // 用户设置
-import { vSelectAll } from "@/utils/inputBehaviors"; // 全局选择指令（统一注册）
+import InteractionPlugin from "@/interaction/plugin/vue";
+import { useUserSettings } from "@/composables/useUserSettings";
+import { vSelectAll } from "@/utils/inputBehaviors";
 
-const app = createApp(App); // 创建 Vue 应用
+// ===== 新增：启动图表构造器（必须在 createApp 之前）=====
+import { bootstrapChartBuilders } from "@/charts/builderBootstrap";
+bootstrapChartBuilders();
 
-const settings = useUserSettings(); // 用户设置实例
-// 修复：传入整个 hotkeyOverrides ref，让插件内部可以 watch
-app.use(InteractionPlugin, { userOverrides: settings.preferences.hotkeyOverrides }); // 传入响应式 ref，而不是 .value
+const app = createApp(App);
 
-// 全局注册选择指令：模板中统一使用 v-select-all
+const settings = useUserSettings();
+app.use(InteractionPlugin, { userOverrides: settings.preferences.hotkeyOverrides });
 app.directive("select-all", vSelectAll);
 
-app.mount("#app"); // 挂载git
+app.mount("#app");

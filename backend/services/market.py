@@ -1,43 +1,45 @@
 # backend/services/market.py
 # ==============================
-# 说明：行情服务（V4.0 - 极简版）
-# 职责：
-#   1. 查询本地不复权数据
-#   2. 计算指标
-#   3. 全量返回（窗口截取交给前端）
+# 说明：行情服务（V5.0 - 纯数据返回版）
+# 改动：
+#   - 删除指标计算逻辑
+#   - 新增 is_latest 字段
+#   - 新增 latest_bar_time 字段
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
 
 from backend.db.candles import select_candles_raw
 from backend.utils.logger import get_logger, log_event
+from backend.utils.time import to_iso_string
 
 _LOG = get_logger("market")
 
 async def get_candles(
     symbol: str,
     freq: str,
-    include: Optional[Set[str]] = None,
-    ma_periods_map: Optional[Dict[str, int]] = None,
     trace_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    获取K线数据（极简版）
+    获取K线数据（纯数据返回版）
+    
+    职责：
+      - 查询本地不复权数据
+      - 判断数据完备性
+      - 返回原始K线（不计算指标）
     
     Args:
         symbol: 标的代码
         freq: 频率
-        include: 指标集合（如 {'ma', 'macd'}）
-        ma_periods_map: MA周期映射（如 {'MA5': 5, 'MA10': 10}）
         trace_id: 追踪ID
     
     Returns:
-        Dict: 包含 meta, candles, indicators
+        Dict: 包含 meta, candles
     """
     
     log_event(
@@ -61,37 +63,42 @@ async def get_candles(
     )
     
     if not candles:
-        # 本地无数据，返回空结果（让前端负责触发同步）
+        # 本地无数据，返回空结果
         return {
             "ok": True,
             "meta": {
                 "symbol": symbol,
                 "freq": freq,
                 "all_rows": 0,
-                "message": "本地暂无数据，请稍候或手动刷新",
+                "is_latest": False,
+                "latest_bar_time": None,
+                "message": "本地暂无数据，请稍候",
                 "source": "none",
                 "generated_at": datetime.now().isoformat()
             },
-            "candles": [],
-            "indicators": {}
+            "candles": []
         }
     
-    # 2. 转为DataFrame
+    # 转为DataFrame
     df = pd.DataFrame(candles)
     
-    # 4. 计算指标（如果需要）
-    indicators = {}
-    if include:
-        indicators = await calculate_indicators(df, include, ma_periods_map)
+    # 判断数据完备性
+    from backend.utils.time_helper import calculate_theoretical_latest_for_frontend
     
-    # 5. 转为前端格式
+    latest_ts = int(candles[-1]['ts']) if candles else 0
+    theoretical_ts = calculate_theoretical_latest_for_frontend(freq)
+    is_latest = latest_ts >= theoretical_ts
+    
+    # 转为前端格式
     candles_list = df_to_candles_list(df)
     
-    # 6. 构建元数据
+    # 构建元数据
     meta = {
         "symbol": symbol,
         "freq": freq,
         "all_rows": len(candles_list),
+        "is_latest": is_latest,
+        "latest_bar_time": to_iso_string(latest_ts) if latest_ts > 0 else None,
         "source": candles[0].get('source') if candles else 'unknown',
         "generated_at": datetime.now().isoformat()
     }
@@ -99,49 +106,8 @@ async def get_candles(
     return {
         "ok": True,
         "meta": meta,
-        "candles": candles_list,
-        "indicators": indicators
+        "candles": candles_list
     }
-
-async def calculate_indicators(
-    df: pd.DataFrame,
-    include: Set[str],
-    ma_periods_map: Optional[Dict[str, int]]
-) -> Dict[str, Any]:
-    """计算技术指标"""
-    indicators = {}
-    
-    if 'ma' in include and ma_periods_map:
-        from backend.services.indicators import ma
-        ma_result = ma(df['close'], ma_periods_map)
-        indicators.update(ma_result)
-    
-    if 'macd' in include:
-        from backend.services.indicators import macd
-        macd_result = macd(df['close'])
-        indicators.update(macd_result)
-    
-    if 'kdj' in include:
-        from backend.services.indicators import kdj
-        kdj_result = kdj(df['high'], df['low'], df['close'])
-        indicators.update(kdj_result)
-    
-    if 'rsi' in include:
-        from backend.services.indicators import rsi
-        rsi_result = rsi(df['close'])
-        indicators.update(rsi_result)
-    
-    if 'boll' in include:
-        from backend.services.indicators import boll
-        boll_result = boll(df['close'])
-        indicators.update(boll_result)
-    
-    # 转为可序列化格式
-    for key, series in indicators.items():
-        if isinstance(series, pd.Series):
-            indicators[key] = series.tolist()
-    
-    return indicators
 
 def df_to_candles_list(df: pd.DataFrame) -> list:
     """DataFrame转前端格式"""
@@ -154,6 +120,14 @@ def df_to_candles_list(df: pd.DataFrame) -> list:
         if col not in df.columns:
             _LOG.warning(f"[格式转换] 缺少列: {col}")
             return []
+    
+    # ===== 新增：诊断日志（临时调试）=====
+    sample_ts = df['ts'].iloc[0] if len(df) > 0 else None
+    _LOG.info(
+        f"[格式转换] 样本数据: "
+        f"ts={sample_ts} (类型={type(sample_ts)}), "
+        f"open={df['open'].iloc[0]}"
+    )
     
     return df[required_cols].rename(columns={
         'ts': 'ts',

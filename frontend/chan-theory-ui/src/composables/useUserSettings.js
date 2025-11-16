@@ -1,14 +1,19 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useUserSettings.js
 // ==============================
-// 说明：重构为用户设置的“聚合器”
-// - 职责：加载/保存/同步 LocalStorage，并将配置分发给各个子模块进行管理。
-// - 导出：一个按领域组织的、包含响应式状态和方法的结构化对象。
-// - 修正：将 volSettings 归入 chartDisplay 模块。
-// - REFACTORED: 修复了因浅层展开状态(...)导致响应式更新丢失，从而无法持久化的问题。
-//   通过将聚合状态改为嵌套结构，并相应调整持久化逻辑，确保所有设置变更都能被正确侦听和保存。
+// V4.0 - 删除 watch，改为主动保存
+// 
+// 核心改造：
+//   1. 删除 watch(settingsPanelState, ...)（过度抽象）
+//   2. 新增 saveAll() 方法（主动保存）
+//   3. 保留跨标签页同步（storage 事件）
+// 
+// 职责边界：
+//   - 本模块：管理设置的读取/保存（不监听变化）
+//   - 设置面板：调用 saveAll() 触发持久化
+//   - 命令中枢：管理视图状态的持久化
 // ==============================
 
-import { reactive, watch, readonly } from "vue";
+import { reactive, readonly } from "vue";
 import { createPreferencesState } from "./settings/preferences";
 import { createViewState } from "./settings/viewState";
 import { createChartDisplayState } from "./settings/chartDisplay";
@@ -31,14 +36,6 @@ const saveToLocal = (obj) => {
   } catch {}
 };
 
-const debounce = (fn, ms = 300) => {
-  let t = null;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-};
-
 let _singleton = null;
 
 export function useUserSettings() {
@@ -52,8 +49,7 @@ export function useUserSettings() {
   const chartDisplay = createChartDisplayState(localData);
   const chanTheory = createChanTheoryState(localData);
 
-  // REFACTORED: 聚合所有子模块的状态。
-  // 使用嵌套结构而不是扁平化展开，以确保对子状态对象属性（如 indicatorPanes 数组）的重新赋值能被 watch 捕获。
+  // 聚合所有子模块的状态
   const aggregatedState = reactive({
     preferences: preferences.state,
     viewState: viewState.state,
@@ -61,19 +57,18 @@ export function useUserSettings() {
     chanTheory: chanTheory.state,
   });
 
-  // REFACTORED: 统一的持久化：深度监听聚合后的状态。
-  // 在保存前，将嵌套的 aggregatedState 重新展平为 localStorage 的存储结构。
-  const saveDebounced = debounce((nestedState) => {
+  // ===== 删除：watch 监听（改为主动保存）=====
+
+  // ===== 新增：主动保存接口 =====
+  function saveAll() {
     const flattenedState = {
-      ...nestedState.preferences,
-      ...nestedState.viewState,
-      ...nestedState.chartDisplay,
-      ...nestedState.chanTheory,
+      ...aggregatedState.preferences,
+      ...aggregatedState.viewState,
+      ...aggregatedState.chartDisplay,
+      ...aggregatedState.chanTheory,
     };
     saveToLocal(flattenedState);
-  }, 300);
-
-  watch(aggregatedState, (newState) => saveDebounced(newState), { deep: true });
+  }
 
   // 统一的跨标签页同步
   const onStorage = (e) => {
@@ -108,6 +103,7 @@ export function useUserSettings() {
     chanTheory: readonly(chanTheory.state),
     // 导出所有方法
     ...allMethods,
+    saveAll,  // ← 新增：主动保存
   };
 
   return _singleton;

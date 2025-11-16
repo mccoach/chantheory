@@ -4,7 +4,12 @@
 # 职责：
 #   1. 解析前端的数据需求声明
 #   2. 解析目标范围（current_symbol/watchlist/all_symbols）
-#   3. 生成标准化任务对象
+#   3. 识别标的类型（数据库优先，前缀降级）
+#   4. 生成标准化任务对象
+# 
+# V2.0 改动：
+#   - _create_task 中新增类型识别逻辑
+#   - 新增 _get_symbol_type_sync 辅助方法
 # ==============================
 
 from __future__ import annotations
@@ -40,8 +45,9 @@ class DataRequirementParser:
         tasks = []
         
         for req in requirements:
-            scope = req.get('scope')  # 'symbol' / 'watchlist' / 'global'
+            scope = req.get('scope')
             includes = req.get('includes', [])
+            force_fetch = req.get('force_fetch', False)
             
             # 解析目标范围
             targets = self._resolve_targets(scope, req)
@@ -49,7 +55,7 @@ class DataRequirementParser:
             # 为每个目标 × 每个数据类型生成任务
             for target in targets:
                 for item in includes:
-                    task = self._create_task(item, target)
+                    task = self._create_task(item, target, force_fetch)
                     if task:
                         tasks.append(task)
         
@@ -99,8 +105,85 @@ class DataRequirementParser:
             _LOG.warning(f"[需求解析] 未知scope: {scope}")
             return []
     
-    def _create_task(self, item: Dict[str, Any], target: Dict[str, Any]) -> Optional[PrioritizedTask]:
-        """创建单个任务"""
+    # ===== V2.0 新增：标的类型识别（同步版本）=====
+    def _get_symbol_type_sync(self, symbol: str) -> str:
+        """
+        获取标的类型（同步方法，供Parser调用）
+        
+        识别策略：
+          1. 优先查询 symbol_index 表的 type 字段（最可靠）
+          2. 查询失败则调用 infer_symbol_type 前缀推断（降级）
+          3. 推断失败则默认返回 'A'（兜底）
+        
+        Args:
+            symbol: 标的代码
+        
+        Returns:
+            str: 标的类型（'A', 'ETF', 'LOF', 'INDEX' 等）
+        
+        Examples:
+            >>> parser._get_symbol_type_sync('600519')
+            'A'
+            >>> parser._get_symbol_type_sync('510300')
+            'ETF'
+        """
+        if not symbol:
+            return 'A'
+        
+        symbol = str(symbol).strip()
+        
+        # 策略1：优先查表（可靠性 99%）
+        try:
+            records = select_symbol_index(symbol=symbol)
+            
+            if records and len(records) > 0:
+                symbol_type = records[0].get('type')
+                
+                if symbol_type:
+                    _LOG.debug(
+                        f"[类型识别] {symbol} → {symbol_type} (来源=数据库)"
+                    )
+                    return str(symbol_type).strip().upper()
+        
+        except Exception as e:
+            _LOG.warning(
+                f"[类型识别] 查表失败: {symbol}, error={e}"
+            )
+        
+        # 策略2：降级推断（可靠性 80%）
+        try:
+            from backend.utils.common import infer_symbol_type
+            
+            symbol_type = infer_symbol_type(symbol)
+            
+            _LOG.debug(
+                f"[类型识别] {symbol} → {symbol_type} (来源=前缀推断)"
+            )
+            
+            return str(symbol_type or 'A').strip().upper()
+        
+        except Exception as e:
+            _LOG.warning(
+                f"[类型识别] 前缀推断失败: {symbol}, error={e}"
+            )
+        
+        # 策略3：兜底默认
+        _LOG.debug(f"[类型识别] {symbol} → A (来源=默认)")
+        return 'A'
+    
+    def _create_task(
+        self, 
+        item: Dict[str, Any], 
+        target: Dict[str, Any],
+        force_fetch: bool = False
+    ) -> Optional[PrioritizedTask]:
+        """
+        创建单个任务（V2.0 - 新增类型识别）
+        
+        改动：
+          - 对于有symbol的任务，调用 _get_symbol_type_sync 识别类型
+          - 将识别结果填充到 task.symbol_type 字段
+        """
         
         data_type = item.get('type')
         
@@ -120,15 +203,30 @@ class DataRequirementParser:
         # 获取优先级（优先用前端指定，否则用配置默认）
         priority = item.get('priority') or definition.get('priority', 100)
         
+        # 提取标的代码
+        symbol = target.get('symbol') or item.get('symbol')
+        
+        # ===== V2.0 新增：识别标的类型 =====
+        symbol_type = None
+        
+        if symbol:
+            symbol_type = self._get_symbol_type_sync(symbol)
+            
+            _LOG.debug(
+                f"[需求解析] 任务标的类型: {symbol} → {symbol_type}"
+            )
+        
         # 创建任务
         task = PrioritizedTask(
             priority=priority,
             timestamp=datetime.now().timestamp(),
             data_type_id=data_type,
-            symbol=target.get('symbol') or item.get('symbol'),
+            symbol=symbol,
             freq=item.get('freq'),
             strategy=strategy,
-            task_id=self._generate_task_id(data_type, target, item)
+            task_id=self._generate_task_id(data_type, target, item),
+            force_fetch=force_fetch,
+            symbol_type=symbol_type  # ← V2.0 新增字段
         )
         
         return task

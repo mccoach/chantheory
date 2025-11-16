@@ -1,6 +1,9 @@
 # backend/db/symbols.py
 # ==============================
-# 说明：标的元数据表操作模块（V4.0 - 修复字段默认值）
+# 说明：标的元数据表操作模块（V5.0 - 添加全局写锁）
+# 改动：
+#   - upsert_symbol_index 使用全局写锁
+#   - 避免并发写入冲突
 # ==============================
 
 from __future__ import annotations
@@ -8,7 +11,7 @@ from typing import List, Dict, Any, Optional, Iterable
 from datetime import datetime
 import json
 
-from backend.db.connection import get_conn
+from backend.db.connection import get_conn, get_write_lock  # ← 新增导入
 
 # ==============================================================================
 # symbol_index 表操作
@@ -16,7 +19,7 @@ from backend.db.connection import get_conn
 
 def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
     """
-    批量插入或更新标的索引（V2.0版）。
+    批量插入或更新标的索引（V5.0版：添加全局写锁）。
     
     Args:
         rows: 字典列表，每个字典包含：
@@ -31,50 +34,52 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
     Returns:
         int: 影响的行数
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    
-    sql = """
-    INSERT INTO symbol_index(symbol, name, market, type, listing_date, status, updated_at)
-    VALUES (:symbol, :name, :market, :type, :listing_date, :status, :updated_at)
-    ON CONFLICT(symbol) DO UPDATE SET
-      name=excluded.name,
-      market=excluded.market,
-      type=excluded.type,
-      listing_date=COALESCE(excluded.listing_date, symbol_index.listing_date),
-      status=excluded.status,
-      updated_at=excluded.updated_at;
-    """
-    
-    now = datetime.now().isoformat()
-    prepared_rows = []
-    
-    for row in rows:
-        if isinstance(row, tuple):
-            # 兼容旧格式
-            prepared_rows.append({
-                'symbol': row[0],
-                'name': row[1],
-                'market': row[2] if len(row) > 2 else None,
-                'type': row[3] if len(row) > 3 else None,
-                'listing_date': None,
-                'status': 'active',
-                'updated_at': row[4] if len(row) > 4 else now,
-            })
-        else:
-            prepared_rows.append({
-                'symbol': row.get('symbol'),
-                'name': row.get('name'),
-                'market': row.get('market'),
-                'type': row.get('type'),
-                'listing_date': row.get('listing_date'),
-                'status': row.get('status', 'active'),
-                'updated_at': row.get('updated_at', now),
-            })
-    
-    cur.executemany(sql, prepared_rows)
-    conn.commit()
-    return cur.rowcount
+    # ===== 关键修复：使用全局写锁（避免并发冲突）=====
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        sql = """
+        INSERT INTO symbol_index(symbol, name, market, type, listing_date, status, updated_at)
+        VALUES (:symbol, :name, :market, :type, :listing_date, :status, :updated_at)
+        ON CONFLICT(symbol) DO UPDATE SET
+          name=excluded.name,
+          market=excluded.market,
+          type=excluded.type,
+          listing_date=COALESCE(excluded.listing_date, symbol_index.listing_date),
+          status=excluded.status,
+          updated_at=excluded.updated_at;
+        """
+        
+        now = datetime.now().isoformat()
+        prepared_rows = []
+        
+        for row in rows:
+            if isinstance(row, tuple):
+                # 兼容旧格式
+                prepared_rows.append({
+                    'symbol': row[0],
+                    'name': row[1],
+                    'market': row[2] if len(row) > 2 else None,
+                    'type': row[3] if len(row) > 3 else None,
+                    'listing_date': None,
+                    'status': 'active',
+                    'updated_at': row[4] if len(row) > 4 else now,
+                })
+            else:
+                prepared_rows.append({
+                    'symbol': row.get('symbol'),
+                    'name': row.get('name'),
+                    'market': row.get('market'),
+                    'type': row.get('type'),
+                    'listing_date': row.get('listing_date'),
+                    'status': row.get('status', 'active'),
+                    'updated_at': row.get('updated_at', now),
+                })
+        
+        cur.executemany(sql, prepared_rows)
+        conn.commit()
+        return cur.rowcount
 
 
 def select_symbol_index(
@@ -253,3 +258,55 @@ def get_profile_updated_at(symbol: str) -> Optional[str]:
     """
     profile = select_symbol_profile(symbol)
     return profile.get('updated_at') if profile else None
+
+# ==============================
+# 增加辅助函数（防止外键约束失败）
+# ==============================
+
+def ensure_symbol_in_index(symbol: str, symbol_type: str = 'A', name: str = '') -> None:
+    """
+    确保symbol已在索引表中（不存在则插入占位符）
+    
+    用途：
+      - 在写入档案前调用
+      - 防止外键约束失败
+    
+    Args:
+        symbol: 标的代码
+        symbol_type: 标的类型（A/ETF/LOF/INDEX）
+        name: 标的名称（可选）
+    """
+    from backend.db import get_db_path
+    import sqlite3
+    
+    db_path = get_db_path()
+    
+    with sqlite3.connect(db_path, timeout=10) as conn:
+        cur = conn.cursor()
+        
+        # 检查是否存在
+        cur.execute(
+            "SELECT 1 FROM symbol_index WHERE symbol = ? LIMIT 1",
+            (symbol,)
+        )
+        
+        if cur.fetchone():
+            return  # 已存在，无需插入
+        
+        # 插入占位符
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO symbol_index 
+            (symbol, market, name, type, updated_at) 
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                symbol,
+                'SH' if symbol.startswith('6') else 'SZ',  # 简单推断
+                name or symbol,  # 名称兜底
+                symbol_type,
+                datetime.now().isoformat()
+            )
+        )
+        
+        conn.commit()

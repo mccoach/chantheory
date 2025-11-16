@@ -1,7 +1,9 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\settings\viewState.js
 // ==============================
 // 设置子模块：视图状态持久化
-// - 职责：管理与每个图表视图（code|freq）相关的持久化状态，如锚点、可见根数等。
+// V3.0 改动：
+//   - 删除 viewAtRightEdge 相关方法（改为计算属性）
+//   - 删除 viewLastFocusTs 相关方法（功能重叠且不稳定）
 // ==============================
 
 import { reactive } from "vue";
@@ -12,8 +14,6 @@ export function createViewState(localData = {}) {
   const state = reactive({
     viewRightTs: localData.viewRightTs || {},
     viewBars: localData.viewBars || {},
-    viewAtRightEdge: localData.viewAtRightEdge || {},
-    viewLastFocusTs: localData.viewLastFocusTs || {},
   });
 
   // Setters & Getters
@@ -38,33 +38,13 @@ export function createViewState(localData = {}) {
       const val = state.viewBars[key];
       return Number.isFinite(+val) ? Math.max(1, Math.ceil(+val)) : null;
     },
-    setAtRightEdge: (code, freq, isAtRight) => {
-      const key = viewKey(code, freq);
-      state.viewAtRightEdge[key] = !!isAtRight;
-    },
-    getAtRightEdge: (code, freq) => {
-      const key = viewKey(code, freq);
-      return !!state.viewAtRightEdge[key];
-    },
-    setLastFocusTs: (code, freq, ts) => {
-      const key = viewKey(code, freq);
-      if (ts == null) delete state.viewLastFocusTs[key];
-      else state.viewLastFocusTs[key] = Number(ts);
-    },
-    getLastFocusTs: (code, freq) => {
-      const key = viewKey(code, freq);
-      const val = state.viewLastFocusTs[key];
-      return Number.isFinite(+val) ? +val : null;
-    },
   };
 
   // Storage sync handler
   const onStorage = (newLocal) => {
     state.viewRightTs = newLocal.viewRightTs || {};
     state.viewBars = newLocal.viewBars || {};
-    state.viewAtRightEdge = newLocal.viewAtRightEdge || {};
-    state.viewLastFocusTs = newLocal.viewLastFocusTs || {};
   };
-  
+
   return { state, methods, onStorage };
 }
