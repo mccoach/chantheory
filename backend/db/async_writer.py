@@ -1,21 +1,22 @@
 # backend/db/async_writer.py
 # ==============================
-# 异步数据库写入队列（V1.0）
+# 异步数据库写入队列（V2.0 - 因子压缩版）
 # 设计目标：
 #   1. 单线程写入（彻底避免锁冲突）
 #   2. 批量提交（减少fsync次数，提升性能）
 #   3. 自动合并（相同键的记录自动去重）
 #   4. 优雅关闭（确保数据落盘）
+#   5. NEW：复权因子写入前自动压缩（仅保留数值变化的日期）
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 from datetime import datetime
-from collections import defaultdict
 
 from backend.db.connection import get_conn
+from backend.db.factors import compress_factor_records  # 新增：因子压缩工具
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("async_writer")
@@ -31,9 +32,9 @@ class AsyncDBWriter:
         self._task = None
         
         # 批量缓冲区（按表分组）
-        self.candles_buffer = []
-        self.factors_buffer = []
-        self.profiles_buffer = []
+        self.candles_buffer: List[Dict[str, Any]] = []
+        self.factors_buffer: List[Dict[str, Any]] = []
+        self.profiles_buffer: List[Dict[str, Any]] = []
         
         # 批量阈值配置
         self.BATCH_SIZE = 500  # 每批最多500条记录
@@ -100,7 +101,7 @@ class AsyncDBWriter:
         提交因子写入请求（异步，立即返回）
         
         Args:
-            records: 因子记录列表
+            records: 因子记录列表（原始稀疏序列，未压缩）
         """
         if not records:
             return
@@ -112,7 +113,7 @@ class AsyncDBWriter:
         提交档案写入请求（异步，立即返回）
         
         Args:
-            record: 档案记录字典
+            record: 档案写入字典
         """
         if not record:
             return
@@ -121,12 +122,13 @@ class AsyncDBWriter:
     
     async def _write_loop(self):
         """写入循环（单线程执行，避免锁竞争）"""
+        loop = asyncio.get_event_loop()
         while self.running:
             try:
                 # 等待新任务（超时0.1秒后检查是否需要刷新）
                 try:
                     table, records = await asyncio.wait_for(
-                        self.queue.get(), 
+                        self.queue.get(),
                         timeout=0.1
                     )
                     
@@ -143,7 +145,7 @@ class AsyncDBWriter:
                     pass
                 
                 # 判断是否需要刷新
-                now = asyncio.get_event_loop().time()
+                now = loop.time()
                 should_flush = (
                     len(self.candles_buffer) >= self.BATCH_SIZE or
                     len(self.factors_buffer) >= self.BATCH_SIZE or
@@ -151,7 +153,9 @@ class AsyncDBWriter:
                     (now - self.last_flush_time) >= self.FLUSH_INTERVAL
                 )
                 
-                if should_flush and (self.candles_buffer or self.factors_buffer or self.profiles_buffer):
+                if should_flush and (
+                    self.candles_buffer or self.factors_buffer or self.profiles_buffer
+                ):
                     await self._flush_all()
                     self.last_flush_time = now
             
@@ -164,12 +168,10 @@ class AsyncDBWriter:
         if not (self.candles_buffer or self.factors_buffer or self.profiles_buffer):
             return
         
-        # 统计（用于日志）
         candles_count = len(self.candles_buffer)
         factors_count = len(self.factors_buffer)
         profiles_count = len(self.profiles_buffer)
         
-        # ===== 关键：在独立线程中执行同步写入 =====
         try:
             await asyncio.to_thread(self._do_batch_write)
             
@@ -195,6 +197,7 @@ class AsyncDBWriter:
           - 单次数据库连接
           - 单次事务提交
           - 自动去重（K线按 symbol+freq+ts，因子按 symbol+date）
+          - NEW：因子写入前统一压缩，只保留数值变化的日期
         """
         conn = get_conn()
         cur = conn.cursor()
@@ -202,8 +205,7 @@ class AsyncDBWriter:
         try:
             # ===== 1. 写K线（自动去重）=====
             if self.candles_buffer:
-                # 去重：保留最后一次写入（字典推导式，key=唯一键）
-                unique_candles = {}
+                unique_candles: Dict[tuple, Dict[str, Any]] = {}
                 for rec in self.candles_buffer:
                     key = (rec['symbol'], rec['freq'], rec['ts'])
                     unique_candles[key] = rec
@@ -226,36 +228,47 @@ class AsyncDBWriter:
                     f"(去重前={len(self.candles_buffer)})"
                 )
             
-            # ===== 2. 写因子（自动去重）=====
+            # ===== 2. 写因子（去重 + 压缩）=====
             if self.factors_buffer:
-                # 去重：保留最后一次写入
-                unique_factors = {}
+                # 2.1 去重：同 symbol+date 保留最后一条
+                unique_factors: Dict[tuple, Dict[str, Any]] = {}
                 for rec in self.factors_buffer:
                     key = (rec['symbol'], rec['date'])
                     unique_factors[key] = rec
                 
-                factors_list = list(unique_factors.values())
+                factor_list = list(unique_factors.values())
                 
-                sql_f = """
-                INSERT INTO adj_factors (symbol, date, qfq_factor, hfq_factor, updated_at)
-                VALUES (:symbol, :date, :qfq_factor, :hfq_factor, :updated_at)
-                ON CONFLICT(symbol, date) DO UPDATE SET
-                    qfq_factor=excluded.qfq_factor,
-                    hfq_factor=excluded.hfq_factor,
-                    updated_at=excluded.updated_at;
-                """
+                # 2.2 压缩：仅保留因子发生变化的记录
+                compressed_list = compress_factor_records(factor_list)
                 
-                cur.executemany(sql_f, factors_list)
-                
-                _LOG.debug(
-                    f"[批量写入] 因子: {len(factors_list)} 条 "
-                    f"(去重前={len(self.factors_buffer)})"
-                )
+                if compressed_list:
+                    now = datetime.now().isoformat()
+                    for rec in compressed_list:
+                        rec['updated_at'] = rec.get('updated_at', now)
+                    
+                    sql_f = """
+                    INSERT INTO adj_factors (symbol, date, qfq_factor, hfq_factor, updated_at)
+                    VALUES (:symbol, :date, :qfq_factor, :hfq_factor, :updated_at)
+                    ON CONFLICT(symbol, date) DO UPDATE SET
+                        qfq_factor=excluded.qfq_factor,
+                        hfq_factor=excluded.hfq_factor,
+                        updated_at=excluded.updated_at;
+                    """
+                    
+                    cur.executemany(sql_f, compressed_list)
+                    
+                    _LOG.debug(
+                        f"[批量写入] 因子: {len(compressed_list)} 条 "
+                        f"(原始={len(self.factors_buffer)}, 去重后={len(factor_list)})"
+                    )
+                else:
+                    _LOG.debug(
+                        "[批量写入] 因子：压缩后无有效记录，跳过写入"
+                    )
             
             # ===== 3. 写档案（自动去重）=====
             if self.profiles_buffer:
-                # 去重：保留最后一次写入
-                unique_profiles = {}
+                unique_profiles: Dict[str, Dict[str, Any]] = {}
                 for rec in self.profiles_buffer:
                     key = rec['symbol']
                     unique_profiles[key] = rec

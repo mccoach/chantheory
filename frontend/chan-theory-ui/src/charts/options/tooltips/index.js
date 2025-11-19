@@ -1,19 +1,18 @@
 // frontend/src/charts/options/tooltips/index.js
 // ==============================
 // V3.0 - 按需格式化架构（零冗余版）
-// 
+//
 // 核心改动：
 //   1. 新增 extractTimeLabel() 统一时间提取逻辑
 //   2. 支持 xAxis.data 为对象数组或字符串数组
 //   3. 所有 formatter 复用统一提取函数
-// 
+//
 // 职责：
 //   - 构造各类图表的 Tooltip 内容
 //   - 智能识别 axisValue 类型（对象/字符串/数字）
 //   - 格式化为统一的 HTML 模板
 // ==============================
 
-import { formatTimeByFreq } from "@/utils/timeFormat";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { DEFAULT_KLINE_STYLE, STYLE_PALETTE } from "@/constants";
 
@@ -48,32 +47,32 @@ function findFirst(params, pred) {
 }
 
 // ==============================
-// 核心：统一时间提取逻辑（新增）
+// 核心：统一时间提取逻辑
 // ==============================
 
 /**
  * 智能提取 Tooltip 的时间标签
- * 
+ *
  * 职责：
  *   - 从 ECharts params 中提取 axisValue
  *   - 智能识别类型（对象/字符串/数字/时间戳）
  *   - 格式化为可读时间字符串
- * 
+ *
  * 支持的数据源：
  *   - xAxis.data = [{ts, o, h, l, c, v}, ...]  → axisValue 是对象
  *   - xAxis.data = ["2003-10-09", ...]         → axisValue 是字符串
  *   - xAxis.data = [1065682800000, ...]        → axisValue 是时间戳
- * 
+ *
  * @param {Array} params - ECharts tooltip params
  * @param {string} freq - 频率（用于判断格式）
  * @returns {string} 格式化后的时间字符串
  */
 function extractTimeLabel(params, freq) {
   if (!Array.isArray(params) || !params.length) return "";
-  
+
   const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-  
-  // ===== 修改：直接返回字符串，不再格式化 =====
+
+  // 这里直接返回字符串，不再进行频率格式化
   return String(rawLabel);
 }
 
@@ -98,7 +97,7 @@ export function makeMainTooltipFormatter({
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    
+
     // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
     const adjLabel = { qfq: "前复权", hfq: "后复权" }[adjust] || "";
@@ -229,26 +228,35 @@ export function makeMainTooltipFormatter({
 // 量窗 Tooltip Formatter
 // ==============================
 
-export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap }) {
+export function makeVolumeTooltipFormatter({
+  candles,
+  freq,
+  baseName,
+  mavolMap,
+}) {
   const list = Array.isArray(candles) ? candles : [];
   const isVolMode = (baseName || "").toUpperCase() === "VOL";
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    
+
     // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
-    
+
     const p0 = params[0];
     const idx = p0.dataIndex || 0;
     const k = list[idx] || {};
     const isUp = Number(k.c) >= Number(k.o);
 
+    // 仍保留方向逻辑作为兜底
     const baseDotColor = isUp
       ? STYLE_PALETTE.bars.volume.up
       : STYLE_PALETTE.bars.volume.down;
 
-    const bar = findFirst(params, (x) => (x.seriesType || "").toLowerCase() === "bar");
+    const bar = findFirst(
+      params,
+      (x) => (x.seriesType || "").toLowerCase() === "bar"
+    );
     const baseRawVal = Array.isArray(bar?.value)
       ? bar.value[bar.value.length - 1]
       : bar?.value;
@@ -268,7 +276,7 @@ export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap }
     const rows = [];
     rows.push(
       renderRow({
-        color: baseDotColor,
+        color: bar?.color || baseDotColor,
         label: isVolMode ? "成交量" : "成交额",
         value: `${baseValText}${statusTag}`,
       })
@@ -345,34 +353,24 @@ export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap }
 export function makeMacdTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    
+
     // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {
-      const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
-      if ((p.seriesType || "").toLowerCase() === "bar") {
-        const color =
-          Number(val) >= 0
-            ? STYLE_PALETTE.bars.macd.positive
-            : STYLE_PALETTE.bars.macd.negative;
-        rows.push(
-          renderRow({
-            color,
-            label: p.seriesName,
-            value: formatNumberScaled(val, { digits: 3, allowEmpty: true }),
-          })
-        );
-      } else {
-        rows.push(
-          renderRow({
-            color: p.color,
-            label: p.seriesName || "",
-            value: formatNumberScaled(val, { digits: 3, allowEmpty: true }),
-          })
-        );
-      }
+      const val = Array.isArray(p.value)
+        ? p.value[p.value.length - 1]
+        : p.value;
+
+      // 统一使用 p.color，确保与图形中的颜色一致（柱子 + 折线）
+      rows.push(
+        renderRow({
+          color: p.color,
+          label: p.seriesName || "",
+          value: formatNumberScaled(val, { digits: 3, allowEmpty: true }),
+        })
+      );
     }
     return [renderHeader(timeLabel), ...rows].join("");
   };
@@ -385,13 +383,15 @@ export function makeMacdTooltipFormatter({ freq }) {
 export function makeBollTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    
+
     // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {
-      const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+      const val = Array.isArray(p.value)
+        ? p.value[p.value.length - 1]
+        : p.value;
       rows.push(
         renderRow({
           color: p.color,
@@ -411,13 +411,15 @@ export function makeBollTooltipFormatter({ freq }) {
 export function makeKdjRsiTooltipFormatter({ freq }) {
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
-    
+
     // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
 
     const rows = [];
     for (const p of params) {
-      const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
+      const val = Array.isArray(p.value)
+        ? p.value[p.value.length - 1]
+        : p.value;
       rows.push(
         renderRow({
           color: p.color,

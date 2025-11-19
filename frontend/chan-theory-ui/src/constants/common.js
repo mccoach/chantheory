@@ -20,6 +20,9 @@ export const STYLE_PALETTE = {
     { color: "#73c0de", width: 1, style: "solid" },  // 线条6：青色（用于MA120等）
     { color: "#9a60b4", width: 1, style: "solid" },  // 线条7：紫色（用于MA250等）
     { color: "#ea7ccc", width: 1, style: "solid" },  // 线条8：粉色（预留）
+    { color: "#fafafa", width: 1, style: "solid" },  // 线条9：白色（预留）
+    { color: "#ffff00", width: 1, style: "solid" },  // 线条10：黄色（预留）
+
   ],
   
   // --- 柱状图配色 ---
@@ -95,6 +98,15 @@ export const UI_LIMITS = {
     step: 0.1,              // 调整步长（0.1精度）
   },
 };
+
+// ===== 通用柱体可用宽度比例（所有柱体统一使用）=====
+/**
+ * BAR_USABLE_RATIO：
+ *   - 代表“每个类别宽度中，用于实际柱体的比例”
+ *   - 例如 0.88 表示：即便配置柱宽 100%，实际也只占 88% 的类宽，预留 12% 间隙。
+ *   - 用于：量图柱体、MACD 柱体、标记宽度估算等所有柱体几何。
+ */
+export const BAR_USABLE_RATIO = 0.88;
 
 // ===== UI 选项源（下拉框/选择器）=====
 

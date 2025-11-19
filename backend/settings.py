@@ -1,8 +1,9 @@
 # backend/settings.py
 # ==============================
-# 全局配置（V6.0 - 修改标的列表缺口方法）
+# V7.0 - 新增爬虫配置池
 # 改动：
-#   - symbol_index 的缺口方法从 always_fetch 改为 symbol_index_daily
+#   - 新增 SPIDER_CONFIG 类（统一管理反爬资源池）
+#   - 保持原有配置不变（向后兼容）
 # ==============================
 
 from __future__ import annotations
@@ -166,3 +167,58 @@ GAP_CHECK_METHODS = {
     "symbol_index_daily": "utils.gap_checker.check_symbol_index_gap",  # ← 新增
     "always_fetch": "lambda **kwargs: True",
 }
+
+# ==============================
+# 爬虫通用参数池（V7.2 新增）
+# ==============================
+
+@dataclass
+class SpiderConfig:
+    """
+    爬虫通用参数池
+    
+    设计原则：
+      1. 仅管理与具体接口无关的参数（浏览器特征/语言偏好/连接方式）
+      2. 不管理业务逻辑参数（Referer/sqlId/Accept 等）
+      3. 支持环境变量覆盖
+    
+    职责边界：
+      ✅ 负责：User-Agent 池、Accept-Language 池、Connection 池
+      ❌ 不负责：Referer（业务逻辑）、Accept（接口类型）、Sec-Fetch-*（固定值）
+    """
+    
+    # ===== User-Agent 池（核心反爬参数）=====
+    user_agents: List[str] = field(default_factory=lambda: [
+        # Chrome 140 (Windows) - 2025年1月最新版
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        # Chrome 137 (Windows) - 稳定版
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        # Edge 140 (Windows) - 2025年1月最新版
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+        # Chrome 140 (macOS)
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        # Firefox 133 (Windows) - 2025年1月最新版
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    ])
+    
+    # ===== Accept-Language 池（语言偏好混淆）=====
+    accept_languages: List[str] = field(default_factory=lambda: [
+        "zh-CN,zh;q=0.9",                                      # Chrome 简洁版（最常见）
+        "zh-CN,zh;q=0.9,en;q=0.8",                             # +英文
+        "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",    # Edge 完整版
+        "zh-CN,zh-TW;q=0.9,zh;q=0.8",                          # +繁体中文
+    ])
+    
+    # ===== Connection 类型池（连接行为混淆）=====
+    connection_types: List[str] = field(default_factory=lambda: [
+        "keep-alive",  # 长连接（95% 真实用户行为）
+        "close",       # 短连接（5% 场景）
+    ])
+    
+    # ===== 反爬策略开关 =====
+    enable_random_delay: bool = os.getenv("SPIDER_RANDOM_DELAY", "1") == "1"
+    random_delay_range: tuple = (0.5, 2.0)  # 随机延迟范围（秒）
+    enable_header_randomization: bool = os.getenv("SPIDER_HEADER_RANDOM", "1") == "1"
+
+# 全局单例
+spider_config = SpiderConfig()

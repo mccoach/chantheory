@@ -25,6 +25,7 @@ export const SETTINGS_SCHEMA = {
     'klineStyle',    // K线样式配置（包括原始K线和合并K线）
     'maConfigs',     // MA均线配置（MA5/MA10/.../MA250）
     'volSettings',   // 量窗设置（成交量/成交额/MAVOL/放缩量标记）
+    'macdSettings',  // MACD 指标设置
   ],
   
   // ===== 缠论参数领域 =====

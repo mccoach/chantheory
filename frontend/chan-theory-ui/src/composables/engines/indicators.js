@@ -58,9 +58,15 @@ export function computeIndicators(candles, config) {
     }
   }
   
-  // MACD
+  // MACD（使用设置行给定的周期）
   if (config.useMACD) {
-    Object.assign(result, calculateMACD(closes))
+    const macdCfg = config.macdSettings || {}
+    const period = macdCfg.period || {}
+    const fast = Number(period.fast) || 12
+    const slow = Number(period.slow) || 26
+    const signal = Number(period.signal) || 9
+    
+    Object.assign(result, calculateMACD(closes, fast, slow, signal))
   }
   
   // KDJ

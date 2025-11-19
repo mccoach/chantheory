@@ -1,7 +1,7 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewCommandHub.js
 // ==============================
 // V5.4 - 双系统版（窗宽预设 + 区间套）
-// 
+//
 // 核心改造：
 //   1. 保持窗宽预设系统完整性（不变）
 //   2. 新增区间套系统（独立实现）
@@ -10,9 +10,14 @@
 
 import { ref, computed } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { pickPresetByBarsCountDown, presetToBars, PERSIST_DEBOUNCE_MS } from "@/constants";
+import {
+  pickPresetByBarsCountDown,
+  presetToBars,
+  PERSIST_DEBOUNCE_MS,
+  BAR_USABLE_RATIO,
+} from "@/constants";
 
-const LS_KEY = 'chan_user_settings_v1';
+const LS_KEY = "chan_user_settings_v1";
 
 let _hubSingleton = null;
 
@@ -87,7 +92,7 @@ export function useViewCommandHub() {
   function _recalcMarkerWidth() {
     const b = Math.max(1, Number(barsCount.value || 1));
     const w = Math.max(1, Number(hostWidthPx.value || 1));
-    const approx = Math.round((w * 0.88) / b);
+    const approx = Math.round((w * BAR_USABLE_RATIO) / b);
     markerWidthPx.value = Math.max(1, Math.min(16, approx));
   }
 
@@ -112,7 +117,7 @@ export function useViewCommandHub() {
   function _doRealPersist() {
     try {
       const key = `${currentSymbol.value}|${currentFreq.value}`;
-      const existing = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      const existing = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
 
       if (!existing.viewBars) existing.viewBars = {};
       if (!existing.viewRightTs) existing.viewRightTs = {};
@@ -124,7 +129,7 @@ export function useViewCommandHub() {
 
       localStorage.setItem(LS_KEY, JSON.stringify(existing));
     } catch (e) {
-      console.error('[CommandHub] persist failed:', e);
+      console.error("[CommandHub] persist failed:", e);
     }
   }
 
@@ -161,7 +166,10 @@ export function useViewCommandHub() {
     currentSymbol.value = String(code || "").trim();
     currentFreq.value = String(freq || "").trim() || "1d";
 
-    const savedBars = settings.getViewBars(currentSymbol.value, currentFreq.value);
+    const savedBars = settings.getViewBars(
+      currentSymbol.value,
+      currentFreq.value
+    );
     const savedTs = settings.getRightTs(currentSymbol.value, currentFreq.value);
 
     barsCount.value = Math.max(1, Number(savedBars || 1));
@@ -258,81 +266,86 @@ export function useViewCommandHub() {
       case "ChangeFreq": {
         const freqOld = String(currentFreq.value || "1d");
         const freqNew = String(p.freq || freqOld);
-        
+
         if (freqOld === freqNew) {
           _scheduleNotify();
           break;
         }
-        
+
         // ===== 核心：直接计算时间跨度（不依赖预设）=====
         const barsOld = Math.max(1, Number(barsCount.value || 1));
-        
+
         // 每日柱数表（交易时段：4小时 = 240分钟）
         const BARS_PER_DAY = {
-          '1m': 240, '5m': 48, '15m': 16, '30m': 8, '60m': 4,
-          '1d': 1, '1w': 1/5, '1M': 1/22,
+          "1m": 240,
+          "5m": 48,
+          "15m": 16,
+          "30m": 8,
+          "60m": 4,
+          "1d": 1,
+          "1w": 1 / 5,
+          "1M": 1 / 22,
         };
-        
+
         const barsPerDayOld = BARS_PER_DAY[freqOld] || 1;
         const barsPerDayNew = BARS_PER_DAY[freqNew] || 1;
-        
+
         // 计算时间跨度（天）
         const timeSpanDays = barsOld / barsPerDayOld;
-        
+
         // 转换为新频率的 bars
         const barsTheoretical = Math.ceil(timeSpanDays * barsPerDayNew);
-        
-        console.log('[Hub] 📊 区间套转换', {
+
+        console.log("[Hub] 📊 区间套转换", {
           from: `${freqOld}(${barsOld}根)`,
           to: `${freqNew}(${barsTheoretical}根理论)`,
           timeSpan: `${timeSpanDays.toFixed(2)}天`,
           barsPerDayOld,
           barsPerDayNew,
         });
-        
+
         currentFreq.value = freqNew;
         const total = Math.max(0, Number(p.allRows || allRows.value || 0));
 
         // ===== 边界检查：右端超界 → 自动 ALL =====
         const rightTsCurrent = rightTs.value;
         const maxTsAvailable = maxTsRef.value;
-        
+
         let barsNew;
         let autoAll = false;
-        
+
         if (
-          Number.isFinite(rightTsCurrent) && 
-          Number.isFinite(maxTsAvailable) && 
+          Number.isFinite(rightTsCurrent) &&
+          Number.isFinite(maxTsAvailable) &&
           rightTsCurrent > maxTsAvailable
         ) {
           barsNew = total;
           rightTs.value = maxTsAvailable;
           autoAll = true;
-          
-          console.warn('[Hub] ⚠️ 右端超界，自动切换到 ALL');
+
+          console.warn("[Hub] ⚠️ 右端超界，自动切换到 ALL");
         } else {
           // ===== 智能收缩：限制在实际数据范围内 =====
-          barsNew = total > 0 
-            ? Math.min(barsTheoretical, total)
-            : barsTheoretical;
-          
+          barsNew =
+            total > 0 ? Math.min(barsTheoretical, total) : barsTheoretical;
+
           const shortage = Math.max(0, barsTheoretical - total);
-          
+
           if (shortage > 0) {
-            console.warn('[Hub] ⚠️ 数据不足，左端已收缩', {
+            console.warn("[Hub] ⚠️ 数据不足，左端已收缩", {
               theoretical: barsTheoretical,
               actual: total,
               shortage,
               shrinkage: `${((shortage / barsTheoretical) * 100).toFixed(1)}%`,
             });
           } else {
-            console.log('[Hub] ✅ 数据充足，完美对齐', {
+            console.log("[Hub] ✅ 数据充足，完美对齐", {
               bars: barsNew,
               timeSpan: `${timeSpanDays.toFixed(2)}天`,
             });
           }
         }
-        
+
         barsCount.value = Math.max(1, barsNew);
 
         if (rightTs.value != null && !autoAll) {

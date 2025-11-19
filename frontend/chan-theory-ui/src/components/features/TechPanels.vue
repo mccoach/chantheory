@@ -104,6 +104,23 @@ const indicatorOptions = [
   { key: "BOLL", label: "BOLL" },
 ];
 
+// NEW: 根据当前 panes 同步指标使用开关（MACD/KDJ/RSI/BOLL）
+function syncIndicatorUsage(panesArr) {
+  const kinds = (Array.isArray(panesArr) ? panesArr : [])
+    .map(p => String(p.kind || "").toUpperCase());
+
+  const hasMACD = kinds.includes("MACD");
+  const hasKDJ = kinds.includes("KDJ");
+  const hasRSI = kinds.includes("RSI");
+  const hasBOLL = kinds.includes("BOLL");
+
+  // 这些开关决定底层是否计算对应指标数据
+  settings.setUseMACD(hasMACD);
+  settings.setUseKDJ(hasKDJ);
+  settings.setUseRSI(hasRSI);
+  settings.setUseBOLL(hasBOLL);
+}
+
 onMounted(() => {
   let panesToLoad = [];
   const savedPanes = settings.preferences.indicatorPanes;
@@ -122,7 +139,13 @@ onMounted(() => {
   
   panes.splice(0, panes.length, ...panesToLoad);
   
+  // 初次挂载：同步到渲染中枢 & 指标使用开关
   renderHub.setIndicatorPanes(panes);
+  syncIndicatorUsage(panes);
+  settings.setIndicatorPanes(
+    panes.map(p => ({ kind: String(p.kind || "MACD") }))
+  );
+  settings.saveAll();
 
   // NEW: 添加全局点击监听，用于关闭菜单
   document.addEventListener("click", handleClickOutside);
@@ -138,7 +161,13 @@ watch(
   (newPanes) => {
     try {
       const kindsToSave = newPanes.map((p) => ({ kind: String(p.kind || "MACD") }));
+      // 持久化布局
       settings.setIndicatorPanes(kindsToSave);
+      // 根据布局自动开启/关闭各指标计算
+      syncIndicatorUsage(newPanes);
+      // 保存到 localStorage
+      settings.saveAll();
+      // 同步到渲染中枢（使用新数组引用，触发重算）
       renderHub.setIndicatorPanes(newPanes);
     } catch {}
   },

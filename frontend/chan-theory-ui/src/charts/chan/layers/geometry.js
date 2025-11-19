@@ -5,7 +5,7 @@
 // 设计：纯函数，零副作用
 // ==============================
 
-import { DEFAULT_VOL_SETTINGS } from '@/constants';  // ← 新增导入
+import { DEFAULT_VOL_SETTINGS, BAR_USABLE_RATIO } from '@/constants';
 
 /**
  * 派生图层标记的尺寸
@@ -45,8 +45,10 @@ export function deriveSymbolSize({
     // 优先使用外部覆盖宽度
     finalWidth = Math.round(overrideWidth);
   } else {
-    // ===== 修复：使用常量（未暴露参数）=====
-    const approxBarWidth = (hW * DEFAULT_VOL_SETTINGS.layout.barUsableRatio) / vC;
+    const approxBarWidth =
+      (hW *
+        (DEFAULT_VOL_SETTINGS.layout.barUsableRatio ?? BAR_USABLE_RATIO)) /
+      vC;
     const approxSymbolWidth = approxBarWidth * (barPercent / 100);
     finalWidth = Math.round(approxSymbolWidth);
   }

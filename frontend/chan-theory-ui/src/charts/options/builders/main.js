@@ -1,17 +1,16 @@
 // src/charts/options/builders/main.js
 // ==============================
-// V4.0 - 导入路径修复版
+// V7.0 - 添加诊断日志版
 //
-// 核心改造：
-//   - applyUi → applyLayout（文件已移动）
-//   - 保持所有功能回归
+// 新增：
+//   - 第150行后：输出主图的 yAxis[1] 和 series 使用情况
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
 import { hexToRgba } from "@/utils/colorUtils";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { STYLE_PALETTE, DEFAULT_KLINE_STYLE } from "@/constants";
-import { applyLayout } from "../positioning/layout"; // ← 修复：新路径
+import { applyLayout } from "../positioning/layout";
 import { makeMainTooltipFormatter } from "../tooltips/index";
 
 function asArray(x) {
@@ -205,8 +204,9 @@ export function buildMainChartOption(
     scale: true,
     axisPointer: {
       show: true,
+      triggerOn: 'mousemove|click',
       label: {
-        show: !!ui?.isHovered,
+        show: true,
         formatter: function (params) {
           const val =
             typeof params.value === "object" && params.value !== null
@@ -216,7 +216,9 @@ export function buildMainChartOption(
         },
       },
       lineStyle: {
-        color: ui?.isHovered ? theme.axisLineColor : "transparent",
+        color: theme.axisLineColor,
+        width: 1,
+        type: "dashed",
       },
     },
   };
@@ -235,6 +237,14 @@ export function buildMainChartOption(
     },
   };
 
+  // ===== 新增：诊断日志 =====
+  console.log('[DIAG][main.js] 主图 yAxis 配置', {
+    yAxis数量: 2,
+    yAxis0_axisPointer: mainYAxis.axisPointer ? '有配置' : 'undefined',
+    yAxis1_完整配置: overlayMarkerYAxis,
+    yAxis1_axisPointer: JSON.stringify(overlayMarkerYAxis.axisPointer),
+  });
+
   let option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
@@ -243,7 +253,14 @@ export function buildMainChartOption(
     },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "cross" },
+      axisPointer: {
+        type: "cross",
+        crossStyle: {
+          color: theme.axisLineColor || "#999",
+          width: 1,
+          type: "dashed",
+        },
+      },
       appendToBody: false,
       confine: true,
       formatter: makeMainTooltipFormatter({
@@ -271,12 +288,35 @@ export function buildMainChartOption(
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  // ===== 核心修复：调用新函数 =====
+  // ===== 新增：在 applyLayout 前输出 =====
+  console.log('[DIAG][main.js] applyLayout 前', {
+    yAxis数量: option.yAxis?.length,
+    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
+  });
+
   option = applyLayout(
     option,
     { ...ui, isMain: true, leftPx: 72 },
     { candles: list, freq }
   );
+
+  // ===== 新增：在 applyLayout 后输出 =====
+  console.log('[DIAG][main.js] applyLayout 后', {
+    yAxis数量: option.yAxis?.length,
+    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
+    yAxis1_完整: option.yAxis?.[1],
+  });
+
+  // ===== 新增：输出 series 使用情况 =====
+  console.log('[DIAG][main.js] series 使用情况', {
+    总series数量: option.series?.length,
+    使用yAxisIndex1的series: option.series?.filter(s => s.yAxisIndex === 1).map(s => ({
+      id: s.id,
+      name: s.name,
+      type: s.type,
+      dataLength: s.data?.length
+    })),
+  });
 
   return option;
 }

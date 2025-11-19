@@ -1,6 +1,9 @@
 # backend/services/unified_sync_executor.py
 # ==============================
-# V9.0 - 修复日/周/月路由
+# V10.0 - 去冗余因子版（K线任务不再写入因子）
+# 说明：
+#   - K线任务(_fetch_kline) 只负责拉取K线与因子来源标识，不再展开或返回因子数据。
+#   - 因子任务(_fetch_factors) 负责拉取并合并前/后复权因子，写库前在 async_writer 中统一压缩。
 # ==============================
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from backend.utils.time import today_ymd
 _LOG = get_logger("sync_executor")
 
 class UnifiedSyncExecutor:
-    """统一同步执行器（V9.0 - 修复日/周/月路由）"""
+    """统一同步执行器（V10.0 - 去冗余因子版）"""
     
     def __init__(self):
         self.queue = get_priority_queue()
@@ -186,12 +189,12 @@ class UnifiedSyncExecutor:
     
     async def _fetch_kline(self, task: PrioritizedTask):
         """
-        拉取K线（V9.0 - 修复日/周/月路由）
+        拉取K线（V10.0 - 仅K线，不再返回因子）
         
-        核心改造：
-          - 删除统一的 routed_category
-          - 每个频率独立处理
-          - 周K/月K不传 period（由适配器内部固定）
+        设计原则：
+          - K线任务专注于行情数据（category='kline'）
+          - 因子任务（category='factors'）单独负责复权因子获取与写库
+          - 前端在使用时按日期前向填充因子（稀疏存储）
         """
         symbol = task.symbol
         freq = task.freq
@@ -223,17 +226,15 @@ class UnifiedSyncExecutor:
             )
             base_category_prefix = 'stock'
         
-        # ===== 步骤2：根据频率独立路由（核心修复）=====
+        # ===== 步骤2：根据频率独立路由 =====
         
         # 分支1：分钟线
         if freq in ['1m', '5m', '15m', '30m', '60m']:
             routed_category = f'{base_category_prefix}_minutely_bars'
             
-            # ✅ 修正：分钟线接口不支持日期参数
             kwargs = {
                 'symbol': symbol,
                 'period': freq[:-1],  # '5m' → '5'
-                # ❌ 删除：分钟线不支持日期参数
             }
             
             _LOG.info(
@@ -244,11 +245,11 @@ class UnifiedSyncExecutor:
         
         # 分支2：日K
         elif freq == '1d':
-            routed_category = f'{base_category_prefix}_daily_bars'  # ← 修复
+            routed_category = f'{base_category_prefix}_daily_bars'
             
             kwargs = {
                 'symbol': symbol,
-                'period': 'daily',  # ← 传递给支持 period 的方法（如 get_stock_daily_em）
+                'period': 'daily',
                 'start_date': f"{start_ymd:08d}",
                 'end_date': f"{end_ymd:08d}",
                 'adjust': '',
@@ -262,11 +263,10 @@ class UnifiedSyncExecutor:
         
         # 分支3：周K
         elif freq == '1w':
-            routed_category = f'{base_category_prefix}_weekly_bars'  # ← 修复
+            routed_category = f'{base_category_prefix}_weekly_bars'
             
             kwargs = {
                 'symbol': symbol,
-                # ❌ 删除：period（get_stock_weekly_em 内部固定）
                 'start_date': f"{start_ymd:08d}",
                 'end_date': f"{end_ymd:08d}",
                 'adjust': '',
@@ -280,11 +280,10 @@ class UnifiedSyncExecutor:
         
         # 分支4：月K
         elif freq == '1M':
-            routed_category = f'{base_category_prefix}_monthly_bars'  # ← 修复
+            routed_category = f'{base_category_prefix}_monthly_bars'
             
             kwargs = {
                 'symbol': symbol,
-                # ❌ 删除：period（get_stock_monthly_em 内部固定）
                 'start_date': f"{start_ymd:08d}",
                 'end_date': f"{end_ymd:08d}",
                 'adjust': '',
@@ -300,24 +299,12 @@ class UnifiedSyncExecutor:
             _LOG.error(f"[执行器] 不支持的频率: {freq}")
             return None
         
-        # ===== 步骤3：并发拉取 K线 + 因子 =====
-        tasks_to_gather = [
-            dispatcher.fetch(routed_category, freq=freq, **kwargs)  # ← 传递 freq
-        ]
-        
-        # 只有A股需要复权因子
-        if symbol_type == 'A':
-            tasks_to_gather.append(
-                dispatcher.fetch('adj_factor', symbol=symbol, adjust_type='qfq-factor')
-            )
-            tasks_to_gather.append(
-                dispatcher.fetch('adj_factor', symbol=symbol, adjust_type='hfq-factor')
-            )
-        
-        results = await asyncio.gather(*tasks_to_gather, return_exceptions=True)
-        
-        # ===== 步骤4：解包K线结果 =====
-        raw_bars_df, source_id = results[0] if not isinstance(results[0], Exception) else (None, None)
+        # ===== 步骤3：拉取 K线 =====
+        raw_bars_df, source_id = await dispatcher.fetch(
+            routed_category,
+            freq=freq,
+            **kwargs
+        )
         
         if raw_bars_df is None or raw_bars_df.empty:
             _LOG.warning(
@@ -331,7 +318,7 @@ class UnifiedSyncExecutor:
             f"来源={source_id}, 原始行数={len(raw_bars_df)}"
         )
         
-        # ===== 步骤5：标准化K线 =====
+        # ===== 步骤4：标准化K线 =====
         from backend.services.normalizer import normalize_bars_df
         
         df_bars = normalize_bars_df(raw_bars_df, source_id)
@@ -342,60 +329,23 @@ class UnifiedSyncExecutor:
             )
             return None
         
-        # ===== 步骤6：处理复权因子（仅A股）=====
-        df_factors = None
-        
-        if symbol_type == 'A' and len(results) > 1:
-            from backend.services.normalizer import normalize_adj_factors_df
-            
-            raw_qfq_df, qfq_source_id = results[1] if not isinstance(results[1], Exception) else (None, None)
-            raw_hfq_df, hfq_source_id = results[2] if not isinstance(results[2], Exception) else (None, None)
-            
-            df_qfq = normalize_adj_factors_df(raw_qfq_df, qfq_source_id)
-            df_hfq = normalize_adj_factors_df(raw_hfq_df, hfq_source_id)
-            
-            if df_qfq is not None and df_hfq is not None:
-                # 合并前后复权因子
-                df_factors = pd.merge(
-                    df_qfq.rename(columns={'factor': 'qfq_factor'}),
-                    df_hfq.rename(columns={'factor': 'hfq_factor'}),
-                    on='date', how='outer'
-                )
-                
-                # 创建完整的日期范围（基于K线数据）
-                all_dates = pd.to_datetime(df_bars['ts'], unit='ms').dt.strftime('%Y%m%d').astype(int).unique()
-                date_range_df = pd.DataFrame({'date': sorted(all_dates)})
-                
-                # 合并并填充
-                df_factors = pd.merge(date_range_df, df_factors, on='date', how='left')
-                df_factors['qfq_factor'] = df_factors['qfq_factor'].ffill().bfill().fillna(1.0)
-                df_factors['hfq_factor'] = df_factors['hfq_factor'].ffill().bfill().fillna(1.0)
-                df_factors['symbol'] = symbol
-                
-                _LOG.debug(
-                    f"[因子处理] {symbol}: "
-                    f"前复权={len(df_qfq)}行, 后复权={len(df_hfq)}行, "
-                    f"合并后={len(df_factors)}行"
-                )
-        
-        # ===== 步骤7：返回结果 =====
         result = {
             'bars': df_bars,
-            'factors': df_factors,
+            'factors': None,          # 因子交由独立任务处理
             'source_id': source_id or 'unknown'
         }
         
         _LOG.info(
             f"[执行器] K线处理完成: {symbol} {freq} "
             f"K线={len(df_bars)}根, "
-            f"因子={'有' if df_factors is not None else '无'}, "
+            f"因子=独立任务处理, "
             f"来源={result['source_id']}"
         )
         
         return result
     
     async def _fetch_factors(self, task: PrioritizedTask):
-        """拉取因子"""
+        """拉取因子（前后复权），返回稀疏因子表"""
         results = await asyncio.gather(
             dispatcher.fetch('adj_factor', symbol=task.symbol, adjust_type='qfq-factor'),
             dispatcher.fetch('adj_factor', symbol=task.symbol, adjust_type='hfq-factor'),
@@ -468,17 +418,15 @@ class UnifiedSyncExecutor:
         
         if category == 'kline':
             df_bars = data.get('bars')
-            df_factors = data.get('factors')
+            df_factors = data.get('factors')  # V10.0：此处始终为 None（因子由独立任务处理）
             source_id = data.get('source_id', 'unknown')
             
-            # ===== 核心修改：使用异步写入器 =====
             if df_bars is not None and not df_bars.empty:
                 df_bars['symbol'] = task.symbol
                 df_bars['freq'] = task.freq
                 df_bars['source'] = source_id
                 df_bars['fetched_at'] = datetime.now().isoformat()
                 
-                # ✅ 提交到队列（立即返回，不阻塞）
                 await self.db_writer.write_candles(df_bars.to_dict('records'))
                 
                 _LOG.debug(
@@ -486,20 +434,10 @@ class UnifiedSyncExecutor:
                     f"{len(df_bars)}根"
                 )
             
-            if df_factors is not None and not df_factors.empty:
-                df_factors['symbol'] = task.symbol
-                df_factors['updated_at'] = datetime.now().isoformat()
-                
-                # ✅ 提交到队列（立即返回）
-                await self.db_writer.write_factors(df_factors.to_dict('records'))
-                
-                _LOG.debug(
-                    f"[落库] 已提交因子到队列: {task.symbol} "
-                    f"{len(df_factors)}行"
-                )
+            # df_factors 在 V10.0 不再从 K 线任务写入（因子任务独立处理）
         
         elif category == 'factors':
-            # 单独拉取因子的情况
+            # 单独拉取因子的情况（稀疏表）
             if data is not None and not (isinstance(data, pd.DataFrame) and data.empty):
                 if isinstance(data, pd.DataFrame):
                     data['symbol'] = task.symbol
@@ -514,16 +452,14 @@ class UnifiedSyncExecutor:
             profile_dict = normalize_stock_profile_df(raw_df)
             
             if profile_dict:
-                # ===== 核心修复：先确保symbol存在于索引表 =====
                 try:
                     from backend.db.symbols import ensure_symbol_in_index
                     
-                    # 确保symbol已在索引表中（防止外键约束失败）
                     await asyncio.to_thread(
                         ensure_symbol_in_index,
                         symbol=task.symbol,
                         symbol_type=task.symbol_type or 'A',
-                        name=profile_dict.get('name', ''),  # 从档案中获取名称
+                        name=profile_dict.get('name', ''),
                     )
                     
                     _LOG.debug(
@@ -534,12 +470,9 @@ class UnifiedSyncExecutor:
                         f"[落库] 确保symbol存在失败: {task.symbol}, {e}"
                     )
                 
-                # 然后再写入档案
                 profile_dict['symbol'] = task.symbol
                 profile_dict['updated_at'] = datetime.now().isoformat()
                 
-                # ===== 双重保障：再次确保所有字段存在（防御性编程）=====
-                # 说明：即使 normalizer 已初始化，这里再保障一次，确保绝对安全
                 profile_dict.setdefault('listing_date', None)
                 profile_dict.setdefault('total_shares', None)
                 profile_dict.setdefault('float_shares', None)
@@ -547,7 +480,6 @@ class UnifiedSyncExecutor:
                 profile_dict.setdefault('region', None)
                 profile_dict.setdefault('concepts', None)
                 
-                # ✅ 提交到队列
                 await self.db_writer.write_profile(profile_dict)
         
         elif category == 'trade_calendar':
@@ -562,7 +494,6 @@ class UnifiedSyncExecutor:
                     for _, row in clean_df.iterrows()
                 ]
                 
-                # 交易日历仍使用同步写入（数据量小且不频繁）
                 await asyncio.to_thread(upsert_trade_calendar, records)
 
 

@@ -5,7 +5,7 @@
 // 设计：按功能模块分组，每个常量都有详细注释
 // ==============================
 
-import { STYLE_PALETTE } from "../common";
+import { STYLE_PALETTE, BAR_USABLE_RATIO } from "../common";
 
 // ===== 量窗默认设置 =====
 export const DEFAULT_VOL_SETTINGS = {
@@ -20,13 +20,13 @@ export const DEFAULT_VOL_SETTINGS = {
 
   // --- 布局参数（设置窗未暴露）---
   layout: {
-    barUsableRatio: 0.88,   // 可用绘图区占容器宽度的比例（0.88 = 88%）（❌ 设置窗未暴露，直接用常量）
+    barUsableRatio: BAR_USABLE_RATIO,   // ← 统一使用全局柱体比例常量，可用绘图区占容器宽度的比例（0.88 = 88%）（❌ 设置窗未暴露，直接用常量）
     fallbackBarWidth: 8,    // 兜底柱宽（当计算失败时使用）（❌ 设置窗未暴露，直接用常量）
   },
 
   // --- 量额柱样式（设置窗已暴露）---
   volBar: {
-    barPercent: 100,        // 柱体宽度百分比（100=不压缩）（✅ 设置窗可改）
+    barPercent: 80,        // 柱体宽度百分比（100=不压缩）（✅ 设置窗可改）
     upColor: STYLE_PALETTE.bars.volume.up,    // 阳线颜色（✅ 设置窗可改）
     downColor: STYLE_PALETTE.bars.volume.down,  // 阴线颜色（✅ 设置窗可改）
   },

@@ -43,7 +43,8 @@ import BollSettingsPanel from "@/settings/panels/BollSettingsPanel.vue";
 import IndicatorPlaceholderPanel from "@/settings/panels/IndicatorPlaceholderPanel.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useSettingsManager } from "@/composables/useSettingsManager";
-import { DEFAULT_VOL_SETTINGS } from "@/constants";
+import { useUserSettings } from "@/composables/useUserSettings";
+import { DEFAULT_VOL_SETTINGS, DEFAULT_MACD_SETTINGS } from "@/constants";
 import { createSettingsResetter } from "@/settings/common/useSettingsResetter";
 
 const props = defineProps({
@@ -52,6 +53,7 @@ const props = defineProps({
 
 const hub = useViewCommandHub();
 const dialogManager = inject("dialogManager", null);
+const settings = useUserSettings();
 
 // 如果初始 kind 是 AMOUNT，映射到 VOL tab
 const getInitialTab = (kind) => (String(kind).toUpperCase() === 'AMOUNT' ? 'VOL' : String(kind).toUpperCase());
@@ -68,19 +70,34 @@ provide("volDraft", volManager.draft);
 const volResetter = createSettingsResetter({ draft: volManager.draft, defaults: DEFAULT_VOL_SETTINGS });
 provide("volResetter", volResetter);
 
+// ===== MACD 设置管理器（新增）=====
+const macdManager = useSettingsManager({
+  settingsKey: "macdSettings",
+  defaultConfig: DEFAULT_MACD_SETTINGS,
+});
+provide("macdDraft", macdManager.draft);
+const macdResetter = createSettingsResetter({
+  draft: macdManager.draft,
+  defaults: DEFAULT_MACD_SETTINGS,
+});
+provide("macdResetter", macdResetter);
+
 // 暴露 save 和 resetAll 方法（resetAll 仅重置草稿，不保存、不刷新）
 const save = () => {
   // 目前只有量窗有可保存的设置
   volManager.save();
-  
-  // ===== 新增：主动触发持久化 =====
+  macdManager.save();
+
+  // 主动持久化到 LocalStorage
   settings.saveAll();
-  
-  // 保存后触发一次刷新
+
+  // 保存后触发重新渲染（量窗 / MACD）
   hub.execute("Refresh", {});
 };
+
 const resetAll = () => {
   volResetter.resetAll();
+  macdResetter.resetAll();
 };
 
 defineExpose({ save, resetAll });

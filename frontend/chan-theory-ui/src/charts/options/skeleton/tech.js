@@ -1,34 +1,21 @@
 // src/charts/options/skeleton/tech.js
 // ==============================
-// 说明：技术指标图表骨架生成器（重命名自 common.js）
-// 职责：生成副图的通用 Option 结构
-// 设计：纯函数，不包含具体指标逻辑
-// 
-// 重命名理由：
-//   - "common" 过于宽泛，不表达实际职责
-//   - "tech" 明确指向技术指标副图
-//   - "skeleton" 强调其为骨架生成器
+// V8.0 - 新增 legend 支持
+// 改动：
+//   - 新增可选参数 options.showLegend（默认 false）
+//   - 添加 legend 配置对象
+//   - legend 开启时，grid.top 自动增加空间
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
-import { applyLayout } from "../positioning/layout";  // ← 新路径
+import { applyLayout } from "../positioning/layout";
 import { formatNumberScaled } from "@/utils/numberUtils";
 
-/**
- * 创建技术指标图表的骨架配置
- * 
- * @param {Object} params
- * @param {Array} params.candles - K线数据
- * @param {string} params.freq - 频率
- * @param {Function} params.tooltipFormatter - Tooltip格式化函数
- * @param {Object} ui - UI配置
- * @param {Function} [yAxisLabelFormatter] - Y轴标签格式化函数
- * @returns {Object} ECharts Option骨架
- */
 export function createTechSkeleton(
   { candles, freq, tooltipFormatter },
   ui,
-  yAxisLabelFormatter
+  yAxisLabelFormatter,
+  options = {}  // ← 新增：可选配置参数
 ) {
   const theme = getChartTheme();
 
@@ -37,15 +24,42 @@ export function createTechSkeleton(
       ? yAxisLabelFormatter
       : (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 });
 
+  // ===== 新增：legend 开关 =====
+  const showLegend = options?.showLegend ?? false;
+
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
+    
+    // ===== 新增：legend 配置 =====
+    legend: showLegend ? {
+      show: true,
+      top: 4,
+      left: 'center',
+      textStyle: {
+        color: theme.axisLabelColor || '#aaa',
+        fontSize: 12
+      },
+      itemWidth: 14,
+      itemHeight: 10,
+      itemGap: 12,
+    } : {
+      show: false
+    },
+    
     axisPointer: {
       link: [{ xAxisIndex: "all" }],
     },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "cross" },
+      axisPointer: {
+        type: "cross",
+        crossStyle: {
+          color: theme.axisLineColor || "#999",
+          width: 1,
+          type: "dashed",
+        },
+      },
       appendToBody: false,
       confine: true,
       formatter: tooltipFormatter,
@@ -65,13 +79,27 @@ export function createTechSkeleton(
           color: theme.axisLabelColor,
           align: "right",
           formatter: primaryYAxisFormatter,
-          margin: ui?.isHovered ? 6 : 6,
+          margin: 6,
         },
         axisPointer: {
           show: true,
-          label: { show: !!ui?.isHovered },
+          triggerOn: 'mousemove|click',
+          label: {
+            show: true,
+            formatter: function (params) {
+              const val =
+                typeof params.value === "object" && params.value !== null
+                  ? params.value.value
+                  : params.value;
+              return typeof yAxisLabelFormatter === "function"
+                ? yAxisLabelFormatter(val)
+                : formatNumberScaled(val, { digits: 2, allowEmpty: true });
+            },
+          },
           lineStyle: {
-            color: ui?.isHovered ? theme.axisLineColor : "transparent",
+            color: theme.axisLineColor,
+            width: 1,
+            type: "dashed",
           },
         },
       },
@@ -86,6 +114,12 @@ export function createTechSkeleton(
         splitLine: { show: false },
         axisPointer: {
           show: false,
+          triggerOn: 'none',
+          label: { show: false },
+          lineStyle: {
+            color: 'transparent',
+            width: 0,
+          },
         },
       },
     ],
@@ -96,9 +130,31 @@ export function createTechSkeleton(
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  return applyLayout(
+  // ===== 诊断日志1：tech.js 创建后 =====
+  console.log('[DIAG][tech.js] 创建骨架完成', {
+    yAxis数量: option.yAxis?.length,
+    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
+    完整yAxis1: option.yAxis?.[1],
+  });
+
+  const result = applyLayout(
     option,
-    { ...ui, isMain: false, leftPx: 72 },
+    { 
+      ...ui, 
+      isMain: false, 
+      leftPx: 72,
+      // ===== 新增：legend 开启时，top 增加空间 =====
+      topExtraPx: showLegend ? 24 : 0
+    },
     { candles: Array.isArray(candles) ? candles : [], freq }
   );
+
+  // ===== 诊断日志2：tech.js 内部 applyLayout 后 =====
+  console.log('[DIAG][tech.js] applyLayout 后', {
+    yAxis数量: result.yAxis?.length,
+    yAxis1_axisPointer: JSON.stringify(result.yAxis?.[1]?.axisPointer),
+    yAxis1_完整: result.yAxis?.[1],
+  });
+
+  return result;
 }

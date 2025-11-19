@@ -5,9 +5,10 @@ export * from './common';
 export * from './charts/main';
 export * from './charts/volume';
 export * from './charts/chan';
+export * from './charts/macd';
 export * from './icons';
-export * from './chartLayout';  // ✅ 已有
-export * from './settingsSchema';  // ✅ 已有
+export * from './chartLayout';
+export * from './settingsSchema';
 
 // ===== 新增：UI常量导出 =====
 export * from './ui/tooltip';
