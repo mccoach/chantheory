@@ -2,7 +2,11 @@
 # ==============================
 # 说明：通用小型辅助工具函数
 # - 本模块用于存放被多个其他模块复用的、与具体业务无关的小型工具函数。
-# - 修改：移除了 lazy_import_ak 函数（已在新架构中不再需要）
+# - 修改：
+#   * 保留 ak_symbol_with_prefix（供 AkShare 适配器使用）
+#   * 基于 symbol_index.market 的前缀工具：
+#       - get_symbol_market_from_db     : 从 DB 读取市场信息
+#       - prefix_symbol_with_market     : 按统一规则为 symbol 添加市场前缀字符串
 # ==============================
 
 from __future__ import annotations
@@ -21,8 +25,8 @@ def silence_io():
 
 def ak_symbol_with_prefix(symbol: str) -> str:
     """
-    A股代码加交易所前缀。
-    
+    A股代码加交易所前缀（历史工具，主要供 AkShare 适配器使用）。
+
     规则:
     - '6' 开头 → 'sh' (上交所主板)
     - '0'/'3' 开头 → 'sz' (深交所主板/创业板)
@@ -45,6 +49,74 @@ def ak_symbol_with_prefix(symbol: str) -> str:
     if s.startswith(("8", "4")):
         return "bj" + s
     return "sz" + s  # 默认深证
+
+def get_symbol_market_from_db(symbol: str) -> Optional[str]:
+    """
+    从 symbol_index 表中查询指定 symbol 的 market 字段。
+
+    语义：
+      - 返回大写市场代码：'SH' / 'SZ' / 'BJ' / ...；
+      - 未找到或查询失败时返回 None。
+
+    注意：
+      - 这是整个系统中“市场归属”的唯一权威来源；
+      - 所有需要根据 symbol 判定市场的逻辑，应优先经由此函数。
+    """
+    s = (symbol or "").strip()
+    if not s:
+        return None
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT market FROM symbol_index WHERE symbol=? LIMIT 1;",
+            (s,),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            market = str(row[0]).strip().upper()
+            return market or None
+        return None
+    except Exception:
+        # 查询失败时不抛出，让上层决定如何处理
+        return None
+
+def prefix_symbol_with_market(symbol: str) -> str:
+    """
+    使用 symbol_index 中的市场信息，为内部 symbol 添加统一格式的“市场前缀”。
+
+    本质动作：
+      - 读取系统内对该 symbol 的市场归属（symbol_index.market）；
+      - 将 market 转为小写前缀，并与 symbol 组合成一个“带前缀的代码字符串”。
+
+    当前格式规则：
+      - 'SH' + '600000' → 'sh.600000'
+      - 'SZ' + '000001' → 'sz.000001'
+      - 'BJ' + '430047' → 'bj.430047'  （如有）
+
+    Args:
+        symbol: 不带前缀的股票代码，如 '600000'
+
+    Returns:
+        str: 带市场前缀的代码字符串，如 'sh.600000'
+
+    Raises:
+        ValueError: 当 symbol 为空或 symbol_index 中无对应记录时。
+    """
+    s = (symbol or "").strip()
+    if not s:
+        raise ValueError("prefix_symbol_with_market: symbol is empty")
+
+    market = get_symbol_market_from_db(s)
+    if not market:
+        raise ValueError(
+            f"prefix_symbol_with_market: symbol '{s}' not found in symbol_index "
+            f"或 market 字段为空；请确保先完成标的列表同步再拉取相关数据。"
+        )
+
+    prefix = market.lower()  # 'SH' → 'sh'
+    return f"{prefix}.{s}"
 
 def infer_symbol_type(symbol: str, cat_hint: Optional[str] = None) -> str:
     """

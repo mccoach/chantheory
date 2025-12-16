@@ -4,13 +4,11 @@
 # ==============================
 
 from backend.services import normalizer
-from backend.services import integrators
 from backend.services import indicators
 from backend.services import market
 
 __all__ = [
     'normalizer',
-    'integrators',
     'indicators',
     'market'
 ]

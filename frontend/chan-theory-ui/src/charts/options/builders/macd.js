@@ -33,12 +33,6 @@ export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
   const hasDEA = Array.isArray(inds.MACD_DEA) && inds.MACD_DEA.length > 0;
   const hasHIST = Array.isArray(inds.MACD_HIST) && inds.MACD_HIST.length > 0;
 
-  console.log("[MACD Builder] 📊 数据检查", {
-    DIF存在: hasDIF,
-    DEA存在: hasDEA,
-    HIST存在: hasHIST,
-  });
-
   // ===== 柱体（HIST）=====
   if (histCfg.enabled && hasHIST) {
     series.push({
@@ -105,11 +99,6 @@ export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
       z: linesCfg.z ?? DEFAULT_MACD_SETTINGS.lines.z,
     });
   }
-
-  console.log("[MACD Builder] 📦 Series 汇总", {
-    总数: series.length,
-    列表: series.map((s) => ({ id: s.id, type: s.type, name: s.name })),
-  });
 
   const option = createTechSkeleton(
     {

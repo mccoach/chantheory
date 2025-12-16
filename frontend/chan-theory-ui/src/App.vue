@@ -1,7 +1,18 @@
 <!-- src/App.vue -->
 <!-- ============================== -->
-<!-- V8.0 - 符合职责单一原则 -->
-<!-- ============================== -->
+<!-- V9.0 - 启动指令集版
+     
+     启动阶段被动任务顺序：
+       1) 探活（/api/ping）
+       2) 建立 SSE 连接（/api/events/stream）
+       3) trade_calendar：POST /api/ensure-data type=trade_calendar + waitTasksDone
+       4) 当前标的行情：vm.reload({force_refresh:false, with_profile:true})
+       5) 标的索引：
+            5.1) 先 ensureIndexFresh(false) 读取现有快照（或缓存/内置），确保搜索等功能立即可用；
+            5.2) 再 POST /api/ensure-data type=symbol_index（force_fetch=false）+ waitTasksDone；
+            5.3) 最后再次 ensureIndexFresh(false) 读取可能更新后的快照。
+       6) 自选池：wl.smartLoad()
+-->
 <template>
   <div v-if="!backendReady" class="loading-screen">
     <div class="spinner"></div>
@@ -37,174 +48,211 @@
 </template>
 
 <script setup>
-import { ref, computed, provide, onMounted, readonly, inject, onBeforeUnmount, watch } from "vue"
-import { useMarketView } from "./composables/useMarketView"
-import { useViewCommandHub } from "./composables/useViewCommandHub"
-import { useViewRenderHub } from "./composables/useViewRenderHub"
-import { useDialogManager } from "./composables/useDialogManager"
-import { useExportController } from "./composables/useExportController"
-import { useEventStream } from '@/composables/useEventStream'
-import { ensureIndexFresh } from "./composables/useSymbolIndex"
-import { useWatchlist } from "./composables/useWatchlist"
-import { waitBackendAlive } from "./utils/backendReady"
+import { ref, computed, provide, onMounted, inject, onBeforeUnmount, watch } from "vue";
+import { useMarketView } from "./composables/useMarketView";
+import { useViewCommandHub } from "./composables/useViewCommandHub";
+import { useViewRenderHub } from "./composables/useViewRenderHub";
+import { useDialogManager } from "./composables/useDialogManager";
+import { useExportController } from "./composables/useExportController";
+import { useEventStream } from "@/composables/useEventStream";
+import { ensureIndexFresh } from "./composables/useSymbolIndex";
+import { useWatchlist } from "./composables/useWatchlist";
+import { waitBackendAlive } from "./utils/backendReady";
 
-// ===== 核心修复：导入处理器注册器 =====
-import { 
-  registerGlobalHandlers, 
+import {
+  declareTradeCalendar,
+  declareSymbolIndex,
+} from "@/services/ensureDataAPI";
+import { waitTasksDone } from "@/composables/useTaskWaiter";
+
+import {
+  registerGlobalHandlers,
   registerModalSettingsHandlers,
-  unregisterAllHandlers 
-} from "@/interaction/handlers/global"
-import { pushDialogScope, popDialogScope } from "@/interaction/handlers/scopes"
+  unregisterAllHandlers,
+} from "@/interaction/handlers/global";
+import { pushDialogScope, popDialogScope } from "@/interaction/handlers/scopes";
 
-import TopTitle from "./components/features/TopTitle.vue"
-import SymbolPanel from "./components/features/SymbolPanel.vue"
-import MainChartPanel from "./components/features/MainChartPanel.vue"
-import TechPanels from "./components/features/TechPanels.vue"
-import ModalDialog from "./components/ui/ModalDialog.vue"
+import TopTitle from "./components/features/TopTitle.vue";
+import SymbolPanel from "./components/features/SymbolPanel.vue";
+import MainChartPanel from "./components/features/MainChartPanel.vue";
+import TechPanels from "./components/features/TechPanels.vue";
+import ModalDialog from "./components/ui/ModalDialog.vue";
 
-const backendReady = ref(false)
+const backendReady = ref(false);
 
-const hub = useViewCommandHub()
-const vm = useMarketView({ autoStart: false })
-const renderHub = useViewRenderHub()
-const dialogManager = useDialogManager()
-const hotkeys = inject("hotkeys")
+const hub = useViewCommandHub();
+const vm = useMarketView({ autoStart: false });
+const renderHub = useViewRenderHub();
+const dialogManager = useDialogManager();
+const hotkeys = inject("hotkeys");
 const exportCtl = useExportController({
   isBusy: () => vm.loading.value,
-})
-renderHub.setMarketView(vm)
+});
+renderHub.setMarketView(vm);
 
-provide("marketView", vm)
-provide("viewCommandHub", hub)
-provide("renderHub", renderHub)
-provide("dialogManager", dialogManager)
-provide("exportController", exportCtl)
+provide("marketView", vm);
+provide("viewCommandHub", hub);
+provide("renderHub", renderHub);
+provide("dialogManager", dialogManager);
+provide("exportController", exportCtl);
 
-const activeDialog = computed(() => dialogManager.activeDialog.value)
-const dialogBodyRef = ref(null)
+const activeDialog = computed(() => dialogManager.activeDialog.value);
+const dialogBodyRef = ref(null);
+
+function nowTs() {
+  return new Date().toISOString();
+}
 
 function handleModalClose() {
   try {
-    const onClose = activeDialog.value?.onClose
+    const onClose = activeDialog.value?.onClose;
     if (typeof onClose === "function") {
-      onClose()
+      onClose();
     }
-    dialogManager.close()
+    dialogManager.close();
   } catch (e) {
-    console.error("Modal close error:", e)
+    console.error("Modal close error:", e);
   }
 }
 
 function handleModalSave() {
   try {
     if (dialogBodyRef.value && typeof dialogBodyRef.value.save === "function") {
-      dialogBodyRef.value.save()
+      dialogBodyRef.value.save();
     }
-    const onSave = activeDialog.value?.onSave
+    const onSave = activeDialog.value?.onSave;
     if (typeof onSave === "function") {
-      onSave()
+      onSave();
     }
-    dialogManager.close()
+    dialogManager.close();
   } catch (e) {
-    console.error("Modal save error:", e)
+    console.error("Modal save error:", e);
   }
 }
 
 function handleModalResetAll() {
   try {
     if (dialogBodyRef.value && typeof dialogBodyRef.value.resetAll === "function") {
-      dialogBodyRef.value.resetAll()
+      dialogBodyRef.value.resetAll();
     }
-    const onResetAll = activeDialog.value?.onResetAll
+    const onResetAll = activeDialog.value?.onResetAll;
     if (typeof onResetAll === "function") {
-      onResetAll()
+      onResetAll();
     }
   } catch (e) {
-    console.error("Modal resetAll error:", e)
+    console.error("Modal resetAll error:", e);
   }
 }
 
 function handleTabChange(key) {
   try {
-    dialogManager.setActiveTab(key)
+    dialogManager.setActiveTab(key);
   } catch (e) {
-    console.error("Tab change error:", e)
+    console.error("Tab change error:", e);
   }
 }
 
-// ===== 核心修复：监听弹窗状态，管理作用域 =====
+// 弹窗打开/关闭时管理快捷键作用域
 watch(activeDialog, (newDialog, oldDialog) => {
-  // 弹窗打开
   if (newDialog && !oldDialog) {
-    pushDialogScope({ 
-      hotkeys, 
-      scope: "modal:settings"  // ← 固定作用域（所有设置弹窗共用）
+    pushDialogScope({
+      hotkeys,
+      scope: "modal:settings",
     });
   }
-
-  // 弹窗关闭
   if (!newDialog && oldDialog) {
-    popDialogScope({ 
-      hotkeys, 
-      scope: "modal:settings" 
+    popDialogScope({
+      hotkeys,
+      scope: "modal:settings",
     });
   }
 });
 
 onMounted(async () => {
-  // ===== 核心修复：委托给专门的注册器 =====
-  registerGlobalHandlers({ 
-    hotkeys, 
-    dialogManager, 
-    vm, 
-    renderHub 
-  });
-  
-  registerModalSettingsHandlers({ 
-    hotkeys, 
-    onClose: handleModalClose, 
-    onSave: handleModalSave 
+  registerGlobalHandlers({
+    hotkeys,
+    dialogManager,
+    vm,
+    renderHub,
   });
 
-  const alive = await waitBackendAlive({ intervalMs: 200 })
-  backendReady.value = !!alive
-  
-  if (backendReady.value) {
-    console.log('[App] 🚀 后端就绪，启动应用')
-    
-    const { connect, connected } = useEventStream()
-    connect()
-    
-    console.log('[App] ⏳ 等待SSE连接...')
-    let retries = 0
-    while (!connected.value && retries < 50) {
-      await new Promise(r => setTimeout(r, 100))
-      retries++
-    }
-    
-    if (!connected.value) {
-      console.error('[App] ❌ SSE连接超时')
-      alert('无法建立实时连接，请刷新页面')
-      return
-    }
-    
-    console.log('[App] ✅ SSE已连接')
-    
-    await ensureIndexFresh(false)
-    
-    const wl = useWatchlist()
-    await wl.smartLoad()
-    
-    vm.reload({ force: true })
-    
-    ensureIndexFresh(true)
-    
-    console.log('[App] ✅ 应用启动完成')
+  registerModalSettingsHandlers({
+    hotkeys,
+    onClose: handleModalClose,
+    onSave: handleModalSave,
+  });
+
+  const alive = await waitBackendAlive({ intervalMs: 200 });
+  backendReady.value = !!alive;
+
+  if (!backendReady.value) {
+    return;
   }
-})
+
+  console.log(`${nowTs()} [App] backend-ready, start-app`);
+
+  // 建立 SSE 连接
+  const { connect, connected } = useEventStream();
+  connect();
+
+  console.log(`${nowTs()} [App] waiting-sse-connection`);
+  let retries = 0;
+  while (!connected.value && retries < 50) {
+    await new Promise((r) => setTimeout(r, 100));
+    retries++;
+  }
+
+  if (!connected.value) {
+    console.error(`${nowTs()} [App] sse-timeout`);
+    alert("无法建立实时连接，请刷新页面");
+    return;
+  }
+
+  console.log(`${nowTs()} [App] sse-connected`);
+
+  // ===== 启动被动任务指令集 =====
+
+  // 1) 交易日历：仅由前端声明，后端不再自发
+  try {
+    const t = await declareTradeCalendar({ force_fetch: false });
+    const tid = t?.task_id ? String(t.task_id) : null;
+    if (tid) {
+      await waitTasksDone({ taskIds: [tid], timeoutMs: 60000 });
+    }
+    console.log(`${nowTs()} [App] trade_calendar-ready`);
+  } catch (e) {
+    console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
+    // 日历失败不阻断 UI，但后端缺口判断可能退化
+  }
+
+  // 2) 当前标的行情（K+因子+档案）
+  await vm.reload({ force_refresh: false, with_profile: true });
+
+  // 3) 标的索引：
+  //    3.1) 先读现有快照；若失败退回缓存/内置。
+  await ensureIndexFresh(false);
+
+  //    3.2) 再声明 symbol_index 任务（缺口判断），完成后再读一次快照。
+  try {
+    const t = await declareSymbolIndex({ force_fetch: false });
+    const tid = t?.task_id ? String(t.task_id) : null;
+    if (tid) {
+      await waitTasksDone({ taskIds: [tid], timeoutMs: 60000 });
+      await ensureIndexFresh(false);
+    }
+    console.log(`${nowTs()} [App] symbol_index-ready`);
+  } catch (e) {
+    console.error(`${nowTs()} [App] symbol_index-init-failed`, e);
+  }
+
+  // 4) 自选列表（全量快照）
+  const wl = useWatchlist();
+  await wl.smartLoad();
+
+  console.log(`${nowTs()} [App] app-started`);
+});
 
 onBeforeUnmount(() => {
-  // ===== 核心修复：委托给专门的注销器 =====
   unregisterAllHandlers({ hotkeys });
 });
 
@@ -214,7 +262,6 @@ if (import.meta.env.DEV) {
 </script>
 
 <style scoped>
-/* 样式保持不变 */
 .loading-screen {
   display: flex;
   flex-direction: column;
@@ -233,7 +280,9 @@ if (import.meta.env.DEV) {
   animation: spin 1s linear infinite;
 }
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .text {
   margin-top: 16px;

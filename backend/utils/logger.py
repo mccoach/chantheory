@@ -31,6 +31,86 @@ import itertools  # 自增计数器
 # 项目内
 from backend.settings import settings  # 全局配置（含日志配置）
 
+class TimestampRotatingFileHandler(RotatingFileHandler):
+    """
+    自定义滚动文件处理器：
+      - 按大小滚动（沿用 RotatingFileHandler 的 maxBytes / backupCount 逻辑）
+      - 滚动时重命名规则：
+          base:  /path/to/chan-theory.log
+          归档:  /path/to/chan-theory_YYYYMMDD_HHMMSS.log
+      - 保留原始扩展名 .log 不变
+      - 只保留最近 backupCount 个归档文件（按修改时间排序，旧的删掉）
+    """
+
+    def doRollover(self):
+        # 先关闭当前文件句柄
+        if self.stream:
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+
+        # 如果当前文件不存在（极端情况），直接返回
+        if not os.path.exists(self.baseFilename):
+            return
+
+        # 计算带时间戳的新文件名
+        base, ext = os.path.splitext(self.baseFilename)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dfn = f"{base}_{timestamp}{ext}"
+
+        # 如目标名已存在，先删掉
+        try:
+            if os.path.exists(dfn):
+                os.remove(dfn)
+        except Exception:
+            # 删除失败不应阻止后续重命名
+            pass
+
+        # 将当前日志文件重命名为带时间戳的归档文件
+        try:
+            os.rename(self.baseFilename, dfn)
+        except Exception:
+            # 重命名失败直接返回，避免影响后续写入
+            return
+
+        # 清理多余的旧归档，只保留最近 backupCount 个
+        try:
+            if self.backupCount > 0:
+                base_dir = os.path.dirname(self.baseFilename)
+                base_name = os.path.basename(base)
+                # 匹配形如 chan-theory_*.log 的文件
+                pattern_prefix = os.path.join(base_dir, f"{base_name}_")
+                candidates = []
+                for name in os.listdir(base_dir or "."):
+                    full_path = os.path.join(base_dir, name)
+                    if name.startswith(f"{base_name}_") and name.endswith(ext):
+                        try:
+                            mtime = os.path.getmtime(full_path)
+                        except OSError:
+                            mtime = 0
+                        candidates.append((mtime, full_path))
+                # 按修改时间从新到旧排序
+                candidates.sort(reverse=True)
+                # 保留最新的 backupCount 个，其余删除
+                for _, path in candidates[self.backupCount:]:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        # 删除失败不影响整体功能
+                        pass
+        except Exception:
+            # 清理过程出现任何问题都不影响主流程
+            pass
+
+        # 重新打开一个新文件，以 baseFilename 继续写
+        self.mode = "a"
+        try:
+            self.stream = self._open()
+        except Exception:
+            self.stream = None
+
 # -----------------------
 # 模块级常量与状态
 # -----------------------
@@ -87,7 +167,7 @@ def init_logger() -> None:
     root = logging.getLogger()  # 获取根
     root.setLevel(_level_from_str(settings.log_level))  # 设置全局级别
     # 滚动文件处理器
-    handler = RotatingFileHandler(
+    handler = TimestampRotatingFileHandler(
         filename=str(settings.log_file),  # 日志路径
         maxBytes=int(settings.log_max_bytes),  # 单文件最大字节数
         backupCount=int(settings.log_backup_count),  # 备份份数

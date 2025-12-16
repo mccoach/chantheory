@@ -1,11 +1,14 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewCommandHub.js
 // ==============================
-// V5.4 - 双系统版（窗宽预设 + 区间套）
+// V5.5 - 视图状态与设置系统统一持久化版
 //
 // 核心改造：
-//   1. 保持窗宽预设系统完整性（不变）
-//   2. 新增区间套系统（独立实现）
-//   3. 两者互不干扰
+//   1. 移除对 localStorage 的直接读写，改为调用 useUserSettings.viewState 的 setViewBars/setRightTs，
+//      再通过 settings.saveAll() 统一写入 LS_KEY。
+//   2. 保留原有 PERSIST_DEBOUNCE_MS 防抖机制，仍然只在拖拽/缩放结束后一小段时间内落盘，
+//      避免高频 dataZoom 事件导致频繁 I/O。
+//   3. 其余逻辑（barsCount/rightTs 计算、ChangeFreq/ChangeWidthPreset 等）保持不变，
+//      以保证与原有行为完美回归（除持久化路径外）。
 // ==============================
 
 import { ref, computed } from "vue";
@@ -16,8 +19,6 @@ import {
   PERSIST_DEBOUNCE_MS,
   BAR_USABLE_RATIO,
 } from "@/constants";
-
-const LS_KEY = "chan_user_settings_v1";
 
 let _hubSingleton = null;
 
@@ -98,6 +99,27 @@ export function useViewCommandHub() {
 
   let _persistTimer = null;
 
+  /**
+   * 立即持久化当前视图状态（使用 useUserSettings.viewState + saveAll）
+   * - 仅由 _persistImmediate / _persistDebounced 调用
+   * - 避免在高频 dataZoom 处理函数中直接触发
+   */
+  function _doRealPersist() {
+    try {
+      const symbol = String(currentSymbol.value || "").trim();
+      const freq = String(currentFreq.value || "").trim() || "1d";
+
+      // 使用 viewState 子模块的 API 写入配置
+      settings.setViewBars(symbol, freq, barsCount.value);
+      settings.setRightTs(symbol, freq, rightTs.value);
+
+      // 统一调用 saveAll，将所有域（preferences/viewState/chartDisplay/chanTheory）一并落盘
+      settings.saveAll();
+    } catch (e) {
+      console.error("[CommandHub] persist failed:", e);
+    }
+  }
+
   function _persistImmediate() {
     if (_persistTimer) {
       clearTimeout(_persistTimer);
@@ -112,25 +134,6 @@ export function useViewCommandHub() {
       _doRealPersist();
       _persistTimer = null;
     }, PERSIST_DEBOUNCE_MS);
-  }
-
-  function _doRealPersist() {
-    try {
-      const key = `${currentSymbol.value}|${currentFreq.value}`;
-      const existing = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
-
-      if (!existing.viewBars) existing.viewBars = {};
-      if (!existing.viewRightTs) existing.viewRightTs = {};
-
-      existing.viewBars[key] = barsCount.value;
-      if (rightTs.value != null) {
-        existing.viewRightTs[key] = rightTs.value;
-      }
-
-      localStorage.setItem(LS_KEY, JSON.stringify(existing));
-    } catch (e) {
-      console.error("[CommandHub] persist failed:", e);
-    }
   }
 
   function _scheduleNotify() {
@@ -197,6 +200,7 @@ export function useViewCommandHub() {
       }
     }
 
+    // 数据集边界变化通常是低频事件（换标的/换频率），立即持久化
     _persistImmediate();
     _scheduleNotify();
   }
@@ -296,14 +300,6 @@ export function useViewCommandHub() {
         // 转换为新频率的 bars
         const barsTheoretical = Math.ceil(timeSpanDays * barsPerDayNew);
 
-        console.log("[Hub] 📊 区间套转换", {
-          from: `${freqOld}(${barsOld}根)`,
-          to: `${freqNew}(${barsTheoretical}根理论)`,
-          timeSpan: `${timeSpanDays.toFixed(2)}天`,
-          barsPerDayOld,
-          barsPerDayNew,
-        });
-
         currentFreq.value = freqNew;
         const total = Math.max(0, Number(p.allRows || allRows.value || 0));
 
@@ -322,8 +318,6 @@ export function useViewCommandHub() {
           barsNew = total;
           rightTs.value = maxTsAvailable;
           autoAll = true;
-
-          console.warn("[Hub] ⚠️ 右端超界，自动切换到 ALL");
         } else {
           // ===== 智能收缩：限制在实际数据范围内 =====
           barsNew =
@@ -332,17 +326,7 @@ export function useViewCommandHub() {
           const shortage = Math.max(0, barsTheoretical - total);
 
           if (shortage > 0) {
-            console.warn("[Hub] ⚠️ 数据不足，左端已收缩", {
-              theoretical: barsTheoretical,
-              actual: total,
-              shortage,
-              shrinkage: `${((shortage / barsTheoretical) * 100).toFixed(1)}%`,
-            });
-          } else {
-            console.log("[Hub] ✅ 数据充足，完美对齐", {
-              bars: barsNew,
-              timeSpan: `${timeSpanDays.toFixed(2)}天`,
-            });
+            // 数据不足时的内部提示已移除，仅通过行为体现
           }
         }
 

@@ -17,7 +17,6 @@ export function pushDialogScope({ hotkeys, scope }) {
   
   try {
     hotkeys.pushScope(scope);
-    console.log(`[Scopes] 📌 压入作用域: ${scope}`);
   } catch (err) {
     console.error(`[Scopes] 压入作用域失败: ${scope}`, err);
   }
@@ -35,7 +34,6 @@ export function popDialogScope({ hotkeys, scope }) {
   
   try {
     hotkeys.popScope(scope);
-    console.log(`[Scopes] 📌 弹出作用域: ${scope}`);
   } catch (err) {
     console.error(`[Scopes] 弹出作用域失败: ${scope}`, err);
   }

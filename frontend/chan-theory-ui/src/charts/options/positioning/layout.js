@@ -40,7 +40,7 @@ export function applyLayout(option, ui, { candles, freq }) {
   option.grid = {
     left: leftPx,
     right: rightPx,
-    top: 0,
+    top: ui?.topExtraPx ?? 0,
     bottom: gridBottom,
     containLabel: false,
   };
@@ -86,15 +86,8 @@ export function applyLayout(option, ui, { candles, freq }) {
   
   // ===== 诊断日志7：处理前 =====
   const yAxes = Array.isArray(option.yAxis) ? option.yAxis : [option.yAxis];
-  
-  console.log('[DIAG][layout.js] 处理 yAxis 前', {
-    输入yAxis数量: yAxes.length,
-    输入yAxis0_axisPointer: yAxes[0]?.axisPointer ? '有配置' : 'undefined',
-    输入yAxis1_axisPointer: yAxes[1]?.axisPointer ? JSON.stringify(yAxes[1].axisPointer) : 'undefined',
-    输入yAxis1_完整: yAxes[1],
-  });
 
-  option.yAxis = yAxes.map((y, index) => {
+  option.yAxis = yAxes.map((y) => {
     const processed = Object.assign({}, y || {}, {
       scale: y?.scale !== undefined ? y.scale : true,
       axisLabel: Object.assign({}, y?.axisLabel || {}, {
@@ -114,31 +107,12 @@ export function applyLayout(option, ui, { candles, freq }) {
           y?.splitLine?.lineStyle || {}
         ),
       }),
-      // ===== 核心修复：显式保留 axisPointer =====
+      // 显式保留 axisPointer
       axisPointer: y?.axisPointer,
     });
 
-    // ===== 诊断日志8：单个 yAxis 处理后 =====
-    if (index === 1) {
-      console.log('[DIAG][layout.js] yAxis[1] 处理后', {
-        原始axisPointer: y?.axisPointer ? JSON.stringify(y.axisPointer) : 'undefined',
-        处理后axisPointer: processed.axisPointer ? JSON.stringify(processed.axisPointer) : 'undefined',
-        完整配置: processed,
-      });
-    }
-
     return processed;
   });
-
-  // ===== 诊断日志9：处理后 =====
-  console.log('[DIAG][layout.js] 处理 yAxis 后', {
-    输出yAxis数量: option.yAxis?.length,
-    输出yAxis0_axisPointer: option.yAxis?.[0]?.axisPointer ? '有配置' : 'undefined',
-    输出yAxis1_axisPointer: option.yAxis?.[1]?.axisPointer ? JSON.stringify(option.yAxis[1].axisPointer) : 'undefined',
-    输出yAxis1_完整: option.yAxis?.[1],
-  });
-
-  // ===== 关键修改区域结束 =====
 
   // ===== DataZoom配置 =====
   const labelFmt = (val) => {

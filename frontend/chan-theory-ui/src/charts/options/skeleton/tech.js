@@ -15,7 +15,7 @@ export function createTechSkeleton(
   { candles, freq, tooltipFormatter },
   ui,
   yAxisLabelFormatter,
-  options = {}  // ← 新增：可选配置参数
+  options = {}  // ← 可选配置参数
 ) {
   const theme = getChartTheme();
 
@@ -24,14 +24,14 @@ export function createTechSkeleton(
       ? yAxisLabelFormatter
       : (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 });
 
-  // ===== 新增：legend 开关 =====
+  // ===== legend 开关 =====
   const showLegend = options?.showLegend ?? false;
 
   const option = {
     animation: false,
     backgroundColor: theme.backgroundColor,
     
-    // ===== 新增：legend 配置 =====
+    // ===== legend 配置 =====
     legend: showLegend ? {
       show: true,
       top: 4,
@@ -130,31 +130,17 @@ export function createTechSkeleton(
     option.tooltip.position = ui.tooltipPositioner;
   }
 
-  // ===== 诊断日志1：tech.js 创建后 =====
-  console.log('[DIAG][tech.js] 创建骨架完成', {
-    yAxis数量: option.yAxis?.length,
-    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
-    完整yAxis1: option.yAxis?.[1],
-  });
-
   const result = applyLayout(
     option,
     { 
       ...ui, 
       isMain: false, 
       leftPx: 72,
-      // ===== 新增：legend 开启时，top 增加空间 =====
+      // ===== legend 开启时，top 增加空间 =====
       topExtraPx: showLegend ? 24 : 0
     },
     { candles: Array.isArray(candles) ? candles : [], freq }
   );
-
-  // ===== 诊断日志2：tech.js 内部 applyLayout 后 =====
-  console.log('[DIAG][tech.js] applyLayout 后', {
-    yAxis数量: result.yAxis?.length,
-    yAxis1_axisPointer: JSON.stringify(result.yAxis?.[1]?.axisPointer),
-    yAxis1_完整: result.yAxis?.[1],
-  });
 
   return result;
 }

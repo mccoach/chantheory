@@ -7,6 +7,11 @@ function genTraceId() {
   return `web-${Date.now().toString(36)}-${rand}`;
 }
 
+// ISO 时间戳
+function ts() {
+  return new Date().toISOString();
+}
+
 export const api = axios.create({
   baseURL: "",
   timeout: 15000,
@@ -15,7 +20,6 @@ export const api = axios.create({
 // 请求拦截：统一注入 trace_id / signal
 api.interceptors.request.use(
   (config) => {
-    // 若上层未提供 meta.trace_id，则自动生成一个
     const tid = config?.meta?.trace_id || genTraceId();
     config.meta = config.meta || {};
     config.meta.trace_id = tid;
@@ -27,20 +31,17 @@ api.interceptors.request.use(
       config.signal = config.meta.signal;
     }
 
-    // 可选：开发时打印一次出站请求（便于对拍）
+    // 开发环境：统一、扁平的 HTTP 出站日志
     if (import.meta.env.DEV) {
+      const method = (config.method || "GET").toUpperCase();
+      const url = config.url;
+      const paramsStr =
+        config.params != null ? JSON.stringify(config.params) : "null";
+
+      // 扁平字符串，避免 Object 需要展开
       console.log(
-        `[${Date.now()}][frontend/api/client.js] request ${config.method?.toUpperCase()} ${
-          config.url
-        } trace_id=${tid}`
+        `${ts()} [HTTP][req] method=${method} url=${url} trace_id=${tid} params=${paramsStr}`
       );
-      // eslint-disable-next-line no-console
-      console.debug("[api] req", {
-        url: config.url,
-        method: config.method,
-        params: config.params,
-        headers: { "x-trace-id": tid },
-      });
     }
     return config;
   },
@@ -68,28 +69,20 @@ api.interceptors.response.use(
       ? "canceled"
       : detail?.message || err?.message || "request failed";
     const trace_id = detail?.trace_id || err?.config?.meta?.trace_id || null;
+    const status = err?.response?.status;
+    const url = err?.config?.url || "";
 
-    // 开发场景打印 trace 片段，便于快速定位（取消类错误静默不打 error）
     if (import.meta.env.DEV) {
       if (!isCanceled) {
-        // eslint-disable-next-line no-console
-        console.error("[api] err", {
-          url: err?.config?.url,
-          status: err?.response?.status,
-          code,
-          message,
-          trace_id,
-          trace: detail?.trace?.slice?.(0, 800),
-        });
+        // 扁平字符串错误日志
+        console.error(
+          `${ts()} [HTTP][err] url=${url} status=${status ?? "null"} code=${code} message=${message} trace_id=${trace_id ?? "null"}`
+        );
       } else {
-        // 取消行为仅做 debug 级别输出，避免污染控制台
-        // eslint-disable-next-line no-console
-        console.debug("[api] canceled", {
-          url: err?.config?.url,
-          code,
-          message,
-          trace_id,
-        });
+        // 取消类请求降级为 debug
+        console.debug(
+          `${ts()} [HTTP][canceled] url=${url} code=${code} message=${message} trace_id=${trace_id ?? "null"}`
+        );
       }
     }
 

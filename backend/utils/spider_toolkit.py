@@ -1,15 +1,15 @@
 # backend/utils/spider_toolkit.py
 # ==============================
-# V3.0
-# 说明：爬虫工具包（通用参数选择器 + 动态生成器）
+# V4.0
+# 说明：爬虫工具包（通用参数选择器 + 动态生成器 + JSON/JSONP 脱壳）
 # 职责：
 #   1. 从 settings 池中随机选择通用参数（UA/Language/Connection）
 #   2. 生成动态参数（JSONP 回调名/时间戳/Nonce）
 #   3. 根据 User-Agent 生成匹配的 sec-ch-ua 头
-#   4. 提供 JSONP 解析工具
-# 设计原则：
-#   - 纯函数，无状态
-#   - 不管理业务逻辑参数（Referer/sqlId 等）
+#   4. 提供 **通用的 JSON/JSONP/包裹 JSON 脱壳工具 strip_jsonp(text)**：
+#        - 忽略圆括号及 callback 名
+#        - 从左到右扫描，找到第一个“括号深度从 0 进入、再回到 0”的最外层 {} 或 []
+#        - 把这段子串当作纯 JSON 解析
 # ==============================
 
 from __future__ import annotations
@@ -22,6 +22,10 @@ from typing import Dict, Any, Optional
 
 from backend.settings import spider_config
 from backend.utils.logger import get_logger
+
+# 新增：XLSX 解析依赖（复用全局 pandas，无额外第三方）
+import pandas as pd
+from io import BytesIO
 
 _LOG = get_logger("spider_toolkit")
 
@@ -61,8 +65,7 @@ def pick_accept_language() -> str:
     """
     if spider_config.enable_header_randomization and spider_config.accept_languages:
         return random.choice(spider_config.accept_languages)
-    return spider_config.accept_languages[
-        0] if spider_config.accept_languages else "zh-CN,zh;q=0.9"
+    return spider_config.accept_languages[0] if spider_config.accept_languages else "zh-CN,zh;q=0.9"
 
 
 def pick_connection() -> str:
@@ -206,67 +209,155 @@ def generate_sec_ch_ua(user_agent: str) -> str:
 
 
 # ==============================================================================
-# JSONP 解析器
+# JSON / JSONP / 包裹 JSON 解析器（零 callback 版）
 # ==============================================================================
 
+def strip_jsonp(text: str) -> Dict[str, Any]:
+    """
+    从任意“可能带 JSONP 外壳 / 额外噪声”的响应文本中提取**首个完整 JSON 对象或数组**并解析。
 
-def strip_jsonp(text: str,
-                callback_name: Optional[str] = None) -> Dict[str, Any]:
+    设计原则：
+      1. **忽略圆括号与 callback 名**，不再依赖任何回调函数名；
+      2. 从左向右扫描，寻找第一个 '{' 或 '['，记为起点；
+      3. 以此为起点，记录括号深度：
+           - 碰到同类开括号（{ 或 [） depth += 1
+           - 碰到对应闭括号（} 或 ]） depth -= 1
+           - 进入字符串（"..."）期间忽略括号，并处理反斜杠转义；
+         当 depth 从 1 降回 0 的那个闭括号位置，即为**最外层 JSON 的结尾**；
+      4. 提取 start..end 这段子串，直接 json.loads。
+
+    适用场景：
+      - quote_jp123({...});
+      - callback&&callback({...});
+      - xxx({...})/**/;
+      - 甚至纯 JSON（直接以 { 或 [ 开头）；
+      - 只要响应中“确实存在一段合法的 JSON 对象/数组”，就一定能找到。
+
+    若：
+      - 文本中完全没有 '{' 或 '['；
+      - 或括号不成对 / 嵌套不平衡；
+      - 或提取出的子串不是合法 JSON；
+    则抛出 ValueError 交由调用方处理。
     """
-    将 JSONP 文本解析为 Python dict
-    
-    Args:
-        text: JSONP 响应文本
-        callback_name: 已知回调名（可选，提升解析速度）
-    
-    Returns:
-        Dict: 解析后的 JSON 对象
-    
-    Raises:
-        ValueError: 解析失败时
-    
-    Examples:
-        >>> data = strip_jsonp('jsonpCallback123({"ok": true})', 'jsonpCallback123')
-        >>> data['ok']
-        True
-    """
-    s = (text or "").strip()
+    s = (text or "")
     if not s:
-        raise ValueError("Empty response when stripping JSONP")
+        raise ValueError("strip_jsonp: empty response")
 
-    # 快速路径：已知回调名
-    if callback_name:
-        prefix = f"{callback_name}("
-        suffix = ");"
-        if s.startswith(prefix):
-            # 兼容两种结尾：); 或 )
-            if s.endswith(suffix):
-                json_str = s[len(prefix):-len(suffix)]
-            elif s.endswith(")"):
-                json_str = s[len(prefix):-1]
-            else:
-                json_str = s[len(prefix):]
+    # 1) 找到第一个 '{' 或 '['
+    start = None
+    open_ch = None
+    close_ch = None
 
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                pass  # 降级到标准路径
+    for i, ch in enumerate(s):
+        if ch == '{' or ch == '[':
+            start = i
+            open_ch = ch
+            close_ch = '}' if ch == '{' else ']'
+            break
 
-    # 标准路径：查找括号
+    if start is None:
+        raise ValueError("strip_jsonp: no JSON object/array found")
+
+    # 2) 从 start 起，按 JSON 语法跟踪括号深度与字符串状态
+    depth = 0
+    in_string = False
+    escape = False
+    end = None
+
+    for idx in range(start, len(s)):
+        ch = s[idx]
+
+        if in_string:
+            # 处理字符串内部
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            # 字符串内的所有括号一律忽略
+            continue
+
+        # 不在字符串中
+        if ch == '"':
+            in_string = True
+            continue
+
+        # 统计括号深度
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                end = idx
+                break
+
+    if end is None or depth != 0:
+        raise ValueError("strip_jsonp: unbalanced JSON braces/brackets")
+
+    json_str = s[start:end + 1]
+
     try:
-        l = s.index("(")
-        r = s.rfind(")")
-        if l >= 0 and r > l:
-            json_str = s[l + 1:r]
-        else:
-            json_str = s
-    except ValueError:
-        # 降级：当作纯 JSON 解析
-        _LOG.debug("[JSONP解析] 响应非标准JSONP格式，降级为纯JSON解析",
-                   extra={"response_preview": s[:200]})
-        json_str = s
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # 这里不做自动修补，由调用方决定如何处理
+        raise ValueError(f"strip_jsonp: json decode error: {e}") from e
 
-    return json.loads(json_str)
+
+# ==============================================================================
+# XLSX 解析工具（通用）
+# ==============================================================================
+
+def xlsx_bytes_to_json_records(
+    xlsx_bytes: bytes,
+    sheet: int | str = 0
+) -> list[dict[str, Any]]:
+    """
+    将 XLSX 二进制内容解析为“纯净 JSON”记录列表（通用工具）。
+
+    设计原则：
+      1. 不做业务字段命名或含义判断，仅负责结构化解析。
+      2. 统一将缺失值 / NaN 转换为 None，确保后续 json.dumps 时无 NaN。
+
+    Args:
+        xlsx_bytes: HTTP 响应体中的 XLSX 二进制内容（resp.content）。
+        sheet: 要解析的工作表，既可为索引（0 表示第一个表），也可为名称。
+
+    Returns:
+        list[dict[str, Any]]: 每一行对应一条记录，键为列名（字符串），值为基础类型或 None。
+
+    Raises:
+        Exception: 当底层解析失败（文件损坏 / 不是合法 XLSX 等）时抛出原始异常。
+    """
+    if not xlsx_bytes:
+        _LOG.warning("[XLSX解析] 输入为空字节串")
+        return []
+
+    try:
+        # 使用 pandas.read_excel 做最小职责解析
+        df = pd.read_excel(BytesIO(xlsx_bytes), sheet_name=sheet, dtype=object)
+    except Exception as e:
+        _LOG.error(
+            "[XLSX解析] 读取失败",
+            extra={"error": str(e)},
+        )
+        # 直接抛出，让调用方感知失败并记录更上层日志
+        raise
+
+    # 将 NaN / NaT 等缺失值统一转换为 None，保证后续 JSON 纯净
+    df = df.where(pd.notna(df), None)
+
+    records: list[dict[str, Any]] = df.to_dict(orient="records")
+
+    _LOG.debug(
+        "[XLSX解析] 解析成功",
+        extra={
+            "rows": len(records),
+            "columns": list(df.columns),
+        },
+    )
+
+    return records
 
 
 # ==============================================================================

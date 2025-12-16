@@ -20,13 +20,10 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
     return;
   }
 
-  console.log('[Handlers] 🎹 注册全局快捷键处理器...');
-
   // ===== global 作用域 =====
   hotkeys.registerHandlers("global", {
     // 打开快捷键设置（Ctrl+, 或 F1）
     openHotkeySettings: async () => {
-      console.log('[Hotkey] 触发：打开快捷键设置');
       try {
         const mod = await import('@/components/ui/HotkeySettingsDialog.vue');
         dialogManager.open({
@@ -39,7 +36,6 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
     },
 
     openHotkeyHelp: async () => {
-      console.log('[Hotkey] 触发：打开帮助');
       try {
         const mod = await import('@/components/ui/HotkeySettingsDialog.vue');
         dialogManager.open({
@@ -52,10 +48,10 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
     },
 
     // 刷新数据（Alt+R）
+    // 按照统一指令集：刷新 = K线 + 因子 + 档案（force_fetch=true）
     refresh: () => {
-      console.log('[Hotkey] 触发：刷新数据');
       try {
-        vm?.reload?.({ force_refresh: true });
+        vm?.reload?.({ force_refresh: true, with_profile: true });
       } catch (err) {
         console.error('[Hotkey] 刷新失败', err);
       }
@@ -63,7 +59,6 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
 
     // 十字线左移（ArrowLeft）
     cursorLeft: () => {
-      console.log('[Hotkey] 触发：光标左移');
       try {
         renderHub?.moveCursorByStep?.(-1);
       } catch (err) {
@@ -73,7 +68,6 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
 
     // 十字线右移（ArrowRight）
     cursorRight: () => {
-      console.log('[Hotkey] 触发：光标右移');
       try {
         renderHub?.moveCursorByStep?.(1);
       } catch (err) {
@@ -81,8 +75,6 @@ export function registerGlobalHandlers({ hotkeys, dialogManager, vm, renderHub }
       }
     },
   });
-
-  console.log('[Handlers] ✅ global 作用域已注册');
 }
 
 /**
@@ -99,12 +91,9 @@ export function registerModalSettingsHandlers({ hotkeys, onClose, onSave }) {
     return;
   }
 
-  console.log('[Handlers] 🎹 注册 modal:settings 处理器...');
-
   hotkeys.registerHandlers("modal:settings", {
     // 关闭设置（Esc）
     closeSettings: () => {
-      console.log('[Hotkey] 触发：关闭设置');
       try {
         onClose?.();
       } catch (err) {
@@ -114,7 +103,6 @@ export function registerModalSettingsHandlers({ hotkeys, onClose, onSave }) {
 
     // 保存设置（Ctrl+Enter）
     saveSettings: () => {
-      console.log('[Hotkey] 触发：保存设置');
       try {
         onSave?.();
       } catch (err) {
@@ -122,8 +110,6 @@ export function registerModalSettingsHandlers({ hotkeys, onClose, onSave }) {
       }
     },
   });
-
-  console.log('[Handlers] ✅ modal:settings 作用域已注册');
 }
 
 /**
@@ -134,13 +120,10 @@ export function registerModalSettingsHandlers({ hotkeys, onClose, onSave }) {
  */
 export function unregisterAllHandlers({ hotkeys }) {
   if (!hotkeys) return;
-
-  console.log('[Handlers] 🗑️ 注销所有处理器...');
   
   try {
     hotkeys.unregisterHandlers("global");
     hotkeys.unregisterHandlers("modal:settings");
-    console.log('[Handlers] ✅ 所有处理器已注销');
   } catch (err) {
     console.error('[Handlers] 注销失败', err);
   }

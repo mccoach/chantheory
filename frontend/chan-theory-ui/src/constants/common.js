@@ -5,7 +5,6 @@
 // 设计：按用途分组，每个常量都有详细注释
 // V3.2 改动：
 //   1. 删除 DEFAULT_EXPORT_SETTINGS（死代码）
-//   2. presetToBars 添加诊断日志
 // ==============================
 
 // ===== 基础调色板（所有图表共用）=====
@@ -290,22 +289,6 @@ export function presetToBars(freq, preset, totalBars) {
     bars = Math.ceil(daysOf(preset));
   }
 
-  // ===== 诊断日志（生产环境可删除）=====
-  if (import.meta.env.DEV) {
-    console.log('[presetToBars] 计算过程', {
-      freq: freqStr,
-      preset,
-      totalBars: n,
-      isMinute,
-      isDaily,
-      isWeekly,
-      isMonthly,
-      days: isMinute ? daysOf(preset) : null,
-      barsPerDay: isMinute ? minuteBarsPerDay(freqStr) : null,
-      calculated: bars,
-    });
-  }
-
   bars = Math.max(1, Math.floor(bars || 0));
   if (n > 0) bars = Math.min(bars, n);
   return bars;
@@ -344,17 +327,6 @@ export function pickPresetByBarsCountDown(freq, barsCount, totalBars) {
   for (const c of candidates) {
     if (c.v <= target) chosen = c;
     else break;
-  }
-  
-  // ===== 诊断日志 =====
-  if (import.meta.env.DEV) {
-    console.log('[pickPresetByBarsCountDown] 反推结果', {
-      freq,
-      barsCount: target,
-      totalBars: n,
-      candidates: candidates.map(c => `${c.p}=${c.v}`),
-      chosen: chosen.p,
-    });
   }
   
   return chosen.p;

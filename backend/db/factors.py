@@ -86,7 +86,8 @@ def upsert_factors(records: List[Dict[str, Any]]) -> int:
     now = datetime.now().isoformat()
     
     for rec in clean_records:
-        rec['updated_at'] = rec.get('updated_at', now)
+        # 无条件覆盖为 now
+        rec["updated_at"] = now
     
     sql = """
     INSERT INTO adj_factors (symbol, date, qfq_factor, hfq_factor, updated_at)

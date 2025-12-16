@@ -1,12 +1,13 @@
 # backend/db/async_writer.py
 # ==============================
-# 异步数据库写入队列（V2.0 - 因子压缩版）
+# 异步数据库写入队列（V2.1 - 因子压缩 + candles.adjust 版）
 # 设计目标：
 #   1. 单线程写入（彻底避免锁冲突）
 #   2. 批量提交（减少fsync次数，提升性能）
 #   3. 自动合并（相同键的记录自动去重）
 #   4. 优雅关闭（确保数据落盘）
-#   5. NEW：复权因子写入前自动压缩（仅保留数值变化的日期）
+#   5. 复权因子写入前自动压缩（仅保留数值变化的日期）
+#   6. NEW：K线写入支持 adjust 维度（'none'/'qfq'/'hfq'），主键为 (symbol,freq,ts,adjust)
 # ==============================
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Dict, List, Any
 from datetime import datetime
 
 from backend.db.connection import get_conn
-from backend.db.factors import compress_factor_records  # 新增：因子压缩工具
+from backend.db.factors import compress_factor_records  # 因子压缩工具
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("async_writer")
@@ -127,11 +128,24 @@ class AsyncDBWriter:
             try:
                 # 等待新任务（超时0.1秒后检查是否需要刷新）
                 try:
-                    table, records = await asyncio.wait_for(
+                    table, payload = await asyncio.wait_for(
                         self.queue.get(),
                         timeout=0.1
                     )
-                    
+
+                    # 特殊任务：flush 标记
+                    if table == '__flush__':
+                        future = payload
+                        try:
+                            await self._flush_all()
+                        finally:
+                            # 无论 flush 是否异常，都要唤醒等待者，避免死锁
+                            if future is not None and not future.done():
+                                future.set_result(True)
+                        continue
+
+                    records = payload
+
                     # 加入对应缓冲区
                     if table == 'candles':
                         self.candles_buffer.extend(records)
@@ -189,6 +203,26 @@ class AsyncDBWriter:
             self.factors_buffer.clear()
             self.profiles_buffer.clear()
     
+    async def flush(self):
+        """
+        等待当前队列与缓冲区全部写入数据库。
+
+        行为：
+          - 仅在 self.running=True 时有效；未启动时直接返回；
+          - 向内部队列投递一个 '__flush__' 标记，并等待其完成；
+          - flush 完成时，确保：
+              * 所有在 flush 调用之前排入队列的写入任务均已被处理；
+              * 缓冲区数据已通过 _do_batch_write() 提交（commit）。
+        """
+        if not self.running:
+            # 写入器未运行时，无待写入任务，直接返回
+            return
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        await self.queue.put(('__flush__', fut))
+        await fut
+    
     def _do_batch_write(self):
         """
         执行批量写入（同步方法，运行在独立线程）
@@ -196,29 +230,56 @@ class AsyncDBWriter:
         设计要点：
           - 单次数据库连接
           - 单次事务提交
-          - 自动去重（K线按 symbol+freq+ts，因子按 symbol+date）
-          - NEW：因子写入前统一压缩，只保留数值变化的日期
+          - 自动去重（K线按 symbol+freq+ts+adjust，因子按 symbol+date）
+          - 因子写入前统一压缩，只保留数值变化的记录
         """
         conn = get_conn()
         cur = conn.cursor()
         
         try:
-            # ===== 1. 写K线（自动去重）=====
+            # ===== 1. 写K线（自动去重，带 adjust）=====
             if self.candles_buffer:
                 unique_candles: Dict[tuple, Dict[str, Any]] = {}
+                now_iso = datetime.now().isoformat()
                 for rec in self.candles_buffer:
-                    key = (rec['symbol'], rec['freq'], rec['ts'])
-                    unique_candles[key] = rec
+                    r = dict(rec)
+
+                    # adjust：缺失或为空都视为 'none'
+                    if not r.get("adjust"):
+                        r["adjust"] = "none"
+
+                    # updated_at：无条件覆盖为本次写入时间
+                    # 语义：这条记录“当前这次被写入/更新”的时间戳
+                    r["updated_at"] = now_iso
+
+                    key = (r["symbol"], r["freq"], r["ts"], r["adjust"])
+                    unique_candles[key] = r
                 
                 candles_list = list(unique_candles.values())
                 
                 sql_k = """
-                INSERT INTO candles_raw (symbol, freq, ts, open, high, low, close, volume, amount, turnover_rate, source, fetched_at)
-                VALUES (:symbol, :freq, :ts, :open, :high, :low, :close, :volume, :amount, :turnover_rate, :source, :fetched_at)
-                ON CONFLICT(symbol, freq, ts) DO UPDATE SET
-                    open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
-                    volume=excluded.volume, amount=excluded.amount, turnover_rate=excluded.turnover_rate,
-                    source=excluded.source, fetched_at=excluded.fetched_at;
+                INSERT INTO candles_raw (
+                    symbol, freq, ts,
+                    open, high, low, close,
+                    volume, amount, turnover_rate,
+                    source, updated_at, adjust
+                )
+                VALUES (
+                    :symbol, :freq, :ts,
+                    :open, :high, :low, :close,
+                    :volume, :amount, :turnover_rate,
+                    :source, :updated_at, :adjust
+                )
+                ON CONFLICT(symbol, freq, ts, adjust) DO UPDATE SET
+                    open=excluded.open,
+                    high=excluded.high,
+                    low=excluded.low,
+                    close=excluded.close,
+                    volume=excluded.volume,
+                    amount=excluded.amount,
+                    turnover_rate=excluded.turnover_rate,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at;
                 """
                 
                 cur.executemany(sql_k, candles_list)
@@ -244,7 +305,8 @@ class AsyncDBWriter:
                 if compressed_list:
                     now = datetime.now().isoformat()
                     for rec in compressed_list:
-                        rec['updated_at'] = rec.get('updated_at', now)
+                        # 无条件覆盖为 now
+                        rec["updated_at"] = now
                     
                     sql_f = """
                     INSERT INTO adj_factors (symbol, date, qfq_factor, hfq_factor, updated_at)
@@ -270,18 +332,45 @@ class AsyncDBWriter:
             if self.profiles_buffer:
                 unique_profiles: Dict[str, Dict[str, Any]] = {}
                 for rec in self.profiles_buffer:
-                    key = rec['symbol']
-                    unique_profiles[key] = rec
+                    r = dict(rec)
+                    # updated_at：无条件覆盖为本次写入时间
+                    r["updated_at"] = datetime.now().isoformat()
+                    key = r["symbol"]
+                    unique_profiles[key] = r
                 
                 profiles_list = list(unique_profiles.values())
                 
                 sql_p = """
-                INSERT INTO symbol_profile (symbol, listing_date, total_shares, float_shares, industry, region, concepts, updated_at)
-                VALUES (:symbol, :listing_date, :total_shares, :float_shares, :industry, :region, :concepts, :updated_at)
+                INSERT INTO symbol_profile (
+                    symbol,
+                    total_shares,
+                    float_shares,
+                    total_value,
+                    nego_value,
+                    pe_static,
+                    industry,
+                    region,
+                    concepts,
+                    updated_at
+                )
+                VALUES (
+                    :symbol,
+                    :total_shares,
+                    :float_shares,
+                    :total_value,
+                    :nego_value,
+                    :pe_static,
+                    :industry,
+                    :region,
+                    :concepts,
+                    :updated_at
+                )
                 ON CONFLICT(symbol) DO UPDATE SET
-                    listing_date=COALESCE(excluded.listing_date, symbol_profile.listing_date),
                     total_shares=COALESCE(excluded.total_shares, symbol_profile.total_shares),
                     float_shares=COALESCE(excluded.float_shares, symbol_profile.float_shares),
+                    total_value=COALESCE(excluded.total_value, symbol_profile.total_value),
+                    nego_value=COALESCE(excluded.nego_value, symbol_profile.nego_value),
+                    pe_static=COALESCE(excluded.pe_static, symbol_profile.pe_static),
                     industry=COALESCE(excluded.industry, symbol_profile.industry),
                     region=COALESCE(excluded.region, symbol_profile.region),
                     concepts=COALESCE(excluded.concepts, symbol_profile.concepts),

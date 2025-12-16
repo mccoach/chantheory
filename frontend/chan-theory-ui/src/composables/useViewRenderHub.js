@@ -62,7 +62,7 @@ export function useViewRenderHub() {
   const _batchFlag = ref(false); // 批处理模式标志
   const _pendingCompute = ref(false); // 待处理计算标志
 
-  // ===== 新增：标记宽度缓存（用于检测变化）=====
+  // ===== 标记宽度缓存（用于检测变化）=====
   const _lastMarkerWidth = ref(8); // 默认值与 hub 初始值一致
 
   const tipMode = ref("follow");
@@ -111,7 +111,7 @@ function setHoveredPanel(panelKey) {
     return _charts.get(String(_activePanelKey.value)) || null;
   }
 
-  // ===== 新增：根据当前悬浮窗体切换各图的 axisPointer 模式 =====
+  // 根据当前悬浮窗体切换各图的 axisPointer 模式
   function _updateAxisPointerModes() {
     const hovered = _hoveredPanelKey.value;
 
@@ -172,9 +172,7 @@ function setHoveredPanel(panelKey) {
         }
 
         chartInstance.setOption(partial, false);
-      } catch (e) {
-        console.error("[RenderHub] 更新 axisPointer 模式失败:", panelKey, e);
-      }
+      } catch {}
     });
   }
 
@@ -469,7 +467,6 @@ function setHoveredPanel(panelKey) {
 
     const buildMain = await chartBuilderRegistry.get("MAIN");
     if (!buildMain) {
-      console.error("[RenderHub] ❌ Main chart builder not found");
       return { series: [] };
     }
 
@@ -523,7 +520,6 @@ function setHoveredPanel(panelKey) {
 
     const builder = await chartBuilderRegistry.get(key);
     if (!builder) {
-      console.error(`[RenderHub] ❌ No builder for indicator '${kind}'`);
       return null;
     }
 
@@ -579,24 +575,9 @@ function setHoveredPanel(panelKey) {
         });
 
         if (option) {
-          // ===== 诊断日志10：最终渲染前 =====
-          if (pane.kind === "VOL" || pane.kind === "AMOUNT") {
-            console.log("[DIAG][renderHub] 量窗最终option", {
-              kind: pane.kind,
-              paneId: pane.id,
-              yAxis数量: option.yAxis?.length,
-              yAxis1_axisPointer: JSON.stringify(
-                option.yAxis?.[1]?.axisPointer
-              ),
-              yAxis1_完整: option.yAxis?.[1],
-            });
-          }
-
           indicatorOptions[pane.id] = option;
         }
-      } catch (e) {
-        console.error(`[RenderHub] ❌ Failed to build ${pane.kind}`, e);
-      }
+      } catch {}
     }
 
     return indicatorOptions;

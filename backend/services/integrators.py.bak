@@ -1,0 +1,125 @@
+# backend/services/integrators.py
+# ==============================
+# 说明: 复合数据集成器 (The Integrator - 全异步版)
+# - 职责: 编排 `dispatcher` 和 `normalizer` 以完成复杂数据任务。
+# - 本版：日K + Baostock 一次性前/后复权因子。
+# ==============================
+
+from __future__ import annotations
+import asyncio
+from typing import Dict, Any, Optional
+import pandas as pd
+
+from backend.datasource import dispatcher
+from backend.datasource.providers import baostock_adapter as bs_adapter
+from backend.services import normalizer
+from backend.utils.logger import get_logger, log_event
+
+_LOG = get_logger("services.integrator")
+
+
+async def get_daily_bars_with_factors(
+    symbol: str,
+    start_date: str,  # 'YYYYMMDD'
+    end_date: str  # 'YYYYMMDD'
+) -> Optional[Dict[str, pd.DataFrame]]:
+    """
+    获取A股的标准化日线数据及标准化的复权因子。
+
+    当前设计：
+      - K线：通过 dispatcher.fetch('stock_bars') + normalize_bars_df；
+      - 因子：通过 Baostock 一次性拉取原始前/后复权因子，再用
+              normalize_baostock_adj_factors_df 标准化为
+              ['date', 'qfq_factor', 'hfq_factor']，并对齐到 K 线日期。
+    """
+    log_event(logger=_LOG,
+              service="integrator",
+              level="INFO",
+              event="integrate.start",
+              message=f"Integrating daily bars and factors for {symbol}",
+              extra={
+                  "symbol": symbol,
+                  "start": start_date,
+                  "end": end_date
+              },
+              file=__file__,
+              func="get_daily_bars_with_factors",
+              line=0,
+              trace_id=None)
+
+    # --- 1. 拉 K 线 ---
+    bars_raw, bars_source_id = await dispatcher.fetch(
+        'stock_bars',
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        period='daily',
+        adjust='',
+    )
+
+    df_bars = normalizer.normalize_bars_df(bars_raw, bars_source_id)
+    if df_bars is None or df_bars.empty:
+        log_event(logger=_LOG,
+                  service="integrator",
+                  level="ERROR",
+                  event="integrate.fail",
+                  message=f"Failed to get or normalize bars for {symbol}",
+                  extra={"symbol": symbol},
+                  file=__file__,
+                  func="get_daily_bars_with_factors",
+                  line=0,
+                  trace_id=None)
+        return None
+
+    # --- 2. 拉 Baostock 因子（一次性前/后复权） ---
+    start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+    end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+    raw_factors = await bs_adapter.get_raw_adj_factors_bs(
+        symbol=symbol,
+        start_date=start_str,
+        end_date=end_str,
+    )
+    df_factors_core = normalizer.normalize_baostock_adj_factors_df(raw_factors)
+
+    if df_factors_core is None or df_factors_core.empty:
+        # 因子缺失不阻塞主流程，返回空因子表
+        empty_factors = pd.DataFrame(
+            columns=['symbol', 'date', 'qfq_factor', 'hfq_factor'])
+        return {'bars': df_bars, 'factors': empty_factors}
+
+    # --- 3. 将因子扩展到全部 K 线日期，并填充缺口 ---
+    all_dates = pd.to_datetime(
+        df_bars['ts'], unit='ms').dt.strftime('%Y%m%d').astype(int).unique()
+    date_range_df = pd.DataFrame({'date': sorted(all_dates)})
+
+    df_factors = pd.merge(date_range_df,
+                          df_factors_core,
+                          on='date',
+                          how='left')
+
+    # 前向填充/反向填充，缺失用 1.0 填补
+    df_factors['qfq_factor'] = df_factors['qfq_factor'].ffill().bfill().fillna(
+        1.0)
+    df_factors['hfq_factor'] = df_factors['hfq_factor'].ffill().bfill().fillna(
+        1.0)
+    df_factors['symbol'] = symbol
+
+    log_event(logger=_LOG,
+              service="integrator",
+              level="INFO",
+              event="integrate.success",
+              message=f"Successfully integrated data for {symbol}",
+              extra={
+                  "symbol": symbol,
+                  "bars_rows": len(df_bars),
+                  "factor_rows": len(df_factors),
+              },
+              file=__file__,
+              func="get_daily_bars_with_factors",
+              line=0,
+              trace_id=None)
+
+    return {
+        'bars': df_bars,
+        'factors': df_factors[['symbol', 'date', 'qfq_factor', 'hfq_factor']]
+    }

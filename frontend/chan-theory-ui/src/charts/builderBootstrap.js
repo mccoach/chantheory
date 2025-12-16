@@ -54,6 +54,4 @@ export function bootstrapChartBuilders() {
   chartBuilderRegistry.registerLazy('BOLL', () => 
     import('./options/builders/boll').then(m => m.buildBollOption)
   );
-
-  console.log('[Bootstrap] 📊 图表构造器已注册:', chartBuilderRegistry.listKinds());
 }

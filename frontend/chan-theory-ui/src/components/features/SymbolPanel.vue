@@ -1,6 +1,12 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V7.0 - 显示档案信息 -->
+<!-- V9.0 - 档案完全改用 /api/profile/current（经 useMarketView 注入）
+     
+     变更要点：
+       - 档案展示 info-line-2 现在仅依赖 vm.profile.value（来自 useMarketView.reload 内的 current_profile + /api/profile/current）。
+       - 不再从 useSymbolIndex.findBySymbol 中解析档案字段。
+       - 改标的代码时只更新 vm.code，真正的数据加载统一由 useMarketView.watch(code) 触发（包含 K+因子+档案）。
+-->
 <template>
   <div class="symbol-row">
     <!-- 左列：标的输入与自选 -->
@@ -49,16 +55,22 @@
         <span class="sym-code">（{{ middleCode }}）</span>
       </div>
 
-      <!-- 第2行：档案信息（单行）-->
+      <!-- 第2行：档案信息（完全来自 vm.profile）-->
       <div class="info-line-2" v-if="hasProfileInfo">
         <span v-if="profileInfo.totalShares" class="info-item">
           总股本：{{ formatShares(profileInfo.totalShares) }}
         </span>
         <span v-if="profileInfo.floatShares" class="info-item">
-          流通：{{ formatShares(profileInfo.floatShares) }}
+          流通股：{{ formatShares(profileInfo.floatShares) }}
         </span>
-        <span v-if="profileInfo.listingDate" class="info-item">
-          上市：{{ formatDate(profileInfo.listingDate) }}
+        <span v-if="profileInfo.totalValue" class="info-item">
+          总市值：{{ formatShares(profileInfo.totalValue) }}
+        </span>
+        <span v-if="profileInfo.negoValue" class="info-item">
+          流通市值：{{ formatShares(profileInfo.negoValue) }}
+        </span>
+        <span v-if="profileInfo.peStatic" class="info-item">
+          静态PE：{{ formatPe(profileInfo.peStatic) }}
         </span>
         <span v-if="profileInfo.industry" class="info-item">
           行业：{{ profileInfo.industry }}
@@ -69,6 +81,9 @@
         <span v-if="profileInfo.concepts.length > 0" class="info-item">
           概念：{{ profileInfo.concepts.slice(0, 3).join("、")
           }}{{ profileInfo.concepts.length > 3 ? "..." : "" }}
+        </span>
+        <span v-if="profileInfo.updatedAt" class="info-item">
+          档案更新：{{ formatUpdatedAt(profileInfo.updatedAt) }}
         </span>
       </div>
     </div>
@@ -83,13 +98,18 @@
 </template>
 
 <script setup>
-import { inject, ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import {
+  inject,
+  ref,
+  computed,
+  onMounted,
+  onBeforeUnmount,
+  watch,
+} from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useEventStream } from "@/composables/useEventStream";
-import { api } from "@/api/client";
 
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
@@ -98,10 +118,9 @@ import SymbolActions from "./symbol/SymbolActions.vue";
 const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);
 const settings = useUserSettings();
-const { ready, search, findBySymbol } = useSymbolIndex();
+const { ready, search, findBySymbol, ensureIndexFresh } = useSymbolIndex();
 const hub = useViewCommandHub();
 const wl = useWatchlist();
-const eventStream = useEventStream();
 
 const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
 const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
@@ -145,15 +164,13 @@ async function selectItem(item) {
   );
 
   inputText.value = sym;
-  vm.code.value = sym;
+  vm.code.value = sym;               // 只改 code，任务触发统一交给 useMarketView.watch(code)
   settings.setLastSymbol(sym);
   settings.addSymbolHistoryEntry(sym);
 
   invalidHint.value = "";
   suggestions.value = [];
   isInputFocused.value = false;
-
-  vm.reload({ force_refresh: false });
 }
 
 function tryCommitByInput() {
@@ -189,7 +206,7 @@ async function toggleStarImmediate(item) {
 function onRefreshClick() {
   console.log("[SymbolPanel] 🔄 强制刷新当前标的");
   hub.execute("Refresh", {});
-  vm.reload?.({ force_refresh: true });
+  vm.reload?.({ force_refresh: true, with_profile: true });
 }
 
 async function forceRefreshSymbols() {
@@ -200,16 +217,14 @@ async function forceRefreshSymbols() {
   try {
     console.log("[SymbolPanel] 🔄 强制刷新标的列表...");
 
-    const { data } = await api.post("/api/symbols/refresh-force", null, {
-      timeout: 60000,
-    });
+    // 使用 ensureIndexFresh(true) 触发 symbol_index 任务并读取最新快照
+    await ensureIndexFresh(true);
 
-    console.log("[SymbolPanel] ✅ 强制刷新触发成功", data);
-
-    await new Promise((r) => setTimeout(r, 800));
+    console.log("[SymbolPanel] ✅ 标的列表刷新完成");
   } catch (e) {
     console.error("[SymbolPanel] ❌ 强制刷新失败", e);
     alert(`标的列表刷新失败：${e.message || "网络错误"}`);
+  } finally {
     refreshing.value = false;
   }
 }
@@ -232,12 +247,6 @@ onMounted(() => {
   registerPanelHotkeys();
   wl.refresh().catch(() => {});
   document.addEventListener("click", onDocClick);
-
-  eventStream.subscribe("symbol_index_ready", () => {
-    if (refreshing.value) {
-      refreshing.value = false;
-    }
-  });
 });
 
 onBeforeUnmount(() => {
@@ -344,41 +353,50 @@ const middleTitle = computed(() =>
     : middleCode.value || ""
 );
 
-// ===== 新增：档案信息 =====
+// ===== 档案信息（仅 vm.profile，来自 /api/profile/current）=====
 const profileInfo = computed(() => {
-  const sym = middleCode.value;
-  const entry = findBySymbol(sym);
+  const pf = vm.profile?.value || null;
 
-  if (!entry) {
+  if (!pf) {
     return {
       totalShares: null,
       floatShares: null,
-      listingDate: null,
+      totalValue: null,
+      negoValue: null,
+      peStatic: null,
       industry: null,
       region: null,
       concepts: [],
+      updatedAt: null,
     };
   }
 
   return {
-    totalShares: entry.totalShares,
-    floatShares: entry.floatShares,
-    listingDate: entry.listingDate,
-    industry: entry.industry,
-    region: entry.region,
-    concepts: entry.concepts || [],
+    totalShares: pf.total_shares ?? null,
+    floatShares: pf.float_shares ?? null,
+    totalValue: pf.total_value ?? null,
+    negoValue: pf.nego_value ?? null,
+    peStatic: pf.pe_static ?? null,
+    industry: pf.industry ?? null,
+    region: pf.region ?? null,
+    concepts: Array.isArray(pf.concepts) ? pf.concepts : [],
+    updatedAt: pf.updated_at ?? null,
   };
 });
 
-// ===== 新增：判断是否显示档案行 =====
+// ===== 判断是否显示档案行 =====
 const hasProfileInfo = computed(() => {
+  const p = profileInfo.value;
   return !!(
-    profileInfo.value.totalShares ||
-    profileInfo.value.floatShares ||
-    profileInfo.value.listingDate ||
-    profileInfo.value.industry ||
-    profileInfo.value.region ||
-    profileInfo.value.concepts.length > 0
+    p.totalShares ||
+    p.floatShares ||
+    p.totalValue ||
+    p.negoValue ||
+    p.peStatic ||
+    p.industry ||
+    p.region ||
+    p.concepts.length > 0 ||
+    p.updatedAt
   );
 });
 
@@ -399,13 +417,16 @@ function formatShares(shares) {
   }
 }
 
-function formatDate(dateInt) {
-  if (!dateInt) return "-";
+function formatPe(pe) {
+  const num = Number(pe);
+  if (!Number.isFinite(num) || num <= 0) return "-";
+  return num.toFixed(2);
+}
 
-  const str = String(dateInt);
-  if (str.length !== 8) return "-";
-
-  return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
+function formatUpdatedAt(str) {
+  if (!str) return "-";
+  const s = String(str).replace("T", " ");
+  return s.length >= 16 ? s.slice(0, 16) : s;
 }
 </script>
 
@@ -427,7 +448,7 @@ function formatDate(dateInt) {
   display: inline-block;
 }
 
-/* ===== 核心修改：中间栏改为多行布局 ===== */
+/* 中间栏：多行布局 */
 .col-middle {
   display: flex;
   flex-direction: column;
@@ -437,7 +458,7 @@ function formatDate(dateInt) {
   overflow: hidden;
 }
 
-/* 第1行：名称和代码（保持原样式）*/
+/* 第1行：名称和代码 */
 .info-line-1 {
   display: flex;
   align-items: baseline;
@@ -455,7 +476,7 @@ function formatDate(dateInt) {
   color: #bbb;
 }
 
-/* 第2行：股本信息/行业/地区/概念 */
+/* 第2行：档案信息 */
 .info-line-2 {
   display: flex;
   gap: 12px;
@@ -463,7 +484,7 @@ function formatDate(dateInt) {
   color: #999;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;  /* ← 新增：超长时省略 */
+  white-space: nowrap;
 }
 
 .info-item {

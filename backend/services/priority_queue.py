@@ -1,105 +1,119 @@
 # backend/services/priority_queue.py
 # ==============================
-# 说明：动态优先级队列（基于MinHeap）
-# 职责：
-#   1. 支持任务动态插队（按优先级）
-#   2. 同优先级按时间FIFO
-#   3. 线程安全（asyncio兼容）
-# 
-# V2.0 改动：
-#   - PrioritizedTask 新增 symbol_type 字段
+# 说明：异步优先级队列（Task 版）
+#
+# 改动（V3.0）：
+#   - 移除 PrioritizedTask / TaskGroup 结构；
+#   - 队列元素仅为 Task（backend.services.task_model.Task）；
+#   - 优先级与时间戳从 Task.metadata 中读取：
+#       * priority : metadata['priority']，默认 100
+#       * created_at: metadata['created_at'] ISO 字符串 → timestamp，用于 FIFO
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
 import heapq
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Tuple
 
+from backend.services.task_model import Task
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("priority_queue")
 
-@dataclass(order=True)
-class PrioritizedTask:
-    """优先级任务（可比较，用于堆排序）"""
-    
-    priority: int
-    timestamp: float = field(compare=True)
-    
-    # 实际任务数据（不参与比较）
-    data_type_id: str = field(compare=False)
-    symbol: Optional[str] = field(default=None, compare=False)
-    freq: Optional[str] = field(default=None, compare=False)
-    strategy: Optional[dict] = field(default=None, compare=False)
-    task_id: Optional[str] = field(default=None, compare=False)
-    force_fetch: bool = field(default=False, compare=False)
-    symbol_type: Optional[str] = field(default=None, compare=False)  # ← V2.0 新增
 
 class AsyncPriorityQueue:
-    """异步优先级队列"""
-    
+    """异步 Task 优先级队列"""
+
     def __init__(self):
-        self._heap = []
+        # 堆元素结构：(priority:int, timestamp:float, Task)
+        self._heap: list[Tuple[int, float, Task]] = []
         self._lock = asyncio.Lock()
         self._not_empty = asyncio.Event()
-    
-    async def enqueue(self, task: PrioritizedTask):
-        """入队（自动按优先级排序）"""
+
+    def _extract_priority_and_ts(self, task: Task) -> Tuple[int, float]:
+        """从 Task.metadata 中提取 priority 与 created_at；失败时使用兜底值。"""
+        md = task.metadata or {}
+        prio = int(md.get("priority", 100))
+
+        created_at = md.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                ts = dt.timestamp()
+            except Exception:
+                ts = datetime.now().timestamp()
+        else:
+            ts = datetime.now().timestamp()
+
+        return prio, ts
+
+    async def enqueue(self, task: Task):
+        """入队 Task（按 priority + created_at 排序）"""
+        prio, ts = self._extract_priority_and_ts(task)
+
         async with self._lock:
-            heapq.heappush(self._heap, task)
+            heapq.heappush(self._heap, (prio, ts, task))
             self._not_empty.set()
-        
+
         _LOG.debug(
-            f"[队列] 入队 P{task.priority} {task.data_type_id} "
-            f"{task.symbol or ''} {task.freq or ''} "
-            f"类型={task.symbol_type or 'N/A'} "  # ← 新增日志
-            f"队列长度={len(self._heap)}"
+            "[队列] 入队 P%s task_id=%s type=%s symbol=%s freq=%s scope=%s 当前长度=%s",
+            prio,
+            task.task_id,
+            task.type,
+            task.symbol,
+            task.freq,
+            task.scope,
+            len(self._heap),
         )
-    
-    async def dequeue(self) -> Optional[PrioritizedTask]:
-        """出队（取优先级最高的）"""
+
+    async def dequeue(self) -> Optional[Task]:
+        """出队（取优先级最高的 Task）"""
         async with self._lock:
             if not self._heap:
                 self._not_empty.clear()
                 return None
-            
-            task = heapq.heappop(self._heap)
-            
+
+            prio, ts, task = heapq.heappop(self._heap)
+
             if not self._heap:
                 self._not_empty.clear()
-            
+
             _LOG.debug(
-                f"[队列] 出队 P{task.priority} {task.data_type_id} "
-                f"{task.symbol or ''} {task.freq or ''} "
-                f"类型={task.symbol_type or 'N/A'} "  # ← 新增日志
-                f"剩余={len(self._heap)}"
+                "[队列] 出队 P%s task_id=%s type=%s symbol=%s freq=%s scope=%s 剩余=%s",
+                prio,
+                task.task_id,
+                task.type,
+                task.symbol,
+                task.freq,
+                task.scope,
+                len(self._heap),
             )
-            
+
             return task
-    
-    async def wait_for_task(self) -> PrioritizedTask:
-        """等待任务（阻塞直到有任务）"""
+
+    async def wait_for_task(self) -> Task:
+        """阻塞等待，直到队列中有 Task"""
         while True:
             task = await self.dequeue()
             if task is not None:
                 return task
-            
-            # 队列为空，等待新任务
+
             await self._not_empty.wait()
-    
+
     def size(self) -> int:
-        """获取队列长度"""
+        """返回当前队列长度"""
         return len(self._heap)
-    
+
     def is_empty(self) -> bool:
-        """判断队列是否为空"""
-        return len(self._heap) == 0
+        """队列是否为空"""
+        return not self._heap
+
 
 # 全局单例
 _global_queue: Optional[AsyncPriorityQueue] = None
+
 
 def get_priority_queue() -> AsyncPriorityQueue:
     """获取全局优先级队列单例"""

@@ -98,7 +98,6 @@ class ChartBuilderRegistry {
         if (typeof builder === 'function') {
           this._builders.set(key, builder);
           this._lazyLoaders.delete(key);  // 加载后移除 loader
-          console.log(`[ChartRegistry] ✅ Lazy-loaded builder '${key}'`);
           return builder;
         }
       } catch (e) {

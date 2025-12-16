@@ -1,6 +1,6 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\interaction\hotkeys\registry.js
 // ==============================
-// V2.0 - 增强调试日志
+// V2.1 - 精简日志版
 // ==============================
 
 import { ref } from "vue";
@@ -20,18 +20,11 @@ export class HotkeyService {
       // 注册键盘监听（捕获阶段）
       capture: true,
     });
-    
-    // ===== 新增：调试日志 =====
-    console.log('[HotkeyService] 🎹 服务已创建', {
-      defaultScopes: Object.keys(defaultKeymap),
-      initialScope: this.scopeStack.value
-    });
   }
 
   destroy() {
     // 销毁（移除监听）
     window.removeEventListener("keydown", this._onKeydown, { capture: true });
-    console.log('[HotkeyService] 🎹 服务已销毁');
   }
 
   get keymap() {
@@ -62,22 +55,16 @@ export class HotkeyService {
       this.handlers[scope] || {},
       map || {}
     );
-    
-    // ===== 新增：注册成功日志 =====
-    const cmdCount = Object.keys(map || {}).length;
-    console.log(`[HotkeyService] ✅ 已注册 ${scope} 作用域（${cmdCount} 个命令）`, Object.keys(map || {}));
   }
 
   unregisterHandlers(scope) {
     delete this.handlers[scope];
-    console.log(`[HotkeyService] 🗑️ 已注销 ${scope} 作用域`);
   }
 
   pushScope(scope) {
     const s = this.scopeStack.value.slice();
     s.push(scope);
     this.scopeStack.value = s;
-    console.log(`[HotkeyService] 📌 压入作用域: ${scope}，当前栈:`, this.scopeStack.value);
   }
 
   popScope(scope) {
@@ -86,13 +73,11 @@ export class HotkeyService {
       const s = this.scopeStack.value.slice();
       if (s.length > 1) s.pop();
       this.scopeStack.value = s;
-      console.log(`[HotkeyService] 📌 弹出作用域，当前栈:`, this.scopeStack.value);
       return;
     }
     const s = this.scopeStack.value.filter((x) => x !== scope);
     if (!s.length) s.push("global");
     this.scopeStack.value = s;
-    console.log(`[HotkeyService] 📌 移除作用域: ${scope}，当前栈:`, this.scopeStack.value);
   }
 
   setBinding(scope, command, combo) {
@@ -114,7 +99,6 @@ export class HotkeyService {
   setUserOverrides(overrides) {
     // 接收完整的、按 scope 组织的 overrides 对象
     this.userOverrides = overrides || {};
-    console.log('[HotkeyService] 🔄 用户覆盖已更新', Object.keys(overrides || {}));
   }
 
   getBindings(scope) {
@@ -189,12 +173,7 @@ export class HotkeyService {
     if (inInput && !inputWhitelist.has(combo)) return; // 输入环境且不在白名单 → 忽略
 
     const stack = [...this.scopeStack.value].reverse();
-    
-    // ===== 新增：调试日志（仅开发环境）=====
-    if (import.meta.env.DEV) {
-      console.log(`[HotkeyService] 🎹 按键: ${combo}，作用域栈:`, stack);
-    }
-    
+
     for (const scope of stack) {
       // 逐层匹配
       const map = this.keymap[scope] || {}; // 合并映射
@@ -206,9 +185,6 @@ export class HotkeyService {
         (this.handlers["global"] || {})[cmd]; // 再找 global
 
       if (!handler) {
-        // ===== 新增：未找到处理器的警告 =====
-        console.warn(`[HotkeyService] ⚠️ 未找到处理器: scope=${scope}, cmd=${cmd}`);
-        
         if (cmd === "focusNextField") {
           // 内置：下一个输入
           e.preventDefault(); // 阻止默认
@@ -230,21 +206,13 @@ export class HotkeyService {
         continue;
       }
 
-      // ===== 新增：执行处理器的日志 =====
-      console.log(`[HotkeyService] ✅ 执行: scope=${scope}, cmd=${cmd}, combo=${combo}`);
-      
       e.preventDefault();
       try {
         handler(e, { scope, cmd, combo }); // 调用处理器
       } catch (err) {
-        console.error(`[HotkeyService] ❌ 处理器执行失败: ${cmd}`, err);
+        console.error(`[HotkeyService] handler-error cmd=${cmd}`, err);
       }
       return;
-    }
-    
-    // ===== 新增：未匹配任何处理器的日志 =====
-    if (import.meta.env.DEV) {
-      console.log(`[HotkeyService] 🔇 未匹配: combo=${combo}`);
     }
   }
 }

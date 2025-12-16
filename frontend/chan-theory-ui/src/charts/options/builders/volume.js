@@ -263,24 +263,8 @@ export function buildVolumeOption(
     (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 })
   );
 
-  // ===== 诊断日志3：volume.js 获取骨架后 =====
-  console.log("[DIAG][volume.js] createTechSkeleton 返回", {
-    yAxis数量: option.yAxis?.length,
-    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
-    yAxis1_完整: option.yAxis?.[1],
-  });
-
   // 填充 series
   option.series = series;
-
-  // ===== 诊断日志4：series 填充后 =====
-  console.log("[DIAG][volume.js] series 填充后", {
-    series数量: option.series?.length,
-    使用yAxisIndex1的series: option.series
-      ?.filter((s) => s.yAxisIndex === 1)
-      .map((s) => s.id),
-    yAxis1_axisPointer: JSON.stringify(option.yAxis?.[1]?.axisPointer),
-  });
 
   // ===== 覆盖布局参数（量窗特有的底部间距）=====
   const anyMarkers =
@@ -299,18 +283,6 @@ export function buildVolumeOption(
     },
     { candles: list, freq }
   );
-
-  // ===== 诊断日志5：最终 applyLayout 后 =====
-  console.log("[DIAG][volume.js] 最终 applyLayout 后", {
-    yAxis数量: finalOption.yAxis?.length,
-    yAxis1_axisPointer: JSON.stringify(finalOption.yAxis?.[1]?.axisPointer),
-    yAxis1_完整: finalOption.yAxis?.[1],
-  });
-
-  // ===== 诊断日志6：最终返回前 =====
-  console.log("[DIAG][volume.js] 最终返回配置", {
-    完整yAxis配置: JSON.stringify(finalOption.yAxis, null, 2),
-  });
 
   return finalOption;
 }

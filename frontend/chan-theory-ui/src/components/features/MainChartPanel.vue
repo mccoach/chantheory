@@ -1,13 +1,11 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartPanel.vue -->
 <!-- ============================== -->
-<!-- V7.0 - 性能优化版（删除调试日志）
+<!-- V8.0 - 性能优化版（删除调试日志）
      
-     改动：
-       - 删除 setOption 前后的 console.log
-       - 保持其他逻辑完全不变
-     
-     性能提升：
-       - 每次渲染减少 5-10ms
+     本版附加改动（复权控制）：
+       - 在顶部右侧增加一组三联按钮：前复权 / 不复权 / 后复权。
+       - 位置：主行情窗“设置”按钮左侧紧邻。
+       - 点击时调用 useUserSettings.setAdjust('qfq'|'none'|'hfq')，触发已有 watch(adjust) 重算逻辑。
 -->
 <template>
   <MainChartControls />
@@ -43,6 +41,31 @@
             数据不完整 {{ refreshStatus.refreshedAtHHMMSS.value }}
           </span>
         </div>
+
+        <!-- NEW: 复权三联按钮组（前 / 无 / 后） -->
+        <div class="adj-seg" title="复权方式">
+          <button
+            class="adj-btn"
+            :class="{ active: isAdjust('qfq') }"
+            @click="setAdjust('qfq')"
+          >
+            前
+          </button>
+          <button
+            class="adj-btn"
+            :class="{ active: isAdjust('none') }"
+            @click="setAdjust('none')"
+          >
+            无
+          </button>
+          <button
+            class="adj-btn"
+            :class="{ active: isAdjust('hfq') }"
+            @click="setAdjust('hfq')"
+          >
+            后
+          </button>
+        </div>
         
         <button
           class="btn-settings"
@@ -65,10 +88,11 @@
 </template>
 
 <script setup>
-import { inject, ref, onBeforeUnmount } from "vue";
+import { inject, ref, onBeforeUnmount, computed } from "vue";
 import { openMainChartSettings } from "@/settings/mainShell";
 import { useChartPanel } from "@/composables/useChartPanel";
 import { useRefreshStatus } from "@/composables/useRefreshStatus";
+import { useUserSettings } from "@/composables/useUserSettings";
 import MainChartControls from "./main-chart/MainChartControls.vue";
 import { SETTINGS_ICON_SVG } from "@/constants/icons";
 
@@ -79,6 +103,10 @@ const dialogManager = inject("dialogManager");
 
 const refreshStatus = useRefreshStatus(vm.loading, vm.error);
 
+// NEW: 引入用户设置，用于设置 adjust 偏好
+const settings = useUserSettings();
+
+// ===== 通用 chart 面板逻辑 =====
 const {
   wrapRef: wrap,
   hostRef: host,
@@ -115,6 +143,24 @@ const {
   },
 });
 
+// ===== 复权三联按钮：状态 & 操作 =====
+const currentAdjust = computed(() => String(vm.adjust?.value || "none"));
+
+function isAdjust(kind) {
+  const k = kind === "qfq" || kind === "hfq" ? kind : "none";
+  return currentAdjust.value === k;
+}
+
+function setAdjust(kind) {
+  // 统一使用 setter，确保偏好被持久化；watch(adjust) 将自动触发重算
+  const k = kind === "qfq" || kind === "hfq" ? kind : "none";
+  try {
+    settings.setAdjust(k);
+  } catch (e) {
+    console.error("setAdjust failed:", e);
+  }
+}
+
 function openSettingsDialog() {
   try {
     openMainChartSettings(dialogManager, { activeTab: "chan" });
@@ -127,7 +173,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== 样式保持不变 ===== */
+/* ===== 样式保持不变（原有部分） ===== */
 .top-info {
   position: absolute;
   left: 0;
@@ -199,6 +245,35 @@ onBeforeUnmount(() => {
 .hintfade-enter-from,
 .hintfade-leave-to {
   opacity: 0;
+}
+
+/* NEW: 复权三联按钮组样式 */
+.adj-seg {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #444;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1a1a1a;
+  height: 24px;
+}
+.adj-btn {
+  background: transparent;
+  color: #ccc;
+  border: none;
+  padding: 2px 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  line-height: 20px;
+  height: 24px;
+}
+.adj-btn + .adj-btn {
+  border-left: 1px solid #444;
+}
+.adj-btn.active {
+  background: #2b4b7e;
+  color: #fff;
 }
 
 .chart {
