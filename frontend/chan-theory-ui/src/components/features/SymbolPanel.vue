@@ -1,11 +1,12 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V9.0 - 档案完全改用 /api/profile/current（经 useMarketView 注入）
+<!-- V9.1 - 档案由 /api/profile/current 提供 + 第一行补充 symbol_index 元信息
      
-     变更要点：
-       - 档案展示 info-line-2 现在仅依赖 vm.profile.value（来自 useMarketView.reload 内的 current_profile + /api/profile/current）。
-       - 不再从 useSymbolIndex.findBySymbol 中解析档案字段。
-       - 改标的代码时只更新 vm.code，真正的数据加载统一由 useMarketView.watch(code) 触发（包含 K+因子+档案）。
+     本版新增：
+       - 在第1行“名称（代码）”之后，追加展示来自 symbol_index 的：
+         market / board / class / type / listing_date
+       - 这些元信息仅用于补充展示，数据源为 useSymbolIndex.findBySymbol。
+       - 样式上采用类似第二行 info-line-2 的小号灰色文字，与名称/代码区分。
 -->
 <template>
   <div class="symbol-row">
@@ -49,41 +50,71 @@
 
     <!-- 中列：标的信息 -->
     <div class="col-middle">
-      <!-- 第1行：名称和代码 -->
+      <!-- 第1行：名称、代码 + 元信息（market / board / class / type / listing_date）-->
       <div class="info-line-1" :title="middleTitle">
         <span class="sym-name">{{ middleName }}</span>
         <span class="sym-code">（{{ middleCode }}）</span>
+
+        <!-- NEW: 来自 symbol_index 的元信息（小号灰字） -->
+        <span v-if="middleMarket" class="sym-meta-chip">|</span>
+        <span v-if="middleMarket" class="sym-meta-chip">
+          市场：{{ middleMarket }}
+        </span>
+        <span v-if="middleBoard" class="sym-meta-chip">|</span>
+        <span v-if="middleBoard" class="sym-meta-chip">
+          板块：{{ middleBoard }}
+        </span>
+        <span v-if="middleClass" class="sym-meta-chip">|</span>
+        <span v-if="middleClass" class="sym-meta-chip">
+          类别：{{ middleClass }}
+        </span>
+        <span v-if="middleType" class="sym-meta-chip">|</span>
+        <span v-if="middleType" class="sym-meta-chip">
+          类型：{{ middleType }}
+        </span>
+        <span v-if="middleListingDate" class="sym-meta-chip">|</span>
+        <span v-if="middleListingDate" class="sym-meta-chip">
+          上市：{{ middleListingDate }}
+        </span>
+        <span v-if="middleMarket" class="sym-meta-chip">|</span>
+        <span v-if="profileInfo.updatedAt" class="sym-meta-chip">
+          档案更新：{{ formatUpdatedAt(profileInfo.updatedAt) }}
+        </span>
       </div>
 
       <!-- 第2行：档案信息（完全来自 vm.profile）-->
       <div class="info-line-2" v-if="hasProfileInfo">
         <span v-if="profileInfo.totalShares" class="info-item">
-          总股本：{{ formatShares(profileInfo.totalShares) }}
+          总股本：{{ profileInfo.totalShares }}万股（份）
         </span>
+        <span v-if="profileInfo.floatShares" class="info-item">|</span>
         <span v-if="profileInfo.floatShares" class="info-item">
-          流通股：{{ formatShares(profileInfo.floatShares) }}
+          流通股：{{ profileInfo.floatShares }}万股（份）
         </span>
+        <span v-if="profileInfo.totalValue" class="info-item">|</span>
         <span v-if="profileInfo.totalValue" class="info-item">
-          总市值：{{ formatShares(profileInfo.totalValue) }}
+          总市值：{{ profileInfo.totalValue }}亿元
         </span>
+        <span v-if="profileInfo.negoValue" class="info-item">|</span>
         <span v-if="profileInfo.negoValue" class="info-item">
-          流通市值：{{ formatShares(profileInfo.negoValue) }}
+          流通市值：{{ profileInfo.negoValue }}亿元
         </span>
+        <span v-if="profileInfo.peStatic" class="info-item">|</span>
         <span v-if="profileInfo.peStatic" class="info-item">
-          静态PE：{{ formatPe(profileInfo.peStatic) }}
+          静态PE：{{ formatPe(profileInfo.peStatic) }}倍
         </span>
+        <span v-if="profileInfo.industry" class="info-item">|</span>
         <span v-if="profileInfo.industry" class="info-item">
           行业：{{ profileInfo.industry }}
         </span>
+        <span v-if="profileInfo.region" class="info-item">|</span>
         <span v-if="profileInfo.region" class="info-item">
           地区：{{ profileInfo.region }}
         </span>
+        <span v-if="profileInfo.concepts.length > 0" class="info-item">|</span>
         <span v-if="profileInfo.concepts.length > 0" class="info-item">
           概念：{{ profileInfo.concepts.slice(0, 3).join("、")
           }}{{ profileInfo.concepts.length > 3 ? "..." : "" }}
-        </span>
-        <span v-if="profileInfo.updatedAt" class="info-item">
-          档案更新：{{ formatUpdatedAt(profileInfo.updatedAt) }}
         </span>
       </div>
     </div>
@@ -164,7 +195,7 @@ async function selectItem(item) {
   );
 
   inputText.value = sym;
-  vm.code.value = sym;               // 只改 code，任务触发统一交给 useMarketView.watch(code)
+  vm.code.value = sym;               // 仅改 code，任务触发交给 useMarketView.watch(code)
   settings.setLastSymbol(sym);
   settings.addSymbolHistoryEntry(sym);
 
@@ -338,14 +369,24 @@ function onDocClick(e) {
   }
 }
 
-// ===== 中间栏信息（基础）=====
+// ===== 中间栏信息（基础：symbol_index）=====
 const middleCode = computed(() => (vm.code?.value || "").trim());
 
-const middleName = computed(() => {
+const symbolEntry = computed(() => {
   const sym = middleCode.value;
-  const entry = findBySymbol(sym);
-  return entry?.name || "";
+  if (!sym) return null;
+  return findBySymbol(sym);
 });
+
+const middleName = computed(() => symbolEntry.value?.name || "");
+
+const middleMarket = computed(() => symbolEntry.value?.market || "");
+const middleBoard = computed(() => symbolEntry.value?.board || "");
+const middleClass = computed(() => symbolEntry.value?.class || "");
+const middleType = computed(() => symbolEntry.value?.type || "");
+const middleListingDate = computed(() =>
+  formatListingDate(symbolEntry.value?.listingDate)
+);
 
 const middleTitle = computed(() =>
   middleName.value
@@ -428,6 +469,13 @@ function formatUpdatedAt(str) {
   const s = String(str).replace("T", " ");
   return s.length >= 16 ? s.slice(0, 16) : s;
 }
+
+function formatListingDate(intVal) {
+  if (!intVal) return "";
+  const s = String(intVal);
+  if (s.length !== 8) return "";
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
 </script>
 
 <style scoped>
@@ -458,7 +506,7 @@ function formatUpdatedAt(str) {
   overflow: hidden;
 }
 
-/* 第1行：名称和代码 */
+/* 第1行：名称和代码 + 元信息 */
 .info-line-1 {
   display: flex;
   align-items: baseline;
@@ -474,6 +522,17 @@ function formatUpdatedAt(str) {
 .sym-code {
   font-size: 12px;
   color: #bbb;
+}
+
+/* NEW: 第一行追加元信息的样式（参考第二行的 info-item） */
+.sym-meta-chip {
+  font-size: 11px;
+  color: #999;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+.sym-meta-chip + .sym-meta-chip {
+  margin-left: 6px;
 }
 
 /* 第2行：档案信息 */
