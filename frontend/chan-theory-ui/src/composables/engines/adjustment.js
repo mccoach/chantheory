@@ -2,8 +2,8 @@
 // ==============================
 // 说明：复权计算引擎（稀疏因子版，区分前复权/后复权运算方向）
 // 职责：根据稀疏复权因子对K线数据进行前复权/后复权调整。
-// 规则：
-//   - 前复权(qfq)：复权价 = 不复权价 / qfq_factor
+// 规则（Baostock 官方文档对照版）：
+//   - 前复权(qfq)：复权价 = 不复权价 × qfq_factor
 //   - 后复权(hfq)：复权价 = 不复权价 × hfq_factor
 // 设计：
 //   - 因子列表 factors 仅包含“因子发生变化”的日期（稀疏序列）；
@@ -82,11 +82,12 @@ function findLastFactorBeforeOrOn(sortedFactors, barDate) {
 /**
  * 应用复权调整（稀疏因子 + 前向填充版）
  * 
- * 规则：
- *   - adjustType === 'qfq'：前复权价 = 原价 / qfq_factor
- *   - adjustType === 'hfq'：后复权价 = 原价 × hfq_factor
+ * 规则（与 Baostock 文档对齐）：
+ *   - adjustType === 'qfq'（前复权）：复权价 = 原价 × qfq_factor
+ *   - adjustType === 'hfq'（后复权）：复权价 = 原价 × hfq_factor
+ *   - adjustType === 'none'：不调整，直接返回原价
  * 
- * @param {Array} candles - 原始K线 [{ts, o, h, l, c, v, ...}, ...]
+ * @param {Array} candles - 原始K线数据 [{ts, o, h, l, c, v, ...}, ...]
  * @param {Array<{date:number,qfq_factor:number,hfq_factor:number}>} factors - 稀疏因子列表
  * @param {string} adjustType - 复权方式 'none'|'qfq'|'hfq'
  * @returns {Array} 调整后的K线（浅拷贝，每个bar增加 _raw 字段保存原值）
@@ -121,18 +122,18 @@ export function applyAdjustment(candles, factors, adjustType) {
       return bar
     }
 
-    const factor = findLastFactorBeforeOrOn(sortedFactors, barDate)
-    if (!factor) {
+    const factorRec = findLastFactorBeforeOrOn(sortedFactors, barDate)
+    if (!factorRec) {
       // 在该日期之前没有任何因子 → 因子默认为 1.0，不调整
       return bar
     }
 
-    const q = Number(factor.qfq_factor || 1)
-    const h = Number(factor.hfq_factor || 1)
+    const q = Number(factorRec.qfq_factor || 1)
+    const h = Number(factorRec.hfq_factor || 1)
 
     let fVal
     if (isQfq) {
-      // 前复权：原价 / qfq_factor
+      // 前复权：原价 × qfq_factor
       if (!Number.isFinite(q) || q === 0) {
         return bar
       }
@@ -150,10 +151,10 @@ export function applyAdjustment(candles, factors, adjustType) {
     const rawL = bar.l
     const rawC = bar.c
 
-    const adjO = isQfq ? (rawO / fVal) : (rawO * fVal)
-    const adjH = isQfq ? (rawH / fVal) : (rawH * fVal)
-    const adjL = isQfq ? (rawL / fVal) : (rawL * fVal)
-    const adjC = isQfq ? (rawC / fVal) : (rawC * fVal)
+    const adjO = rawO * fVal
+    const adjH = rawH * fVal
+    const adjL = rawL * fVal
+    const adjC = rawC * fVal
 
     return {
       ...bar,
