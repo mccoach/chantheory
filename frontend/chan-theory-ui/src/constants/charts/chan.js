@@ -1,9 +1,11 @@
-// src/constants/charts/chan.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\constants\charts\chan.js
 // ==============================
 // 说明：缠论相关的所有配置常量
 // 职责：提供缠论标记/分型/笔/线段/中枢的默认配置
 // 设计：按功能模块分组，每个常量都有详细注释
 // ==============================
+
+import { STYLE_PALETTE } from "../common";
 
 // ===== 涨跌标记配置 =====
 export const CHAN_DEFAULTS = {
@@ -152,9 +154,9 @@ export const CHAN_PEN_PIVOT_DEFAULTS = {
 export const CONTINUITY_BARRIER = {
   // --- 总开关（设置窗未暴露）---
   enabled: true,            // 是否启用屏障检测（❌ 设置窗未暴露，直接用常量）
-
+  // 语义：当 |今开-昨收| / 昨收 ≥ basePct 时，认为存在连续性异常
   // --- 检测参数（设置窗未暴露）---
-  basePct: 0.5,             // 跳空阈值（相对百分比）（❌ 设置窗未暴露，直接用常量）
+  basePct: 0.2,             // 跳空阈值（相对百分比）（❌ 设置窗未暴露，直接用常量）
 
   // --- 线条样式（设置窗未暴露）---
   lineColor: "#ffdd00",     // 屏障线颜色（❌ 设置窗未暴露，直接用常量）

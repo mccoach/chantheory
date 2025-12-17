@@ -2,7 +2,13 @@
 // ==============================
 // 说明：从 useChan.js 拆分出的包含关系处理模块
 // - 核心职责：处理K线包含关系，生成合并后的K线序列（Reduced Bars）。
-// - 依赖：detectContinuityBarriers
+// - 依赖：detectContinuityBarriers（仅做原始K层面的连续性检测）。
+//
+// 设计原则：
+//   - 本模块保持“算法 + 参数驱动”，不自行做数据访问；
+//   - 上市日期 ipoYmd 由调用方（如 useViewRenderHub）基于 symbol_index 获取后，
+//     通过 opts.ipoYmd 显式传入；
+//   - 本模块只负责将 ipoYmd 透传给 detectContinuityBarriers，以决定在哪里拆分“连续性岛”（seq_id）。
 // ==============================
 
 import { CONTINUITY_BARRIER } from "@/constants";
@@ -15,10 +21,15 @@ export function computeInclude(candles, opts = {}) {
   const map = new Array(N);
   let lastDir = 0;
 
-  // 按静态阈值检测原始K屏障（前10日豁免）
+  const ipoYmd =
+    typeof opts.ipoYmd === "number" && Number.isFinite(opts.ipoYmd)
+      ? opts.ipoYmd
+      : null;
+
   const { set: barrierSet } = detectContinuityBarriers(
     candles,
-    CONTINUITY_BARRIER?.basePct
+    CONTINUITY_BARRIER?.basePct,
+    { ipoYmd }
   );
 
   let seq_id = 0; // 连续性岛编号（从 1 起）
@@ -49,7 +60,8 @@ export function computeInclude(candles, opts = {}) {
     for (let k = s; k <= e; k++) {
       map[k] = {
         reduced_idx: reducedIndex,
-        role_str: k === reduced[reducedIndex].end_idx_orig ? "carrier" : "merged",
+        role_str:
+          k === reduced[reducedIndex].end_idx_orig ? "carrier" : "merged",
         seq_id: seqId,
       };
     }
@@ -107,13 +119,16 @@ export function computeInclude(candles, opts = {}) {
     a.dir_int = a.dir_int === 0 ? trend : a.dir_int;
 
     if (a.dir_int >= 0) {
-      const prevHi = a.g_pri, prevLo = a.d_pri;
+      const prevHi = a.g_pri,
+        prevLo = a.d_pri;
       const newHi = Math.max(a.g_pri, b.g_pri);
       const newLo = Math.max(a.d_pri, b.d_pri);
-      a.g_pri = newHi; a.d_pri = newLo;
+      a.g_pri = newHi;
+      a.d_pri = newLo;
       if (newHi !== prevHi && newHi === b.g_pri) a.g_idx_orig = i;
       if (newLo !== prevLo && newLo === b.d_pri) a.d_idx_orig = i;
-      a.end_idx_orig = i; a.end_t_iso = b.end_t_iso;
+      a.end_idx_orig = i;
+      a.end_t_iso = b.end_t_iso;
       a.reason_str = "inclusion-merge-up";
       lastDir = a.dir_int;
       a.anchor_idx_orig =
@@ -122,15 +137,23 @@ export function computeInclude(candles, opts = {}) {
             ? a.g_idx_orig
             : a.d_idx_orig
           : a.end_idx_orig;
-      fillMapRange(a.start_idx_orig, a.end_idx_orig, reduced.length - 1, a.seq_id);
+      fillMapRange(
+        a.start_idx_orig,
+        a.end_idx_orig,
+        reduced.length - 1,
+        a.seq_id
+      );
     } else {
-      const prevHi = a.g_pri, prevLo = a.d_pri;
+      const prevHi = a.g_pri,
+        prevLo = a.d_pri;
       const newHi = Math.min(a.g_pri, b.g_pri);
       const newLo = Math.min(a.d_pri, b.d_pri);
-      a.g_pri = newHi; a.d_pri = newLo;
+      a.g_pri = newHi;
+      a.d_pri = newLo;
       if (newHi !== prevHi && newHi === b.g_pri) a.g_idx_orig = i;
       if (newLo !== prevLo && newLo === b.d_pri) a.d_idx_orig = i;
-      a.end_idx_orig = i; a.end_t_iso = b.end_t_iso;
+      a.end_idx_orig = i;
+      a.end_t_iso = b.end_t_iso;
       a.reason_str = "inclusion-merge-down";
       lastDir = a.dir_int;
       a.anchor_idx_orig =
@@ -139,7 +162,12 @@ export function computeInclude(candles, opts = {}) {
             ? a.d_idx_orig
             : a.g_idx_orig
           : a.end_idx_orig;
-      fillMapRange(a.start_idx_orig, a.end_idx_orig, reduced.length - 1, a.seq_id);
+      fillMapRange(
+        a.start_idx_orig,
+        a.end_idx_orig,
+        reduced.length - 1,
+        a.seq_id
+      );
     }
   }
 
@@ -147,7 +175,11 @@ export function computeInclude(candles, opts = {}) {
   for (let j = 0; j < reduced.length; j++) {
     const rj = reduced[j];
     if (rj.start_idx_orig === rj.end_idx_orig) {
-      map[rj.start_idx_orig] = { reduced_idx: j, role_str: "carrier", seq_id: rj.seq_id };
+      map[rj.start_idx_orig] = {
+        reduced_idx: j,
+        role_str: "carrier",
+        seq_id: rj.seq_id,
+      };
     }
   }
 

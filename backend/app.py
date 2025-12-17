@@ -3,8 +3,9 @@
 # FastAPI 应用入口（Task/Job/SSE 版）
 #
 # 改动：
-#   - 启动时的交易日历同步不再自动执行，完全交由前端通过
-#     POST /api/ensure-data + type='trade_calendar' 显式触发；
+#   - 启动时的交易日历同步不再直接调用旧配方签名；
+#   - 统一构造 Task(type='trade_calendar', scope='global') 并调用 run_trade_calendar(Task)；
+#   - Task 内部会发 job_done / task_done 事件，与手动触发保持完全一致；
 #   - 其余逻辑保持不变（异步写入器 + 执行器 + SSE 桥接）。
 # ==============================
 
@@ -26,6 +27,7 @@ from backend.routers.events import router as events_router
 from backend.routers.data_sync import router as data_sync_router
 from backend.routers.factors import router as factors_router
 from backend.routers.profile import router as profile_router
+from backend.routers.trade_calendar import router as trade_calendar_router
 from backend.services.unified_sync_executor import get_sync_executor
 from backend.db.async_writer import get_async_writer
 from backend.utils.logger import get_logger
@@ -196,6 +198,7 @@ app.include_router(events_router)
 app.include_router(data_sync_router)
 app.include_router(factors_router)
 app.include_router(profile_router)
+app.include_router(trade_calendar_router)
 
 if __name__ == "__main__":
     import uvicorn

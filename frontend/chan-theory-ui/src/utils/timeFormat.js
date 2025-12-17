@@ -1,18 +1,15 @@
-// src/utils/timeFormat.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\utils\timeFormat.js
 // ==============================
 // 说明：时间格式化工具（纯函数，零副作用）
-// 职责：将 Date 对象格式化为字符串
-// 设计：单一职责，只做格式化，不做解析
-// 
-// V3.0 重构：
-//   - 删除别名导出（fmtTimeByFreq）
-//   - 删除内部解析逻辑（移至 timeParse.js）
-//   - 删除频率判断逻辑（移至 timeCheck.js）
-//   - 保持原有调用签名（确保功能回归）
+// 职责：将 Date 对象或时间值格式化为字符串
+// 设计：
+//   - Core：pad2 / formatDateTime
+//   - Freq 感知层：formatTimeByFreq（根据频率决定是否带时分）
+//   - 辅助：formatYmdInt（YYYYMMDD整数 → "YYYY-MM-DD"）
 // ==============================
 
-import { parseTimeValue } from './timeParse'
-import { isMinuteFreq } from './timeCheck'
+import { parseTimeValue } from "./timeParse";
+import { isMinuteFreq } from "./timeCheck";
 
 /**
  * 两位补零（原子工具）
@@ -20,7 +17,7 @@ import { isMinuteFreq } from './timeCheck'
  * @returns {string}
  */
 export function pad2(n) {
-  return String(n).padStart(2, '0')
+  return String(n).padStart(2, "0");
 }
 
 /**
@@ -36,21 +33,21 @@ export function pad2(n) {
  */
 export function formatDateTime(date, includeTime = false) {
   if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
-    return ''
+    return "";
   }
   
-  const Y = date.getFullYear()
-  const M = pad2(date.getMonth() + 1)
-  const D = pad2(date.getDate())
+  const Y = date.getFullYear();
+  const M = pad2(date.getMonth() + 1);
+  const D = pad2(date.getDate());
   
   if (!includeTime) {
-    return `${Y}-${M}-${D}`
+    return `${Y}-${M}-${D}`;
   }
   
-  const h = pad2(date.getHours())
-  const m = pad2(date.getMinutes())
+  const h = pad2(date.getHours());
+  const m = pad2(date.getMinutes());
   
-  return `${Y}-${M}-${D} ${h}:${m}`
+  return `${Y}-${M}-${D} ${h}:${m}`;
 }
 
 /**
@@ -63,18 +60,38 @@ export function formatDateTime(date, includeTime = false) {
  * 
  * @param {string} freq - 频率
  * @param {number|string|Date} timeValue - 时间值
- * @returns {string}
+ * @returns {string} 格式化后的字符串
  * 
  * @example
  *   formatTimeByFreq('1d', 1730448000000) → "2024-11-01"
  *   formatTimeByFreq('5m', 1730448000000) → "2024-11-01 15:00"
  */
 export function formatTimeByFreq(freq, timeValue) {
-  const date = parseTimeValue(timeValue)
+  const date = parseTimeValue(timeValue);
   if (!date) {
-    return ''
+    return "";
   }
   
-  const includeTime = isMinuteFreq(freq)
-  return formatDateTime(date, includeTime)
+  const includeTime = isMinuteFreq(freq);
+  return formatDateTime(date, includeTime);
+}
+
+/**
+ * 将 YYYYMMDD 整数格式化为 "YYYY-MM-DD"
+ * 
+ * @param {number} ymdInt - 形如 20250115
+ * @returns {string}
+ * 
+ * @example
+ *   formatYmdInt(20241101) → "2024-11-01"
+ */
+export function formatYmdInt(ymdInt) {
+  const n = Number(ymdInt);
+  if (!Number.isFinite(n)) return "";
+  const s = String(n).padStart(8, "0");
+  if (s.length !== 8) return "";
+  const y = s.slice(0, 4);
+  const m = s.slice(4, 6);
+  const d = s.slice(6, 8);
+  return `${y}-${m}-${d}`;
 }

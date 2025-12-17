@@ -1,6 +1,6 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V9.1 - 档案由 /api/profile/current 提供 + 第一行补充 symbol_index 元信息
+<!-- V9.2 - 档案由 /api/profile/current 提供 + 第一行补充 symbol_index 元信息
      
      本版新增：
        - 在第1行“名称（代码）”之后，追加展示来自 symbol_index 的：
@@ -145,6 +145,9 @@ import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
 import SymbolActions from "./symbol/SymbolActions.vue";
+
+import { formatDateTime, formatYmdInt } from "@/utils/timeFormat";
+import { parseTimeValue } from "@/utils/timeParse";
 
 const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);
@@ -442,22 +445,6 @@ const hasProfileInfo = computed(() => {
 });
 
 // ===== 格式化工具 =====
-function formatShares(shares) {
-  if (!shares) return "-";
-
-  const num = Number(shares);
-
-  if (!Number.isFinite(num) || num <= 0) return "-";
-
-  if (num >= 1e8) {
-    return `${(num / 1e8).toFixed(2)}亿`;
-  } else if (num >= 1e4) {
-    return `${(num / 1e4).toFixed(2)}万`;
-  } else {
-    return `${num.toFixed(0)}`;
-  }
-}
-
 function formatPe(pe) {
   const num = Number(pe);
   if (!Number.isFinite(num) || num <= 0) return "-";
@@ -466,15 +453,17 @@ function formatPe(pe) {
 
 function formatUpdatedAt(str) {
   if (!str) return "-";
-  const s = String(str).replace("T", " ");
-  return s.length >= 16 ? s.slice(0, 16) : s;
+  const dt = parseTimeValue(str);
+  if (!dt) return "-";
+  // 显示到分钟即可
+  return formatDateTime(dt, true);
 }
 
 function formatListingDate(intVal) {
   if (!intVal) return "";
-  const s = String(intVal);
-  if (s.length !== 8) return "";
-  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  const n = Number(intVal);
+  if (!Number.isFinite(n)) return "";
+  return formatYmdInt(n);
 }
 </script>
 

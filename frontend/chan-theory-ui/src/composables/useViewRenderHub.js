@@ -1,23 +1,18 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewRenderHub.js
 // ==============================
-// V10.0 - 性能优化版 + 标记宽度实时刷新
+// V10.2 - 连续性屏障接入上市日期 + 交易日历版
 //
-// 核心改造：
-//   1. 删除 deep watch（数据都是整体替换，不需要深度监听）
-//   2. 删除悬浮触发重绘（ECharts 原生支持，不需要重新 setOption）
-//   3. 新增批处理机制（拦截 watch，延迟到异步任务完成后统一渲染）
-//   4. 新增标记宽度监听（barsCount 变化时自动刷新标记宽度）
-//
-// 性能提升：
-//   - 切换标的：9次渲染 → 1次渲染（75% 性能提升）
-//   - 悬浮响应：150ms → 0ms（消除卡顿）
-//   - 标记宽度：立即响应缩放操作
+// 调整要点：
+//   - 通过 useSymbolIndex 获取当前标的的 listing_date；
+//   - 将 ipoYmd 传给 computeInclude → detectContinuityBarriers → useTradeCalendar；
+//   - useViewRenderHub 不直接做屏障判定，只负责参数装配和渲染。
 // ==============================
 
 import { ref, watch, nextTick } from "vue";
 import { getCommandState } from "@/composables/useViewCommandHub";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useUserSettings } from "@/composables/useUserSettings";
+import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { chartBuilderRegistry } from "@/charts/builderRegistry";
 import { createFixedTooltipPositioner } from "@/charts/options";
 import {
@@ -43,6 +38,7 @@ export function useViewRenderHub() {
   if (_singleton) return _singleton;
 
   const settings = useUserSettings();
+  const symbolIndex = useSymbolIndex();
 
   const _vmRef = { vm: null };
   const _hoveredPanelKey = ref(null);
@@ -79,7 +75,7 @@ export function useViewRenderHub() {
     return undefined;
   }
 
-function setHoveredPanel(panelKey) {
+  function setHoveredPanel(panelKey) {
     if (_hoveredPanelKey.value !== panelKey) {
       _hoveredPanelKey.value = panelKey;
       // 悬浮窗体变化时，刷新各图的 axisPointer 模式
@@ -92,7 +88,7 @@ function setHoveredPanel(panelKey) {
   }
 
   function unregisterChart(panelKey) {
-    _charts.delete(String(panelKey));
+    _charts.delete(panelKey);
   }
 
   function setActivePanel(panelKey) {
@@ -333,6 +329,44 @@ function setHoveredPanel(panelKey) {
     });
   }
 
+  function _resolveSymbolMetaForCurrent() {
+    const vm = _vmRef.vm;
+    if (!vm) return { symbol: "", ipoYmd: null };
+
+    let sym = "";
+    try {
+      if (vm.code && typeof vm.code.value === "string" && vm.code.value) {
+        sym = vm.code.value.trim();
+      } else if (vm.meta && vm.meta.value && vm.meta.value.symbol) {
+        sym = String(vm.meta.value.symbol || "").trim();
+      }
+    } catch {
+      sym = "";
+    }
+    if (!sym) return { symbol: "", ipoYmd: null };
+
+    let ipoYmd = null;
+    try {
+      const entry = symbolIndex.findBySymbol(sym);
+      if (entry) {
+        const raw =
+          entry.listingDate != null ? entry.listingDate : entry.listing_date;
+        if (raw != null) {
+          const n = Number(raw);
+          if (
+            Number.isFinite(n) &&
+            n > 19000000 &&
+            n < 30000000
+          ) {
+            ipoYmd = n;
+          }
+        }
+      }
+    } catch {}
+
+    return { symbol: sym, ipoYmd };
+  }
+
   function _calculateChanStructures(candles) {
     if (!candles || !candles.length) {
       return {
@@ -347,10 +381,16 @@ function setHoveredPanel(panelKey) {
       };
     }
 
+    const { ipoYmd } = _resolveSymbolMetaForCurrent();
+
     const policy =
       settings.chanTheory.chanSettings.anchorPolicy ||
       CHAN_DEFAULTS.anchorPolicy;
-    const res = computeInclude(candles, { anchorPolicy: policy });
+
+    const res = computeInclude(candles, {
+      anchorPolicy: policy,
+      ipoYmd,
+    });
 
     const fr = computeFractals(res.reducedBars || [], {
       minTickCount: settings.chanTheory.fractalSettings.minTickCount || 0,
@@ -380,6 +420,17 @@ function setHoveredPanel(panelKey) {
     );
 
     const pivots = computePenPivots(pens.confirmed || []);
+
+    // NEW: 诊断日志（仅 DEV 环境）
+    if (import.meta.env.DEV) {
+      console.log(
+        "[RenderHub][chan] structures",
+        "reducedBars=", (res.reducedBars || []).length,
+        "barriers=", barrierIdxList.length,
+        "sample=", barrierIdxList.slice(0, 10),
+        "ipoYmd=", ipoYmd || null
+      );
+    }
 
     return {
       reduced: res.reducedBars,
@@ -459,6 +510,18 @@ function setHoveredPanel(panelKey) {
       );
     }
 
+  // NEW: 诊断日志，确认是否真的生成了 CHAN_BARRIERS series
+  if (import.meta.env.DEV) {
+    const hasBarrierSeries = out.some(
+      (s) => s && s.id === "CHAN_BARRIERS"
+    );
+    console.log(
+      "[RenderHub][chan] overlaySeries",
+      "totalSeries=", out.length,
+      "hasBarrierSeries=", hasBarrierSeries
+    );
+  }
+
     return out;
   }
 
@@ -471,7 +534,7 @@ function setHoveredPanel(panelKey) {
     }
 
     const anyMarkers =
-      (settings.chanTheory.chanSettings?.showUpDownMarkers ?? true) &&
+      (settings.chanTheory.chanSettings.showUpDownMarkers ?? true) &&
       chanCache?.reduced?.length > 0;
     const markerHeight = CHAN_DEFAULTS.markerHeightPx;
     const markerYOffset = CHAN_DEFAULTS.markerYOffsetPx;

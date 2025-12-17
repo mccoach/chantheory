@@ -1,4 +1,4 @@
-<!-- src/App.vue -->
+<!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
 <!-- V9.0 - 启动指令集版
      
@@ -77,6 +77,7 @@ import SymbolPanel from "./components/features/SymbolPanel.vue";
 import MainChartPanel from "./components/features/MainChartPanel.vue";
 import TechPanels from "./components/features/TechPanels.vue";
 import ModalDialog from "./components/ui/ModalDialog.vue";
+import { useTradeCalendar } from "@/composables/useTradeCalendar";
 
 const backendReady = ref(false);
 
@@ -223,6 +224,19 @@ onMounted(async () => {
   } catch (e) {
     console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
     // 日历失败不阻断 UI，但后端缺口判断可能退化
+  }
+
+  // NEW: 前端加载 trade_calendar 快照并常驻内存（若后端未提供 GET /api/trade-calendar 会失败）
+  try {
+    const tc = useTradeCalendar();
+    await tc.ensureLoaded();
+    if (tc.ready.value) {
+      console.log(`${nowTs()} [App] trade_calendar-snapshot-loaded`);
+    } else {
+      console.warn(`${nowTs()} [App] trade_calendar-snapshot-not-ready (ensureLoaded failed)`);
+    }
+  } catch (e) {
+    console.error(`${nowTs()} [App] trade_calendar-snapshot-load-failed`, e);
   }
 
   // 2) 当前标的行情（K+因子+档案）

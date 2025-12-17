@@ -1,8 +1,8 @@
-// src/utils/timeCheck.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\utils\timeCheck.js
 // ==============================
 // 说明：频率判断工具（纯函数，零副作用）
-// 职责：判断频率类型
-// 设计：单一职责，只做判断，不做计算
+// 职责：判断频率类型（分钟族 / 日族）
+// 设计：单一职责，只做判断，不做格式化或索引计算
 // ==============================
 
 /**
@@ -17,7 +17,7 @@
  *   isMinuteFreq('1d')  → false
  */
 export function isMinuteFreq(freq) {
-  return typeof freq === 'string' && /m$/.test(freq)
+  return typeof freq === "string" && /m$/.test(freq);
 }
 
 /**
@@ -33,5 +33,5 @@ export function isMinuteFreq(freq) {
  *   isDailyFreq('5m') → false
  */
 export function isDailyFreq(freq) {
-  return typeof freq === 'string' && /^(1d|1w|1M)$/.test(freq)
+  return typeof freq === "string" && /^(1d|1w|1M)$/.test(freq);
 }
