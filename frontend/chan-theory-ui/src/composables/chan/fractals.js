@@ -3,6 +3,10 @@
 // 说明：从 useChan.js 拆分出的分型识别模块
 // - 核心职责：从合并K线序列中识别顶分型和底分型。
 // - 算法：采用非重叠扫描，按岛（seq_id）独立进行。
+// - 时间字段：
+//     * 删除未实际使用的 k*_t_iso；
+//     * 仅保留可参与计算/对齐的毫秒时间戳：k1_ts/k2_ts/k3_ts；
+//     * 本模块不做任何字符串格式化；展示/导出时请调用通用时间工具（utils/timeFormat|timeParse）。
 // ==============================
 
 /**
@@ -30,12 +34,31 @@ export function computeFractals(reducedBars, params = {}) {
     params.minCond === "and" || params.minCond === "or" ? params.minCond : "or";
 
   // 工具
-  function G(rb) { return Number(rb?.g_pri); }
-  function D(rb) { return Number(rb?.d_pri); }
-  function T(rb) { return String(rb?.end_t_iso || rb?.start_t_iso || ""); }
-  function Dir(rb) { return Number(rb?.dir_int || 0); }
-  function K2_ORIG(rb, fallback) { return Number.isFinite(+rb?.anchor_idx_orig) ? +rb.anchor_idx_orig : fallback; }
-  function K_RED(idx) { return Number(idx); }
+  function G(rb) {
+    return Number(rb?.g_pri);
+  }
+  function D(rb) {
+    return Number(rb?.d_pri);
+  }
+  function Dir(rb) {
+    return Number(rb?.dir_int || 0);
+  }
+
+  // 毫秒时间戳：优先 end_ts，其次 start_ts；缺失则返回 null
+  function pickTs(rb) {
+    const end = Number(rb?.end_ts);
+    if (Number.isFinite(end)) return end;
+    const start = Number(rb?.start_ts);
+    if (Number.isFinite(start)) return start;
+    return null;
+  }
+
+  function K2_ORIG(rb, fallback) {
+    return Number.isFinite(+rb?.anchor_idx_orig) ? +rb.anchor_idx_orig : fallback;
+  }
+  function K_RED(idx) {
+    return Number(idx);
+  }
 
   function estimateTickUnit(bars) {
     let unit = Infinity;
@@ -82,6 +105,7 @@ export function computeFractals(reducedBars, params = {}) {
           ((g2 - g3) / base) * 100 >= minPct;
     return minCond === "and" ? tickOk && pctOk : tickOk || pctOk;
   }
+
   function passSignificanceBottom(d2, d1, d3, tickUnit) {
     const tickOk =
       minTickCount <= 0
@@ -90,6 +114,7 @@ export function computeFractals(reducedBars, params = {}) {
         ? d1 - d2 >= minTickCount * tickUnit &&
           d3 - d2 >= minTickCount * tickUnit
         : true;
+
     const base = Math.max(Math.abs(d1), Math.abs(d3), 1);
     const pctOk =
       minPct <= 0
@@ -105,33 +130,53 @@ export function computeFractals(reducedBars, params = {}) {
 
     const tickUnit = minTickCount > 0 ? estimateTickUnit(arr) : tickUnitGlobal;
     let i = 0;
+
     while (i + 2 < arr.length) {
-      const b1 = arr[i].rb, b2 = arr[i + 1].rb, b3 = arr[i + 2].rb;
-      const d2 = Dir(b2), d3 = Dir(b3);
-      const G1 = G(b1), D1 = D(b1), G2 = G(b2), D2 = D(b2), G3 = G(b3), D3 = D(b3);
-      const t1 = T(b1), t2 = T(b2), t3 = T(b3);
+      const b1 = arr[i].rb,
+        b2 = arr[i + 1].rb,
+        b3 = arr[i + 2].rb;
+
+      const d2 = Dir(b2),
+        d3 = Dir(b3);
+      const G1 = G(b1),
+        D1 = D(b1),
+        G2 = G(b2),
+        D2v = D(b2),
+        G3 = G(b3),
+        D3 = D(b3);
       const M1 = (G1 + D1) / 2;
-      const k1r = arr[i].idx, k2r = arr[i + 1].idx, k3r = arr[i + 2].idx;
+
+      const k1r = arr[i].idx,
+        k2r = arr[i + 1].idx,
+        k3r = arr[i + 2].idx;
+
       const k2_idx_orig = K2_ORIG(b2, k2r);
+
+      const t1 = pickTs(b1);
+      const t2 = pickTs(b2);
+      const t3 = pickTs(b3);
 
       if (d2 > 0 && d3 < 0) {
         if (passSignificanceTop(G2, G1, G3, tickUnit)) {
           let strength = "standard";
           if (D3 < D1) strength = "strong";
           else if (D3 > M1) strength = "weak";
+
           out.push({
             id_str: `F-${k1r}-${k2r}-${k3r}-top`,
             kind_enum: "top",
             k1_idx_red: K_RED(k1r),
             k2_idx_red: K_RED(k2r),
             k3_idx_red: K_RED(k3r),
-            k1_t_iso: t1,
-            k2_t_iso: t2,
-            k3_t_iso: t3,
+
+            k1_ts: t1,
+            k2_ts: t2,
+            k3_ts: t3,
+
             k1_g_pri: G1,
             k1_d_pri: D1,
             k2_g_pri: G2,
-            k2_d_pri: D2,
+            k2_d_pri: D2v,
             k3_g_pri: G3,
             k3_d_pri: D3,
             k1_mid_pri: M1,
@@ -151,29 +196,33 @@ export function computeFractals(reducedBars, params = {}) {
             note_str: "",
             seq_id: sid,
           });
+
           i += 1;
           continue;
         }
       }
 
       if (d2 < 0 && d3 > 0) {
-        if (passSignificanceBottom(D2, D1, D3, tickUnit)) {
+        if (passSignificanceBottom(D2v, D1, D3, tickUnit)) {
           let strength = "standard";
           if (G3 > G1) strength = "strong";
           else if (G3 < M1) strength = "weak";
+
           out.push({
             id_str: `F-${k1r}-${k2r}-${k3r}-bottom`,
             kind_enum: "bottom",
             k1_idx_red: K_RED(k1r),
             k2_idx_red: K_RED(k2r),
             k3_idx_red: K_RED(k3r),
-            k1_t_iso: t1,
-            k2_t_iso: t2,
-            k3_t_iso: t3,
+
+            k1_ts: t1,
+            k2_ts: t2,
+            k3_ts: t3,
+
             k1_g_pri: G1,
             k1_d_pri: D1,
             k2_g_pri: G2,
-            k2_d_pri: D2,
+            k2_d_pri: D2v,
             k3_g_pri: G3,
             k3_d_pri: D3,
             k1_mid_pri: M1,
@@ -193,10 +242,12 @@ export function computeFractals(reducedBars, params = {}) {
             note_str: "",
             seq_id: sid,
           });
+
           i += 1;
           continue;
         }
       }
+
       i += 1;
     }
 
@@ -208,30 +259,45 @@ export function computeFractals(reducedBars, params = {}) {
       arr2.push(f);
       byStartRed.set(f.k1_idx_red, arr2);
     }
+
     for (const a of groupOut) {
       if (a.cf_paired_bool) continue;
+
       const candidates = byStartRed.get(a.k3_idx_red + 1) || [];
       for (const b of candidates) {
         if (a.kind_enum !== b.kind_enum) continue;
+
         if (a.kind_enum === "top") {
-          const G2 = a.k2_g_pri, G3 = a.k3_g_pri, D3 = a.k3_d_pri;
-          const G4 = b.k1_g_pri, D4 = b.k1_d_pri, G5 = b.k2_g_pri;
-          if (G5 < G2 && G4 < G3 && D4 < D3) {
+          const G2a = a.k2_g_pri,
+            G3a = a.k3_g_pri,
+            D3a = a.k3_d_pri;
+          const G4b = b.k1_g_pri,
+            D4b = b.k1_d_pri,
+            G5b = b.k2_g_pri;
+
+          if (G5b < G2a && G4b < G3a && D4b < D3a) {
             a.cf_paired_bool = true;
             a.cf_pair_id_str = `${a.id_str}|${b.id_str}`;
             a.cf_role_enum = "first";
+
             b.cf_paired_bool = true;
             b.cf_pair_id_str = `${a.id_str}|${b.id_str}`;
             b.cf_role_enum = "second";
             break;
           }
         } else {
-          const D2 = a.k2_d_pri, D3 = a.k3_d_pri, G3 = a.k3_g_pri;
-          const G4 = b.k1_g_pri, D4 = b.k1_d_pri, D5 = b.k2_d_pri;
-          if (D5 > D2 && D4 > D3 && G4 > G3) {
+          const D2a = a.k2_d_pri,
+            D3a = a.k3_d_pri,
+            G3a = a.k3_g_pri;
+          const G4b = b.k1_g_pri,
+            D4b = b.k1_d_pri,
+            D5b = b.k2_d_pri;
+
+          if (D5b > D2a && D4b > D3a && G4b > G3a) {
             a.cf_paired_bool = true;
             a.cf_pair_id_str = `${a.id_str}|${b.id_str}`;
             a.cf_role_enum = "first";
+
             b.cf_paired_bool = true;
             b.cf_pair_id_str = `${a.id_str}|${b.id_str}`;
             b.cf_role_enum = "second";

@@ -74,7 +74,7 @@
         </span>
         <span v-if="middleListingDate" class="sym-meta-chip">|</span>
         <span v-if="middleListingDate" class="sym-meta-chip">
-          上市：{{ middleListingDate }}
+          上市日期：{{ middleListingDate }}
         </span>
         <span v-if="middleMarket" class="sym-meta-chip">|</span>
         <span v-if="profileInfo.updatedAt" class="sym-meta-chip">
