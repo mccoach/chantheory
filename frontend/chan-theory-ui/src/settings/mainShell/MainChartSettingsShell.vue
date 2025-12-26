@@ -24,7 +24,7 @@ import { inject, ref, watch, provide, } from "vue";
 import MarketDisplaySettings from "@/settings/panels/MarketDisplaySettings.vue";
 import ChanTheorySettings from "@/settings/panels/ChanTheorySettings.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useMarketView } from "@/composables/useMarketView"; // 修正：这是一个composables
+import { useMarketView } from "@/composables/useMarketView";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSettingsManager } from "@/composables/useSettingsManager";
 import {
@@ -34,6 +34,7 @@ import {
   FRACTAL_DEFAULTS,
   DEFAULT_APP_PREFERENCES,
   PENS_DEFAULTS,
+  META_SEGMENT_DEFAULTS,
   SEGMENT_DEFAULTS,
   CHAN_PEN_PIVOT_DEFAULTS,
 } from "@/constants";
@@ -62,9 +63,11 @@ const maManager = useSettingsManager({
 });
 provide("maDraft", maManager.draft);
 
+// NEW: chanDefaultConfig 增加 metaSegment（与 segment 平起平坐）
 const chanDefaultConfig = {
   ...CHAN_DEFAULTS,
   pen: PENS_DEFAULTS,
+  metaSegment: META_SEGMENT_DEFAULTS,
   segment: SEGMENT_DEFAULTS,
   penPivot: CHAN_PEN_PIVOT_DEFAULTS,
 };
@@ -76,6 +79,7 @@ const chanManager = useSettingsManager({
       ...chanDefaultConfig,
       ...localConfig,
       pen: { ...PENS_DEFAULTS, ...(localConfig.pen || {}) },
+      metaSegment: { ...META_SEGMENT_DEFAULTS, ...(localConfig.metaSegment || {}) },
       segment: { ...SEGMENT_DEFAULTS, ...(localConfig.segment || {}) },
       penPivot: { ...CHAN_PEN_PIVOT_DEFAULTS, ...(localConfig.penPivot || {}) },
     };

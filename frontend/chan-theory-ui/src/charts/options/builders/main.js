@@ -13,6 +13,9 @@ import { STYLE_PALETTE, DEFAULT_KLINE_STYLE } from "@/constants";
 import { applyLayout } from "../positioning/layout";
 import { makeMainTooltipFormatter } from "../tooltips/index";
 
+// NEW: Idx-Only 合并K渲染需要从 candles 回溯价格，并动态推导 anchor
+import { candleH, candleL, resolveAnchorIdx } from "@/composables/chan/common";
+
 function asArray(x) {
   return Array.isArray(x) ? x : [];
 }
@@ -31,6 +34,8 @@ export function buildMainChartOption(
     adjust,
     reducedBars,
     mapOrigToReduced,
+    // NEW: 由上层传入（来自 chanSettings.anchorPolicy），用于动态推导合并K落点
+    anchorPolicy,
   },
   ui
 ) {
@@ -104,16 +109,24 @@ export function buildMainChartOption(
       const hlSpan = new Array(n).fill(null);
       const upIndexSet = new Set();
 
+      // NEW: Idx-Only 方式计算合并K的 hi/lo（通过 g_idx_orig/d_idx_orig 回溯 candles）
+      // NEW: 合并K落点 idx 通过 resolveAnchorIdx 动态推导（不再依赖 rb.anchor_idx_orig）
+      const ap =
+        anchorPolicy === "left" || anchorPolicy === "right" || anchorPolicy === "extreme"
+          ? anchorPolicy
+          : "right";
+
       for (const rb of reducedBars) {
-        const idx = Math.max(
-          0,
-          Math.min(n - 1, Number(rb?.anchor_idx_orig ?? rb?.end_idx_orig ?? 0))
-        );
-        const hi = Number(rb?.g_pri),
-          lo = Number(rb?.d_pri);
+        const idx = resolveAnchorIdx(rb, ap);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= n) continue;
+
+        const hi = candleH(list, rb?.g_idx_orig);
+        const lo = candleL(list, rb?.d_idx_orig);
         if (!Number.isFinite(hi) || !Number.isFinite(lo) || hi < lo) continue;
+
         baseLow[idx] = lo;
         hlSpan[idx] = hi - lo;
+
         if (Number(rb?.dir_int || 0) > 0) upIndexSet.add(idx);
       }
 
@@ -143,7 +156,7 @@ export function buildMainChartOption(
             : {
                 value: v,
                 itemStyle: {
-                  borderColor: upIndexSet.has(i) ? MK.upColor : MK.downColor,
+                  borderColor: upIndexSet.has(i) ? upC : dnC,
                 },
               }
         ),
@@ -153,8 +166,7 @@ export function buildMainChartOption(
         barGap: "-100%",
         itemStyle: {
           color: (p) => (upIndexSet.has(p.dataIndex) ? upFill : dnFill),
-          borderColor: (p) =>
-            upIndexSet.has(p.dataIndex) ? MK.upColor : MK.downColor,
+          borderColor: (p) => (upIndexSet.has(p.dataIndex) ? upC : dnC),
           borderWidth: outlineW,
           opacity: 1,
         },

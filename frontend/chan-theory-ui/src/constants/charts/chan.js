@@ -121,10 +121,21 @@ export const PENS_DEFAULTS = {
   provisionalStyle: "dashed",  // 预备笔的线型（✅ 设置窗可改）
 };
 
-// ===== 线段配置 =====
+// ===== 元线段配置（新增：与线段同等地位，进入设置窗）=====
+export const META_SEGMENT_DEFAULTS = {
+  // --- 总开关（设置窗已暴露）---
+  enabled: false,            // 是否绘制元线段（✅ 设置窗可改）
+
+  // --- 线条样式（设置窗已暴露）---
+  color: "rgba(16, 238, 208, 0.93)", // 元线段颜色（✅ 设置窗可改）
+  lineWidth: 2,           // 元线段宽度（✅ 设置窗可改）
+  lineStyle: "dotted",      // 元线段样式（✅ 设置窗可改）
+};
+
+// ===== 线段配置（最终线段）=====
 export const SEGMENT_DEFAULTS = {
   // --- 总开关（设置窗已暴露）---
-  enabled: false,           // 是否绘制线段（默认关闭）（✅ 设置窗可改）
+  enabled: true,           // 是否绘制线段（默认关闭）（✅ 设置窗可改）
 
   // --- 线条样式（设置窗已暴露）---
   color: "#FFD700",         // 线段颜色（✅ 设置窗可改）

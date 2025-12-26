@@ -2,10 +2,8 @@
 // ==============================
 // V10.2 - 连续性屏障接入上市日期 + 交易日历版
 //
-// 调整要点：
-//   - 通过 useSymbolIndex 获取当前标的的 listing_date；
-//   - 将 ipoYmd 传给 computeInclude → detectContinuityBarriers → useTradeCalendar；
-//   - useViewRenderHub 不直接做屏障判定，只负责参数装配和渲染。
+// 当前版本改动点：
+//   - 同时绘制元线段(metaSegments)与最终线段(finalSegments)
 // ==============================
 
 import { ref, watch, nextTick } from "vue";
@@ -18,6 +16,7 @@ import { createFixedTooltipPositioner } from "@/charts/options";
 import {
   computeInclude,
   computeFractals,
+  computeFractalConfirmPairs,
   computePens,
   computeSegments,
   computePenPivots,
@@ -88,7 +87,7 @@ export function useViewRenderHub() {
   }
 
   function unregisterChart(panelKey) {
-    _charts.delete(panelKey);
+    _charts.delete(String(panelKey));
   }
 
   function setActivePanel(panelKey) {
@@ -353,11 +352,7 @@ export function useViewRenderHub() {
           entry.listingDate != null ? entry.listingDate : entry.listing_date;
         if (raw != null) {
           const n = Number(raw);
-          if (
-            Number.isFinite(n) &&
-            n > 19000000 &&
-            n < 30000000
-          ) {
+          if (Number.isFinite(n) && n > 19000000 && n < 30000000) {
             ipoYmd = n;
           }
         }
@@ -374,8 +369,11 @@ export function useViewRenderHub() {
         map: [],
         meta: null,
         fractals: [],
+        fractalConfirmPairs: { pairs: [], paired: [], role: [] },
         pens: { confirmed: [] },
-        segments: [],
+        // NEW: metaSegments / finalSegments
+        metaSegments: [],
+        finalSegments: [],
         barriersIndices: [],
         pivots: [],
       };
@@ -392,53 +390,54 @@ export function useViewRenderHub() {
       ipoYmd,
     });
 
-    const fr = computeFractals(res.reducedBars || [], {
+    // ===== 改动点：computeFractals 需要 candles（Single Source of Truth）=====
+    const fr = computeFractals(candles, res.reducedBars || [], {
       minTickCount: settings.chanTheory.fractalSettings.minTickCount || 0,
       minPct: settings.chanTheory.fractalSettings.minPct || 0,
       minCond: String(settings.chanTheory.fractalSettings.minCond || "or"),
     });
 
+    // ===== NEW: 确认分型（派生结构）=====
+    const frConfirm = computeFractalConfirmPairs(
+      candles,
+      res.reducedBars || [],
+      fr || []
+    );
+
+    // NEW: 笔算法改为显式传入 candles（单一真相源）
     const pens = computePens(
+      candles,
       res.reducedBars || [],
       fr || [],
       res.mapOrigToReduced || [],
       { minGapReduced: 4 }
     );
 
-    const segments = computeSegments(pens.confirmed || []);
+    // NEW: computeSegments 返回 { metaSegments, finalSegments }
+    const segRes = computeSegments(candles, res.reducedBars || [], pens.confirmed || []);
+    const metaSegments = Array.isArray(segRes?.metaSegments) ? segRes.metaSegments : [];
+    const finalSegments = Array.isArray(segRes?.finalSegments) ? segRes.finalSegments : [];
 
-    const barrierIdxList = (res.reducedBars || []).reduce(
-      (acc, cur, i, arr) => {
-        if (cur && cur.barrier_after_prev_bool) {
-          const prev = i > 0 ? arr[i - 1] : null;
-          if (prev) acc.push(prev.end_idx_orig);
-          acc.push(cur.start_idx_orig);
-        }
-        return acc;
-      },
-      []
-    );
+    const barrierIdxList = (res.reducedBars || []).reduce((acc, cur, i, arr) => {
+      if (cur && cur.barrier_after_prev_bool) {
+        const prev = i > 0 ? arr[i - 1] : null;
+        if (prev) acc.push(prev.end_idx_orig);
+        acc.push(cur.start_idx_orig);
+      }
+      return acc;
+    }, []);
 
     const pivots = computePenPivots(pens.confirmed || []);
-
-    // NEW: 诊断日志（仅 DEV 环境）
-    if (import.meta.env.DEV) {
-      console.log(
-        "[RenderHub][chan] structures",
-        "reducedBars=", (res.reducedBars || []).length,
-        "barriers=", barrierIdxList.length,
-        "sample=", barrierIdxList.slice(0, 10),
-        "ipoYmd=", ipoYmd || null
-      );
-    }
 
     return {
       reduced: res.reducedBars,
       map: res.mapOrigToReduced,
       meta: res.meta,
       fractals: fr,
+      fractalConfirmPairs: frConfirm,
       pens,
-      segments,
+      metaSegments,
+      finalSegments,
       barriersIndices: barrierIdxList,
       pivots,
     };
@@ -449,10 +448,19 @@ export function useViewRenderHub() {
     visCount,
     markerW,
     chanCache,
+    candles,
   }) {
     const out = [];
-    const { reduced, fractals, pens, segments, barriersIndices, pivots } =
-      chanCache;
+    const {
+      reduced,
+      fractals,
+      fractalConfirmPairs,
+      pens,
+      metaSegments,
+      finalSegments,
+      barriersIndices,
+      pivots,
+    } = chanCache;
 
     if (barriersIndices?.length) {
       out.push(...(buildBarrierLines(barriersIndices).series || []));
@@ -475,6 +483,8 @@ export function useViewRenderHub() {
     ) {
       out.push(
         ...(buildFractalMarkers(reduced, fractals, {
+          candles,
+          confirmPairs: fractalConfirmPairs,
           hostWidth: hostW,
           visCount,
           symbolWidthPx: markerW,
@@ -490,37 +500,32 @@ export function useViewRenderHub() {
       reduced?.length &&
       (pens?.confirmed?.length || pens?.provisional)
     ) {
+      // NEW: 笔渲染需要 candles 以回溯端点 y
       out.push(
-        ...(buildPenLines(pens, { barrierIdxList: barriersIndices }).series ||
-          [])
+        ...(buildPenLines(pens, {
+          candles,
+          barrierIdxList: barriersIndices,
+        }).series || [])
       );
     }
 
-    if (segments?.length) {
+    // NEW: 同时绘制 元线段 + 最终线段
+    // 最终线段样式：沿用当前 settings.chanTheory.chanSettings.segment（由 buildSegmentLines 内部处理）
+    // 元线段样式：由 buildSegmentLines 内部使用 META_SEGMENT_DEFAULTS 常量处理
+    if ((metaSegments?.length || finalSegments?.length)) {
       out.push(
-        ...(buildSegmentLines(segments, { barrierIdxList: barriersIndices })
-          .series || [])
+        ...(buildSegmentLines(
+          { metaSegments, finalSegments },
+          { candles, barrierIdxList: barriersIndices }
+        ).series || [])
       );
     }
 
     if (pivots?.length) {
       out.push(
-        ...(buildPenPivotAreas(pivots, { barrierIdxList: barriersIndices })
-          .series || [])
+        ...(buildPenPivotAreas(pivots, { barrierIdxList: barriersIndices }).series || [])
       );
     }
-
-  // NEW: 诊断日志，确认是否真的生成了 CHAN_BARRIERS series
-  if (import.meta.env.DEV) {
-    const hasBarrierSeries = out.some(
-      (s) => s && s.id === "CHAN_BARRIERS"
-    );
-    console.log(
-      "[RenderHub][chan] overlaySeries",
-      "totalSeries=", out.length,
-      "hasBarrierSeries=", hasBarrierSeries
-    );
-  }
 
     return out;
   }
@@ -551,6 +556,8 @@ export function useViewRenderHub() {
         adjust: vm.adjust.value,
         reducedBars: chanCache.reduced,
         mapOrigToReduced: chanCache.map,
+        // NEW: 传给主图 builder，用于合并K动态锚点推导
+        anchorPolicy: settings.chanTheory.chanSettings.anchorPolicy,
       },
       {
         initialRange,
@@ -566,7 +573,8 @@ export function useViewRenderHub() {
       hostW: st.hostWidthPx,
       visCount: bars,
       markerW: st.markerWidthPx,
-      chanCache: chanCache,
+      chanCache,
+      candles: vm.candles.value,
     });
 
     return {
@@ -717,10 +725,6 @@ export function useViewRenderHub() {
     _updateAxisPointerModes();
   }
 
-  function getTipPositioner() {
-    return _getTipPositioner();
-  }
-
   // ===== 批处理执行函数 =====
   async function _executeBatch(asyncTask) {
     _batchFlag.value = true;
@@ -742,7 +746,9 @@ export function useViewRenderHub() {
     setMarketView,
     onRender,
     offRender,
-    getTipPositioner,
+    getTipPositioner() {
+      return _getTipPositioner();
+    },
     setHoveredPanel,
     registerChart,
     unregisterChart,

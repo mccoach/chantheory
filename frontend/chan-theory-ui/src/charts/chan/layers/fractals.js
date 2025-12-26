@@ -1,58 +1,83 @@
 // src/charts/chan/layers/fractals.js
 // ==============================
-// 缠论图层：分型标记 (Fractals)
-// 职责：将分型数据转换为ECharts散点图系列
-// 算法：处理不同强度和确认状态的样式
-// 
-// 修复要点：
-//   - 已暴露参数：从 cfg 读取（topColor/bottomColor/fill等）
-//   - 未暴露参数：直接用常量（markerHeightPx/markerYOffsetPx等）
+// 缠论图层：分型标记 (Fractals) - Idx-Only Schema + confirmPairs 版
+//
+// 关键点：
+//   - fractals 本体严格 Idx-Only，不包含任何 pri/ts/cf_* 字段；
+//   - y 值全部通过 k2_idx_orig 回溯 candles：
+//       * top    -> candles[idx].h
+//       * bottom -> candles[idx].l
+//   - “确认分型/确认连线”由 env.confirmPairs（派生结构）驱动，回归旧功能，但不污染 fractal 存储结构。
 // ==============================
 
 import { FRACTAL_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { deriveSymbolSize } from "./geometry";
+import { candleH, candleL, toNonNegIntIdx } from "@/composables/chan/common";
 
-export function buildFractalMarkers(reducedBars, fractals, env = {}) {
+export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const settings = useUserSettings();
-  
+
   // ===== 合并设置：优先用户配置，兜底默认值 =====
   const cfg = Object.assign(
     {},
     FRACTAL_DEFAULTS,
     (settings.chanTheory && settings.chanTheory.fractalSettings) || {}
   );
-  
+
   if (!cfg.enabled) return { series: [] };
 
-  // ===== 几何计算：已暴露参数走settings，未暴露参数用常量 =====
+  const candles = Array.isArray(env?.candles) ? env.candles : null;
+  if (!candles || !candles.length) return { series: [] };
+
+  const confirmPairs = env?.confirmPairs || null;
+  const pairedArr = Array.isArray(confirmPairs?.paired) ? confirmPairs.paired : null;
+  const pairsArr = Array.isArray(confirmPairs?.pairs) ? confirmPairs.pairs : [];
+
+  // ===== 几何计算 =====
   const { widthPx: markerW, heightPx: markerH } = deriveSymbolSize({
     hostWidth: env.hostWidth,
     visCount: env.visCount,
-    minPx: FRACTAL_DEFAULTS.markerMinPx,      // ← 未暴露，直接用常量
-    maxPx: FRACTAL_DEFAULTS.markerMaxPx,      // ← 未暴露，直接用常量
+    minPx: FRACTAL_DEFAULTS.markerMinPx,
+    maxPx: FRACTAL_DEFAULTS.markerMaxPx,
     overrideWidth: env.symbolWidthPx,
-    heightPx: FRACTAL_DEFAULTS.markerHeightPx,  // ← 未暴露，直接用常量
+    heightPx: FRACTAL_DEFAULTS.markerHeightPx,
   });
 
-  // ===== 偏移计算：未暴露参数直接用常量 =====
-  const apexGap = FRACTAL_DEFAULTS.markerYOffsetPx;  // ← 未暴露，直接用常量
+  const apexGap = FRACTAL_DEFAULTS.markerYOffsetPx;
   const yOffTop = -(markerH / 2 + apexGap);
   const yOffBottom = +(markerH / 2 + apexGap);
+
+  function yOfFractal(f) {
+    const idx = toNonNegIntIdx(f?.k2_idx_orig);
+    if (idx == null) return null;
+    if (String(f?.kind_enum || "") === "top") {
+      return candleH(candles, idx);
+    }
+    return candleL(candles, idx);
+  }
 
   const bins = {
     top: { strong: [], standard: [], weak: [] },
     bottom: { strong: [], standard: [], weak: [] },
   };
 
-  // ===== 数据分组 =====
+  // ===== 常规分型数据分组 =====
   for (const f of fractals || []) {
-    if (!cfg.showStrength?.[f.strength_enum]) continue;
-    const x = Number(f?.k2_idx_orig);
-    if (f.kind_enum === "top")
-      bins.top[f.strength_enum].push({ value: [x, f.k2_g_pri] });
-    else 
-      bins.bottom[f.strength_enum].push({ value: [x, f.k2_d_pri] });
+    const strength = String(f?.strength_enum || "");
+    if (!cfg.showStrength?.[strength]) continue;
+
+    const x = toNonNegIntIdx(f?.k2_idx_orig);
+    if (x == null) continue;
+
+    const y = yOfFractal(f);
+    if (!Number.isFinite(y)) continue;
+
+    if (String(f.kind_enum) === "top") {
+      bins.top[strength].push({ value: [x, y] });
+    } else {
+      bins.bottom[strength].push({ value: [x, y] });
+    }
   }
 
   const series = [];
@@ -63,19 +88,19 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     { k: "standard", name: "TOP_STANDARD" },
     { k: "weak", name: "TOP_WEAK" },
   ];
-  
+
   for (const sp of topSpec) {
     const data = bins.top[sp.k];
     if (!data.length) continue;
-    
-    // ===== 读取配置：已暴露参数从cfg读取 =====
+
     const st = cfg.styleByStrength?.[sp.k] || {};
     const enabled = st.enabled ?? true;
     if (!enabled) continue;
-    
-    const shape = st.topShape || FRACTAL_DEFAULTS.topShape;  // ← 已暴露
-    const color = st.topColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.topColor;  // ← 已暴露
-    const fillMode = st.fill || "solid";  // ← 已暴露
+
+    const shape = st.topShape || FRACTAL_DEFAULTS.topShape;
+    const color =
+      st.topColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.topColor;
+    const fillMode = st.fill || "solid";
     const isHollow = fillMode === "hollow";
 
     series.push({
@@ -89,10 +114,10 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       symbolSize: () => [markerW, markerH],
       symbolOffset: [0, yOffTop],
       itemStyle: isHollow
-        ? { 
-            color: "transparent", 
-            borderColor: color, 
-            borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth  // ← 未暴露，直接用常量
+        ? {
+            color: "transparent",
+            borderColor: color,
+            borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth,
           }
         : { color },
       z: 5,
@@ -107,20 +132,21 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     { k: "standard", name: "BOT_STANDARD" },
     { k: "weak", name: "BOT_WEAK" },
   ];
-  
+
   for (const sp of botSpec) {
     const data = bins.bottom[sp.k];
     if (!data.length) continue;
-    
+
     const st = cfg.styleByStrength?.[sp.k] || {};
     const enabled = st.enabled ?? true;
     if (!enabled) continue;
-    
-    const shape = st.bottomShape || FRACTAL_DEFAULTS.bottomShape;  // ← 已暴露
-    const color = st.bottomColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.bottomColor;  // ← 已暴露
-    const fillMode = st.fill || "solid";  // ← 已暴露
+
+    const shape = st.bottomShape || FRACTAL_DEFAULTS.bottomShape;
+    const color =
+      st.bottomColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.bottomColor;
+    const fillMode = st.fill || "solid";
     const isHollow = fillMode === "hollow";
-    
+
     series.push({
       id: `FR_BOT_${sp.k}`,
       name: `BOT_${sp.k.toUpperCase()}`,
@@ -132,10 +158,10 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
       symbolSize: () => [markerW, markerH],
       symbolOffset: [0, yOffBottom],
       itemStyle: isHollow
-        ? { 
-            color: "transparent", 
-            borderColor: color, 
-            borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth  // ← 未暴露，直接用常量
+        ? {
+            color: "transparent",
+            borderColor: color,
+            borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth,
           }
         : { color },
       z: 5,
@@ -144,28 +170,37 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     });
   }
 
-  // ===== 确认分型 =====
+  // ===== 确认分型标记（由 confirmPairs 派生结构驱动）=====
   const cs = cfg.confirmStyle || {};
-  if (cs.enabled) {
+  const confirmEnabled = cs.enabled === true;
+
+  if (confirmEnabled && pairedArr && pairedArr.length === (fractals || []).length) {
     const topConfirmData = [];
     const botConfirmData = [];
-    
-    for (const f of fractals || []) {
-      if (!f?.cf_paired_bool) continue;
-      if (f.kind_enum === "top")
-        topConfirmData.push({ value: [f.k2_idx_orig, f.k2_g_pri] });
-      else 
-        botConfirmData.push({ value: [f.k2_idx_orig, f.k2_d_pri] });
+
+    for (let i = 0; i < (fractals || []).length; i++) {
+      if (!pairedArr[i]) continue;
+      const f = fractals[i];
+      const x = toNonNegIntIdx(f?.k2_idx_orig);
+      if (x == null) continue;
+      const y = yOfFractal(f);
+      if (!Number.isFinite(y)) continue;
+
+      if (String(f?.kind_enum || "") === "top") {
+        topConfirmData.push({ value: [x, y] });
+      } else if (String(f?.kind_enum || "") === "bottom") {
+        botConfirmData.push({ value: [x, y] });
+      }
     }
-    
-    // 额外间距（未暴露参数）
+
+    // 额外间距（保持旧版“确认标记在外侧”体验）
     const extraGap = FRACTAL_DEFAULTS.markerHeightPx + FRACTAL_DEFAULTS.markerYOffsetPx;
-    
+
     if (topConfirmData.length) {
-      const shape = cs.topShape || FRACTAL_DEFAULTS.confirmStyle.topShape;  // ← 已暴露
-      const color = cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor;  // ← 已暴露
-      const isHollow = (cs.fill || "solid") === "hollow";  // ← 已暴露
-      
+      const shape = cs.topShape || FRACTAL_DEFAULTS.confirmStyle.topShape;
+      const color = cs.topColor || FRACTAL_DEFAULTS.confirmStyle.topColor;
+      const isHollow = (cs.fill || "solid") === "hollow";
+
       series.push({
         id: "FR_TOP_CONFIRM",
         name: "TOP_CONFIRM",
@@ -177,10 +212,10 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         symbolSize: () => [markerW, markerH],
         symbolOffset: [0, -(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
-          ? { 
-              color: "transparent", 
-              borderColor: color, 
-              borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth  // ← 未暴露，直接用常量
+          ? {
+              color: "transparent",
+              borderColor: color,
+              borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth,
             }
           : { color },
         z: 6,
@@ -188,12 +223,12 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         tooltip: { show: false },
       });
     }
-    
+
     if (botConfirmData.length) {
-      const shape = cs.bottomShape || FRACTAL_DEFAULTS.confirmStyle.bottomShape;  // ← 已暴露
-      const color = cs.bottomColor || FRACTAL_DEFAULTS.confirmStyle.bottomColor;  // ← 已暴露
-      const isHollow = (cs.fill || "solid") === "hollow";  // ← 已暴露
-      
+      const shape = cs.bottomShape || FRACTAL_DEFAULTS.confirmStyle.bottomShape;
+      const color = cs.bottomColor || FRACTAL_DEFAULTS.confirmStyle.bottomColor;
+      const isHollow = (cs.fill || "solid") === "hollow";
+
       series.push({
         id: "FR_BOT_CONFIRM",
         name: "BOT_CONFIRM",
@@ -205,10 +240,10 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
         symbolSize: () => [markerW, markerH],
         symbolOffset: [0, +(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
-          ? { 
-              color: "transparent", 
-              borderColor: color, 
-              borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth  // ← 未暴露，直接用常量
+          ? {
+              color: "transparent",
+              borderColor: color,
+              borderWidth: FRACTAL_DEFAULTS.hollowBorderWidth,
             }
           : { color },
         z: 6,
@@ -218,36 +253,32 @@ export function buildFractalMarkers(reducedBars, fractals, env = {}) {
     }
   }
 
-  // ===== 确认连线（未暴露功能，直接用常量）=====
-  if (cfg.showConfirmLink) {
+  // ===== 确认连线（由 cfg.showConfirmLink + confirmPairs.pairs 驱动）=====
+  if (cfg.showConfirmLink && pairsArr.length) {
     const segs = [];
-    for (const f of fractals || []) {
-      if (!f.cf_paired_bool || f.cf_role_enum !== "first") continue;
-      const partner = (fractals || []).find(
-        (x) =>
-          x.cf_paired_bool &&
-          x.cf_pair_id_str === f.cf_pair_id_str &&
-          x.cf_role_enum === "second"
-      );
-      if (!partner) continue;
-      
-      if (f.kind_enum === "top")
-        segs.push(
-          [f.k2_idx_orig, f.k2_g_pri],
-          [partner.k2_idx_orig, partner.k2_g_pri],
-          null
-        );
-      else
-        segs.push(
-          [f.k2_idx_orig, f.k2_d_pri],
-          [partner.k2_idx_orig, partner.k2_d_pri],
-          null
-        );
+
+    for (const pr of pairsArr) {
+      const aIdx = toNonNegIntIdx(pr?.a);
+      const bIdx = toNonNegIntIdx(pr?.b);
+      if (aIdx == null || bIdx == null) continue;
+
+      const fa = fractals?.[aIdx];
+      const fb = fractals?.[bIdx];
+      if (!fa || !fb) continue;
+
+      const xa = toNonNegIntIdx(fa.k2_idx_orig);
+      const xb = toNonNegIntIdx(fb.k2_idx_orig);
+      if (xa == null || xb == null) continue;
+
+      const ya = yOfFractal(fa);
+      const yb = yOfFractal(fb);
+      if (!Number.isFinite(ya) || !Number.isFinite(yb)) continue;
+
+      segs.push([xa, ya], [xb, yb], null);
     }
-    
+
     if (segs.length) {
-      // ===== 未暴露参数直接用常量 =====
-      const linkStyle = FRACTAL_DEFAULTS.confirmLinkStyle;
+      const linkStyle = cfg.confirmLinkStyle || FRACTAL_DEFAULTS.confirmLinkStyle;
 
       series.push({
         id: "FR_CONFIRM_LINKS",

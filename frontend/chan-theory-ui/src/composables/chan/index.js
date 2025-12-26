@@ -7,7 +7,7 @@
 
 export { detectContinuityBarriers } from './barriers';
 export { computeInclude } from './include';
-export { computeFractals } from './fractals';
+export { computeFractals, computeFractalConfirmPairs } from './fractals';
 export { computePens } from './pens';
 export { computeSegments } from './segments';
 export { computePenPivots } from './pivots';

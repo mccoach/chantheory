@@ -29,6 +29,7 @@ import {
   ANCHOR_POLICY_OPTIONS,
   MIN_COND_OPTIONS,
   CHAN_PEN_PIVOT_DEFAULTS,
+  META_SEGMENT_DEFAULTS,
   SEGMENT_DEFAULTS,
   PENS_DEFAULTS,
   UI_LIMITS,
@@ -41,6 +42,10 @@ import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 // 通过 inject 获取共享的草稿状态
 const chanDraft = inject("chanDraft");
 const fractalDraft = inject("fractalDraft");
+
+// NEW: 注入 resetter（本文件原实现使用了 chanResetter/fractalResetter 但未 inject，补齐）
+const chanResetter = inject("chanResetter", null);
+const fractalResetter = inject("fractalResetter", null);
 
 // 分型总控（强/标/弱/确认）
 const frTri = useTriMasterToggle({
@@ -150,7 +155,23 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 线段
+  // NEW: 元线段（放在线段上方，简笔下方）
+  out.push({
+    key: "metaSegment",
+    name: "元线段",
+    items: [
+      { key: "mseg-lineWidth", label: "线宽" },
+      { key: "mseg-color", label: "颜色" },
+      { key: "mseg-lineStyle", label: "线型" },
+    ],
+    check: {
+      type: "single",
+      checked: !!(cf.metaSegment?.enabled ?? META_SEGMENT_DEFAULTS.enabled),
+    },
+    reset: { visible: true, title: "恢复默认" },
+  });
+
+  // 线段（最终线段）
   out.push({
     key: "segment",
     name: "线段",
@@ -224,6 +245,17 @@ function onRowToggle(row) {
     cf.pen = { ...pen, enabled: !(pen.enabled ?? PENS_DEFAULTS.enabled) };
     return;
   }
+
+  // NEW: 元线段 toggle（完全参照 segment）
+  if (key === "metaSegment") {
+    const ms = cf.metaSegment || {};
+    cf.metaSegment = {
+      ...ms,
+      enabled: !(ms.enabled ?? META_SEGMENT_DEFAULTS.enabled),
+    };
+    return;
+  }
+
   if (key === "segment") {
     const sg = cf.segment || {};
     cf.segment = { ...sg, enabled: !(sg.enabled ?? SEGMENT_DEFAULTS.enabled) };
@@ -285,6 +317,13 @@ function onRowReset(row) {
     chanResetter?.resetPath("pen");
     return;
   }
+
+  // NEW: 元线段 reset（完全参照 segment）
+  if (key === "metaSegment") {
+    chanResetter?.resetPath("metaSegment");
+    return;
+  }
+
   if (key === "segment") {
     chanResetter?.resetPath("segment");
     return;
@@ -505,9 +544,38 @@ const { renderControl } = useSettingsRenderer({
       class: "input",
       value: chanDraft.pen.provisionalStyle,
       onChange: (e) => (chanDraft.pen.provisionalStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
+      innerHTML: LINE_STYLES.map((o) => `<option value="${o.v}">${o.label}</option>`).join(""),
+    }),
+  },
+
+  // NEW: 元线段控件（完全参照 seg-*）
+  "mseg-lineWidth": {
+    component: NumberSpinner,
+    getProps: () => ({
+      modelValue: chanDraft.metaSegment.lineWidth,
+      min: UI_LIMITS.lineWidth.min,
+      max: UI_LIMITS.lineWidth.max,
+      step: UI_LIMITS.lineWidth.step,
+      "frac-digits": 1,
+      "onUpdate:modelValue": (v) => (chanDraft.metaSegment.lineWidth = v),
+    }),
+  },
+  "mseg-color": {
+    component: "input",
+    getProps: () => ({
+      class: "input color",
+      type: "color",
+      value: chanDraft.metaSegment.color,
+      onInput: (e) => (chanDraft.metaSegment.color = e.target.value),
+    }),
+  },
+  "mseg-lineStyle": {
+    component: "select",
+    getProps: () => ({
+      class: "input",
+      value: chanDraft.metaSegment.lineStyle,
+      onChange: (e) => (chanDraft.metaSegment.lineStyle = e.target.value),
+      innerHTML: LINE_STYLES.map((o) => `<option value="${o.v}">${o.label}</option>`).join(""),
     }),
   },
   "seg-lineWidth": {
