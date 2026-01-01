@@ -1,6 +1,10 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\interaction\hotkeys\registry.js
 // ==============================
-// V2.1 - 精简日志版
+// V2.2 - 删除无效 UI 链路（openHotkeySettings/openHotkeyHelp 的 showSettings）
+// 说明：
+//   - 当前项目中“打开快捷键设置/帮助”的唯一生效链路是 App.vue 注册的 handlers → dialogManager.open。
+//   - HotkeyService 内置的 this.ui.showSettings 在现有代码里没有任何消费方，属于无效冗余，且会造成一事二主隐患。
+//   - 本轮删除该 UI 状态与对应内置分支，保证所有热键行为只通过 handlers 执行。
 // ==============================
 
 import { ref } from "vue";
@@ -14,7 +18,6 @@ export class HotkeyService {
     this.userOverrides = {}; // 用户覆盖（scope -> combo -> command）
     this.handlers = {}; // 命令处理器（scope -> command -> fn）
     this.scopeStack = ref(["global"]); // 作用域栈（顶层优先，默认 global）
-    this.ui = { showSettings: ref(false) }; // UI 状态：设置弹窗显隐
     this._onKeydown = this._onKeydown.bind(this); // 绑定 this
     window.addEventListener("keydown", this._onKeydown, {
       // 注册键盘监听（捕获阶段）
@@ -197,12 +200,7 @@ export class HotkeyService {
           this.focusNextPrev(-1); // 跳转
           return; // 返回
         }
-        if (cmd === "openHotkeySettings" || cmd === "openHotkeyHelp") {
-          // 内置：打开设置/帮助
-          e.preventDefault(); // 阻止默认
-          this.ui.showSettings.value = true; // 显示设置
-          return; // 返回
-        }
+        // 说明：openHotkeySettings/openHotkeyHelp 必须由外部 handlers 负责打开弹窗（App.vue链路）
         continue;
       }
 

@@ -7,6 +7,9 @@
   * 通过 `provide` 将 `volDraft` 草稿对象提供给子面板。
   * 根据 activeTab 动态渲染 `VolumeSettingsPanel` 或其他指标的占位面板。
   * 通过 `defineExpose` 暴露 `save` 和 `resetAll` 方法供 App.vue 调用。
+本轮变更：
+  - 删除 save() 中显式 settings.saveAll()：因为 useUserSettings 已对 setter 自动持久化，
+    这里再次 saveAll 属于重复写 localStorage（冗余 I/O）。
 ============================== -->
 <template>
   <div class="shell-wrap">
@@ -43,7 +46,6 @@ import BollSettingsPanel from "@/settings/panels/BollSettingsPanel.vue";
 import IndicatorPlaceholderPanel from "@/settings/panels/IndicatorPlaceholderPanel.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useSettingsManager } from "@/composables/useSettingsManager";
-import { useUserSettings } from "@/composables/useUserSettings";
 import { DEFAULT_VOL_SETTINGS, DEFAULT_MACD_SETTINGS } from "@/constants";
 import { createSettingsResetter } from "@/settings/common/useSettingsResetter";
 
@@ -53,7 +55,6 @@ const props = defineProps({
 
 const hub = useViewCommandHub();
 const dialogManager = inject("dialogManager", null);
-const settings = useUserSettings();
 
 // 如果初始 kind 是 AMOUNT，映射到 VOL tab
 const getInitialTab = (kind) => (String(kind).toUpperCase() === 'AMOUNT' ? 'VOL' : String(kind).toUpperCase());
@@ -66,11 +67,14 @@ const volManager = useSettingsManager({
 });
 provide("volDraft", volManager.draft);
 
-// NEW: 创建并提供重置器（只改草稿）
-const volResetter = createSettingsResetter({ draft: volManager.draft, defaults: DEFAULT_VOL_SETTINGS });
+// 创建并提供重置器（只改草稿）
+const volResetter = createSettingsResetter({
+  draft: volManager.draft,
+  defaults: DEFAULT_VOL_SETTINGS,
+});
 provide("volResetter", volResetter);
 
-// ===== MACD 设置管理器（新增）=====
+// ===== MACD 设置管理器 =====
 const macdManager = useSettingsManager({
   settingsKey: "macdSettings",
   defaultConfig: DEFAULT_MACD_SETTINGS,
@@ -84,12 +88,9 @@ provide("macdResetter", macdResetter);
 
 // 暴露 save 和 resetAll 方法（resetAll 仅重置草稿，不保存、不刷新）
 const save = () => {
-  // 目前只有量窗有可保存的设置
+  // 保存（useUserSettings 的 setter 已自动持久化，无需重复 settings.saveAll）
   volManager.save();
   macdManager.save();
-
-  // 主动持久化到 LocalStorage
-  settings.saveAll();
 
   // 保存后触发重新渲染（量窗 / MACD）
   hub.execute("Refresh", {});
