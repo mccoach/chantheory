@@ -5,7 +5,7 @@
 // 设计：按功能模块分组，每个常量都有详细注释
 // ==============================
 
-import { STYLE_PALETTE, BAR_USABLE_RATIO } from "../common";
+import { STYLE_PALETTE } from "../common";
 
 // ===== 量窗默认设置 =====
 export const DEFAULT_VOL_SETTINGS = {
@@ -18,15 +18,16 @@ export const DEFAULT_VOL_SETTINGS = {
   // --- 相对成交量计算（设置窗未暴露）---
   rvolN: 20,                // 相对成交量的基准周期（RVOL = VOL / MA(VOL, N)）（❌ 设置窗未暴露，直接用常量）
 
-  // --- 布局参数（设置窗未暴露）---
-  layout: {
-    barUsableRatio: BAR_USABLE_RATIO,   // ← 统一使用全局柱体比例常量，可用绘图区占容器宽度的比例（0.88 = 88%）（❌ 设置窗未暴露，直接用常量）
-    fallbackBarWidth: 8,    // 兜底柱宽（当计算失败时使用）（❌ 设置窗未暴露，直接用常量）
-  },
+  // --- NEW: 放/缩量标记宽%（设置窗已暴露：放量标记行）---
+  // 语义与主窗分型/涨跌标记一致：
+  //   markerWidthPx = barWidthPx* × markerPercent（barWidthPx*=stepPx×barPercent）
+  // 取值范围 50~100，步长 1（使用 UI_LIMITS.markerWidthPercent）
+  // 默认值：80（本轮统一默认）
+  markerPercent: 80,
 
   // --- 量额柱样式（设置窗已暴露）---
   volBar: {
-    barPercent: 80,        // 柱体宽度百分比（100=不压缩）（✅ 设置窗可改）
+    barPercent: 88,        // 柱体宽度百分比（默认88）（✅ 设置窗可改）
     upColor: STYLE_PALETTE.bars.volume.up,    // 阳线颜色（✅ 设置窗可改）
     downColor: STYLE_PALETTE.bars.volume.down,  // 阴线颜色（✅ 设置窗可改）
   },
@@ -82,4 +83,13 @@ export const DEFAULT_VOL_MARKER_SIZE = {
   maxPx: 16,                // 标记最大宽度（像素）（❌ 设置窗未暴露，直接用常量）
   markerHeightPx: 10,       // 标记固定高度（像素）（❌ 设置窗未暴露，直接用常量）
   markerYOffsetPx: 2,       // 标记距柱顶的间距（像素）（❌ 设置窗未暴露，直接用常量）
+};
+
+// ===== NEW: 量窗放/缩量标记宽度 clamp（像素）=====
+// 说明：
+//   - 量窗标记宽度已迁移为 stepPx 推导（与分型/涨跌标记一致）。
+//   - 为满足“各类分别用一套 min/max”的约束，提供独立 clamp 常量。
+export const VOL_MARKER_WIDTH_PX_LIMITS = {
+  minPx: 1,
+  maxPx: 16,
 };

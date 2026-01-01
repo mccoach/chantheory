@@ -1,11 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\mainShell\MainChartSettingsShell.vue -->
 <!-- ==============================
 说明：主窗设置壳（新版：数据驱动）
-- 职责：
-  * 使用通用的 `useSettingsManager` 为每个设置项（K线、MA、缠论等）创建独立的管理器。
-  * 通过 `provide` 将各管理器的 `draft` 对象提供给子组件。
-  * 通过 `defineExpose` 暴露 `save` 和 `resetAll` 方法，供 App.vue 直接调用。
-- 优点：逻辑内聚，无UI闪烁，易于扩展。
+本轮改动：
+  - 彻底删除设置窗内“复权(adjust)”链路（adjustDraft/adjustManager），避免双通道与死代码；
+  - 复权仅保留页面按钮链路（MainChartPanel 三联按钮）；
+  - 保存行为仅触发 Refresh，复权变更由页面按钮触发 useMarketView.watch(adjust) 原链路完成。
 ============================== -->
 <template>
   <div class="shell-wrap">
@@ -20,11 +19,10 @@
 </template>
 
 <script setup>
-import { inject, ref, watch, provide, } from "vue";
+import { inject, ref, watch, provide } from "vue";
 import MarketDisplaySettings from "@/settings/panels/MarketDisplaySettings.vue";
 import ChanTheorySettings from "@/settings/panels/ChanTheorySettings.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useMarketView } from "@/composables/useMarketView";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSettingsManager } from "@/composables/useSettingsManager";
 import {
@@ -32,7 +30,6 @@ import {
   DEFAULT_MA_CONFIGS,
   CHAN_DEFAULTS,
   FRACTAL_DEFAULTS,
-  DEFAULT_APP_PREFERENCES,
   PENS_DEFAULTS,
   META_SEGMENT_DEFAULTS,
   SEGMENT_DEFAULTS,
@@ -45,8 +42,8 @@ const props = defineProps({
 });
 
 const hub = useViewCommandHub();
-const vm = inject("marketView");
-const settings = useUserSettings();
+inject("marketView"); // 保持注入顺序与结构（本轮不使用 vm）
+useUserSettings(); // 保持现有结构（本轮不直接使用 settings）
 
 const currentTabKey = ref(props.initialActiveTab || "chan");
 
@@ -63,7 +60,7 @@ const maManager = useSettingsManager({
 });
 provide("maDraft", maManager.draft);
 
-// NEW: chanDefaultConfig 增加 metaSegment（与 segment 平起平坐）
+// NEW: chanDefaultConfig 增加 upDownMarkerPercent（涨跌标记宽%），并保留原结构
 const chanDefaultConfig = {
   ...CHAN_DEFAULTS,
   pen: PENS_DEFAULTS,
@@ -78,6 +75,9 @@ const chanManager = useSettingsManager({
     return {
       ...chanDefaultConfig,
       ...localConfig,
+      // 确保新增字段也能正确兜底（例如老版本 localStorage 中没有 upDownMarkerPercent）
+      upDownMarkerPercent:
+        localConfig.upDownMarkerPercent ?? chanDefaultConfig.upDownMarkerPercent,
       pen: { ...PENS_DEFAULTS, ...(localConfig.pen || {}) },
       metaSegment: { ...META_SEGMENT_DEFAULTS, ...(localConfig.metaSegment || {}) },
       segment: { ...SEGMENT_DEFAULTS, ...(localConfig.segment || {}) },
@@ -107,22 +107,6 @@ const fractalManager = useSettingsManager({
 });
 provide("fractalDraft", fractalManager.draft);
 
-const adjustManager = (() => {
-  const draft = ref(settings.preferences.adjust || DEFAULT_APP_PREFERENCES.adjust);
-  const snapshot = ref(draft.value);
-  const save = () => {
-    settings.setAdjust(draft.value);
-    const changed = snapshot.value !== draft.value;
-    snapshot.value = draft.value;
-    return changed;
-  };
-  const reset = () => {
-    draft.value = DEFAULT_APP_PREFERENCES.adjust;
-  };
-  return { draft, save, reset };
-})();
-provide("adjustDraft", adjustManager.draft);
-
 // NEW: 创建并提供统一重置器供子面板使用（只改草稿，不保存、不刷新）
 const klineResetter = createSettingsResetter({ draft: klineManager.draft, defaults: DEFAULT_KLINE_STYLE });
 const maResetter = createSettingsResetter({ draft: maManager.draft, defaults: DEFAULT_MA_CONFIGS });
@@ -139,13 +123,9 @@ const save = () => {
   maManager.save();
   chanManager.save();
   fractalManager.save();
-  const adjustChanged = adjustManager.save();
 
-  if (adjustChanged) {
-    vm.reload({ force: true });
-  } else {
-    hub.execute("Refresh", {});
-  }
+  // 保存后触发重新渲染
+  hub.execute("Refresh", {});
 };
 
 const resetAll = () => {
@@ -153,7 +133,6 @@ const resetAll = () => {
   maResetter.resetAll();
   chanResetter.resetAll();
   fractalResetter.resetAll();
-  adjustManager.reset();
 };
 
 defineExpose({ save, resetAll });

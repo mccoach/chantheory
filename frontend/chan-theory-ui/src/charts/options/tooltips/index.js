@@ -1,20 +1,10 @@
 // frontend/src/charts/options/tooltips/index.js
 // ==============================
-// V3.0 - 按需格式化架构（零冗余版）
-//
-// 核心改动：
-//   1. 新增 extractTimeLabel() 统一时间提取逻辑
-//   2. 支持 xAxis.data 为对象数组或字符串数组
-//   3. 所有 formatter 复用统一提取函数
-//
-// 职责：
-//   - 构造各类图表的 Tooltip 内容
-//   - 智能识别 axisValue 类型（对象/字符串/数字）
-//   - 格式化为统一的 HTML 模板
+// V3.1 - Volume tooltip 放/缩状态改为按 idx 实时计算（不依赖 marker 点集是否命中）
 // ==============================
 
 import { formatNumberScaled } from "@/utils/numberUtils";
-import { DEFAULT_KLINE_STYLE, STYLE_PALETTE } from "@/constants";
+import { DEFAULT_KLINE_STYLE, STYLE_PALETTE, DEFAULT_VOL_SETTINGS } from "@/constants";
 
 // ==============================
 // 工具函数：模板渲染
@@ -233,9 +223,27 @@ export function makeVolumeTooltipFormatter({
   freq,
   baseName,
   mavolMap,
+  volCfg,
 }) {
   const list = Array.isArray(candles) ? candles : [];
   const isVolMode = (baseName || "").toUpperCase() === "VOL";
+
+  // 选择用于标记判定的 prim MA 周期（与 marker 逻辑一致：取启用的最小 period）
+  const allPeriods = Object.values(volCfg?.mavolStyles || {})
+    .filter((s) => s && s.enabled && Number.isFinite(+s.period) && +s.period > 0)
+    .map((s) => +s.period)
+    .sort((a, b) => a - b);
+  const primN = allPeriods.length ? allPeriods[0] : null;
+
+  const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
+    ? +volCfg.markerPump.threshold
+    : DEFAULT_VOL_SETTINGS.markerPump.threshold;
+  const dumpK = Number.isFinite(+volCfg?.markerDump?.threshold)
+    ? +volCfg.markerDump.threshold
+    : DEFAULT_VOL_SETTINGS.markerDump.threshold;
+
+  const pumpEnabled = (volCfg?.markerPump?.enabled ?? true) === true;
+  const dumpEnabled = (volCfg?.markerDump?.enabled ?? true) === true;
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
@@ -265,9 +273,16 @@ export function makeVolumeTooltipFormatter({
       minIntDigitsToScale: 5,
     });
 
-    const hasPump = params.some((pp) => pp.seriesName === "放量标记");
-    const hasDump = params.some((pp) => pp.seriesName === "缩量标记");
-    const statusTag = hasPump ? "（放）" : hasDump ? "（缩）" : "";
+    // NEW: 放/缩状态按 idx 实时判断（不依赖 marker 点集是否命中）
+    let statusTag = "";
+    if (primN && mavolMap && mavolMap[primN]) {
+      const mv = mavolMap[primN]?.[idx];
+      const v = Number(baseRawVal);
+      if (Number.isFinite(v) && Number.isFinite(+mv) && +mv > 0) {
+        if (pumpEnabled && pumpK > 0 && v >= pumpK * mv) statusTag = "（放）";
+        else if (dumpEnabled && dumpK > 0 && v <= dumpK * mv) statusTag = "（缩）";
+      }
+    }
 
     const periods = Object.keys(mavolMap || {})
       .map((x) => +x)

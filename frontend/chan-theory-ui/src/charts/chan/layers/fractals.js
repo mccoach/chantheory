@@ -2,23 +2,24 @@
 // ==============================
 // 缠论图层：分型标记 (Fractals) - Idx-Only Schema + confirmPairs 版
 //
-// 关键点：
-//   - fractals 本体严格 Idx-Only，不包含任何 pri/ts/cf_* 字段；
-//   - y 值全部通过 k2_idx_orig 回溯 candles：
-//       * top    -> candles[idx].h
-//       * bottom -> candles[idx].l
-//   - “确认分型/确认连线”由 env.confirmPairs（派生结构）驱动，回归旧功能，但不污染 fractal 存储结构。
+// 本轮改动：
+//   - 分型宽度彻底迁移到通用 WidthController + widthState：
+//       * 8 个分型 scatter series 共用 widthState key: "main:fractal"
+//       * symbolSize 读取 widthState，避免 notMerge 覆盖造成的竞态
+//   - 不再依赖 env.symbolWidthPx / renderHub 推导宽度
 // ==============================
 
 import { FRACTAL_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { deriveSymbolSize } from "./geometry";
 import { candleH, candleL, toNonNegIntIdx } from "@/composables/chan/common";
+import { getWidthPx } from "@/charts/width/widthState";
+
+const WIDTH_KEY = "main:fractal";
 
 export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const settings = useUserSettings();
 
-  // ===== 合并设置：优先用户配置，兜底默认值 =====
   const cfg = Object.assign(
     {},
     FRACTAL_DEFAULTS,
@@ -34,13 +35,13 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const pairedArr = Array.isArray(confirmPairs?.paired) ? confirmPairs.paired : null;
   const pairsArr = Array.isArray(confirmPairs?.pairs) ? confirmPairs.pairs : [];
 
-  // ===== 几何计算 =====
-  const { widthPx: markerW, heightPx: markerH } = deriveSymbolSize({
+  // 高度仍按常量；宽度由 widthState 提供（fallback 使用 deriveSymbolSize）
+  const { widthPx: fallbackW, heightPx: markerH } = deriveSymbolSize({
     hostWidth: env.hostWidth,
     visCount: env.visCount,
     minPx: FRACTAL_DEFAULTS.markerMinPx,
     maxPx: FRACTAL_DEFAULTS.markerMaxPx,
-    overrideWidth: env.symbolWidthPx,
+    overrideWidth: null,
     heightPx: FRACTAL_DEFAULTS.markerHeightPx,
   });
 
@@ -62,7 +63,6 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     bottom: { strong: [], standard: [], weak: [] },
   };
 
-  // ===== 常规分型数据分组 =====
   for (const f of fractals || []) {
     const strength = String(f?.strength_enum || "");
     if (!cfg.showStrength?.[strength]) continue;
@@ -82,7 +82,9 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
 
   const series = [];
 
-  // ===== 顶分系列（强/标/弱）=====
+  // 关键：宽度从 widthState 读取；若尚未计算则用 fallbackW
+  const symbolSizeFn = () => [getWidthPx(WIDTH_KEY, fallbackW), markerH];
+
   const topSpec = [
     { k: "strong", name: "TOP_STRONG" },
     { k: "standard", name: "TOP_STANDARD" },
@@ -98,8 +100,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     if (!enabled) continue;
 
     const shape = st.topShape || FRACTAL_DEFAULTS.topShape;
-    const color =
-      st.topColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.topColor;
+    const color = st.topColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.topColor;
     const fillMode = st.fill || "solid";
     const isHollow = fillMode === "hollow";
 
@@ -111,7 +112,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
       data,
       symbol: shape,
       symbolRotate: 180,
-      symbolSize: () => [markerW, markerH],
+      symbolSize: symbolSizeFn,
       symbolOffset: [0, yOffTop],
       itemStyle: isHollow
         ? {
@@ -126,7 +127,6 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     });
   }
 
-  // ===== 底分系列（强/标/弱）=====
   const botSpec = [
     { k: "strong", name: "BOT_STRONG" },
     { k: "standard", name: "BOT_STANDARD" },
@@ -142,8 +142,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     if (!enabled) continue;
 
     const shape = st.bottomShape || FRACTAL_DEFAULTS.bottomShape;
-    const color =
-      st.bottomColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.bottomColor;
+    const color = st.bottomColor || FRACTAL_DEFAULTS.styleByStrength?.[sp.k]?.bottomColor;
     const fillMode = st.fill || "solid";
     const isHollow = fillMode === "hollow";
 
@@ -155,7 +154,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
       data,
       symbol: shape,
       symbolRotate: 0,
-      symbolSize: () => [markerW, markerH],
+      symbolSize: symbolSizeFn,
       symbolOffset: [0, yOffBottom],
       itemStyle: isHollow
         ? {
@@ -170,7 +169,6 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     });
   }
 
-  // ===== 确认分型标记（由 confirmPairs 派生结构驱动）=====
   const cs = cfg.confirmStyle || {};
   const confirmEnabled = cs.enabled === true;
 
@@ -186,14 +184,10 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
       const y = yOfFractal(f);
       if (!Number.isFinite(y)) continue;
 
-      if (String(f?.kind_enum || "") === "top") {
-        topConfirmData.push({ value: [x, y] });
-      } else if (String(f?.kind_enum || "") === "bottom") {
-        botConfirmData.push({ value: [x, y] });
-      }
+      if (String(f?.kind_enum || "") === "top") topConfirmData.push({ value: [x, y] });
+      else if (String(f?.kind_enum || "") === "bottom") botConfirmData.push({ value: [x, y] });
     }
 
-    // 额外间距（保持旧版“确认标记在外侧”体验）
     const extraGap = FRACTAL_DEFAULTS.markerHeightPx + FRACTAL_DEFAULTS.markerYOffsetPx;
 
     if (topConfirmData.length) {
@@ -209,7 +203,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
         data: topConfirmData,
         symbol: shape,
         symbolRotate: 180,
-        symbolSize: () => [markerW, markerH],
+        symbolSize: symbolSizeFn,
         symbolOffset: [0, -(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
           ? {
@@ -237,7 +231,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
         data: botConfirmData,
         symbol: shape,
         symbolRotate: 0,
-        symbolSize: () => [markerW, markerH],
+        symbolSize: symbolSizeFn,
         symbolOffset: [0, +(markerH / 2 + apexGap + extraGap)],
         itemStyle: isHollow
           ? {
@@ -253,7 +247,6 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
     }
   }
 
-  // ===== 确认连线（由 cfg.showConfirmLink + confirmPairs.pairs 驱动）=====
   if (cfg.showConfirmLink && pairsArr.length) {
     const segs = [];
 

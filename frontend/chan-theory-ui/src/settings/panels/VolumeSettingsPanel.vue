@@ -1,10 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\VolumeSettingsPanel.vue -->
 <!-- ==============================
 说明：量窗设置面板（UI-only）
-- 职责：仅渲染成交量/成交额的设置UI。
-- 数据流：通过 inject('volDraft') 获取响应式草稿，并直接绑定。
-- 逻辑：MAVOL总控的三态切换逻辑 (useTriMasterToggle) 保留在此。
-- 渲染：使用新的通用渲染器 useSettingsRenderer 简化控件创建。
+本轮改动：
+  1) 在“放量标记”行新增“标记宽%”（volDraft.markerPercent），占用后面的第一个空列；
+  2) 放/缩量标记共用该标记宽%；
+  3) reset 路径统一改为 resetter（volResetter.resetPath），删除原“直接赋默认对象”的重置逻辑，保证零冗余。
 ============================== -->
 <template>
   <SettingsGrid
@@ -34,6 +34,8 @@ import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 
 // 通过 inject 获取共享的草稿状态
 const volDraft = inject("volDraft");
+// 注入 resetter（来自 IndicatorSettingsShell）
+const volResetter = inject("volResetter");
 
 // MAVOL总控 (三态切换逻辑)
 const mavolTri = useTriMasterToggle({
@@ -90,6 +92,7 @@ const rows = computed(() => {
     });
   });
 
+  // 放量标记（新增：标记宽%）
   out.push({
     key: "marker-pump",
     name: "放量标记",
@@ -97,11 +100,14 @@ const rows = computed(() => {
       { key: "pump-shape", label: "形状" },
       { key: "pump-color", label: "颜色" },
       { key: "pump-threshold", label: "阈值" },
+      // NEW: 占用后面的第一个空列（第4列）
+      { key: "markerPercent", label: "标记宽%" },
     ],
     check: { type: "single", checked: !!vd.markerPump.enabled },
     reset: { visible: true, title: "恢复默认" },
   });
 
+  // 缩量标记（共用 markerPercent，不单独再展示）
   out.push({
     key: "marker-dump",
     name: "缩量标记",
@@ -138,25 +144,32 @@ function onRowToggle(row) {
   if (key === "marker-dump") vd.markerDump.enabled = !vd.markerDump.enabled;
 }
 
+// 行级事件：单行恢复默认（统一 resetter；只改草稿，不保存）
 function onRowReset(row) {
   const key = String(row.key || "");
-  const vd = volDraft;
+
   if (key === "vol-bar") {
-    vd.volBar = { ...DEFAULT_VOL_SETTINGS.volBar };
+    volResetter?.resetPath("volBar");
     return;
   }
+
   if (key.startsWith("mavol-")) {
     const mk = key.slice("mavol-".length);
-    if (DEFAULT_VOL_SETTINGS.mavolStyles[mk]) {
-      vd.mavolStyles[mk] = { ...DEFAULT_VOL_SETTINGS.mavolStyles[mk] };
-      mavolTri.updateSnapshot();
-    }
+    volResetter?.resetPath(`mavolStyles.${mk}`);
+    mavolTri.updateSnapshot();
     return;
   }
-  if (key === "marker-pump")
-    vd.markerPump = { ...DEFAULT_VOL_SETTINGS.markerPump };
-  if (key === "marker-dump")
-    vd.markerDump = { ...DEFAULT_VOL_SETTINGS.markerDump };
+
+  if (key === "marker-pump") {
+    // 放量行：既重置 markerPump，也重置 markerPercent（因为该参数放在放量行展示）
+    volResetter?.resetPath("markerPump");
+    volResetter?.resetPath("markerPercent");
+    return;
+  }
+
+  if (key === "marker-dump") {
+    volResetter?.resetPath("markerDump");
+  }
 }
 
 // 使用通用渲染器
@@ -190,6 +203,20 @@ const { renderControl } = useSettingsRenderer({
       onInput: (e) => (volDraft.volBar.downColor = e.target.value),
     }),
   },
+
+  // NEW: 量窗标记宽%
+  markerPercent: {
+    component: NumberSpinner,
+    getProps: () => ({
+      modelValue: volDraft.markerPercent,
+      min: UI_LIMITS.markerWidthPercent.min,
+      max: UI_LIMITS.markerWidthPercent.max,
+      step: UI_LIMITS.markerWidthPercent.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (volDraft.markerPercent = v),
+    }),
+  },
+
   ...Object.fromEntries(
     Object.keys(DEFAULT_VOL_SETTINGS.mavolStyles).flatMap((mk) => [
       [

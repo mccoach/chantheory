@@ -1,9 +1,19 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewRenderHub.js
 // ==============================
-// V10.2 - 连续性屏障接入上市日期 + 交易日历版
+// V13.4 - Chan 结构缓存分层：include 与派生结构拆分缓存（进一步降低设置保存触发的卡顿）
 //
-// 当前版本改动点：
-//   - 同时绘制元线段(metaSegments)与最终线段(finalSegments)
+// 背景（延续 V13.3）：
+//   - V13.3 已缓存 tsArr + Chan 结构，并用 O(logN) 二分替代倒序扫。
+//   - 但 Chan 结构缓存仍是“大一坨”：当分型显著度参数变更时，会导致 include/fractals/pens/segments/pivots 全量重算。
+//   - include（合并K+屏障+映射）在“仅改变分型显著度参数”场景下是确定冗余，可复用。
+//
+// 本轮改动：
+//   1) 将 Chan 结构缓存拆为两层：
+//        - includeMemo：key = candlesKey + anchorPolicy + ipoYmd
+//        - derivedMemo：key = includeKey + fractalParams（minTick/minPct/minCond）
+//      使得仅变更分型显著度参数时，不再重算 include。
+//   2) 对外返回结构保持完全一致：_calculateChanStructures(candles) 仍返回同一 shape。
+//   3) 严控范围：仅改本文件；不改算法实现、不改渲染层、不改设置协议。
 // ==============================
 
 import { ref, watch, nextTick } from "vue";
@@ -53,12 +63,8 @@ export function useViewRenderHub() {
 
   const _currentFocusIdx = ref(-1);
 
-  // ===== 批处理控制变量 =====
-  const _batchFlag = ref(false); // 批处理模式标志
-  const _pendingCompute = ref(false); // 待处理计算标志
-
-  // ===== 标记宽度缓存（用于检测变化）=====
-  const _lastMarkerWidth = ref(8); // 默认值与 hub 初始值一致
+  const _batchFlag = ref(false);
+  const _pendingCompute = ref(false);
 
   const tipMode = ref("follow");
   try {
@@ -74,20 +80,108 @@ export function useViewRenderHub() {
     return undefined;
   }
 
+  // ===== Hover AxisPointer（保持原逻辑）=====
+  const _lastHoveredKey = ref(null);
+  const _hoverModeApplied = new Map();
+  let _hoverRafPending = false;
+  let _hoverPendingKey = null;
+
+  function _applyAxisPointerModeToChart(chartInstance, isHovered) {
+    if (!chartInstance) return;
+
+    const crossStyle = isHovered
+      ? { color: "#999", width: 1, type: "dashed" }
+      : { color: "transparent", width: 0, type: "solid" };
+
+    const tooltip = {
+      axisPointer: {
+        type: "cross",
+        crossStyle,
+      },
+    };
+
+    const yAxis = [
+      {
+        axisPointer: {
+          show: !!isHovered,
+          label: { show: !!isHovered },
+        },
+      },
+    ];
+
+    try {
+      chartInstance.setOption({ tooltip, yAxis }, false);
+    } catch {}
+  }
+
+  function _applyHoverModeByKey(panelKey, isHovered) {
+    const key = String(panelKey || "");
+    if (!key) return;
+
+    const chart = _charts.get(key) || null;
+    if (!chart) return;
+
+    const applied = _hoverModeApplied.get(key);
+    if (applied === !!isHovered) return;
+
+    _applyAxisPointerModeToChart(chart, !!isHovered);
+    _hoverModeApplied.set(key, !!isHovered);
+  }
+
+  function _flushHoverUpdate() {
+    _hoverRafPending = false;
+
+    const nextKey = _hoverPendingKey ? String(_hoverPendingKey) : null;
+    _hoverPendingKey = null;
+
+    const prevKey = _lastHoveredKey.value;
+
+    if (prevKey === nextKey) return;
+
+    _hoveredPanelKey.value = nextKey;
+    _lastHoveredKey.value = nextKey;
+
+    if (prevKey) _applyHoverModeByKey(prevKey, false);
+    if (nextKey) _applyHoverModeByKey(nextKey, true);
+  }
+
   function setHoveredPanel(panelKey) {
-    if (_hoveredPanelKey.value !== panelKey) {
-      _hoveredPanelKey.value = panelKey;
-      // 悬浮窗体变化时，刷新各图的 axisPointer 模式
-      _updateAxisPointerModes();
-    }
+    const nextKey = panelKey ? String(panelKey) : null;
+
+    if (_hoverPendingKey === nextKey && _hoverRafPending) return;
+    if (_lastHoveredKey.value === nextKey && !_hoverRafPending) return;
+
+    _hoverPendingKey = nextKey;
+
+    if (_hoverRafPending) return;
+    _hoverRafPending = true;
+
+    requestAnimationFrame(_flushHoverUpdate);
   }
 
   function registerChart(panelKey, chartInstance) {
-    _charts.set(String(panelKey), chartInstance);
+    const key = String(panelKey);
+
+    _charts.set(key, chartInstance);
+
+    const shouldHover = !!(
+      _hoveredPanelKey.value && key === _hoveredPanelKey.value
+    );
+    _applyAxisPointerModeToChart(chartInstance, shouldHover);
+    _hoverModeApplied.set(key, shouldHover);
   }
 
   function unregisterChart(panelKey) {
-    _charts.delete(String(panelKey));
+    const key = String(panelKey);
+
+    _charts.delete(key);
+    _hoverModeApplied.delete(key);
+
+    if (_lastHoveredKey.value === key) {
+      _lastHoveredKey.value = null;
+      _hoveredPanelKey.value = null;
+      _hoverPendingKey = null;
+    }
   }
 
   function setActivePanel(panelKey) {
@@ -106,71 +200,6 @@ export function useViewRenderHub() {
     return _charts.get(String(_activePanelKey.value)) || null;
   }
 
-  // 根据当前悬浮窗体切换各图的 axisPointer 模式
-  function _updateAxisPointerModes() {
-    const hovered = _hoveredPanelKey.value;
-
-    _charts.forEach((chartInstance, panelKey) => {
-      try {
-        const isHovered = hovered && panelKey === hovered;
-        const opt = chartInstance.getOption ? chartInstance.getOption() : null;
-        if (!opt) return;
-
-        // 1) 调整 tooltip：只区分 cross / line，不再控制 showContent
-        const tooltipOpt = opt.tooltip || {};
-        const tooltipAxisPointer = tooltipOpt.axisPointer || {};
-
-        const newTooltip = {
-          ...tooltipOpt,
-          // showContent: !!isHovered,
-          axisPointer: {
-            ...tooltipAxisPointer,
-            type: isHovered ? "cross" : "line",
-          },
-        };
-
-        // 2) 调整主 y 轴的 axisPointer：仅悬浮窗体显示水平线 + y 轴气泡数字
-        const yAxisOpt = opt.yAxis;
-        const yAxisArr = Array.isArray(yAxisOpt)
-          ? yAxisOpt
-          : yAxisOpt
-          ? [yAxisOpt]
-          : [];
-
-        const newYAxis = yAxisArr.map((y, idx) => {
-          if (!y) return y;
-          if (idx !== 0) {
-            // 只控制第一个 y 轴（主轴），其余保持原样（如量窗标记轴）
-            return y;
-          }
-          const axisPtr = y.axisPointer || {};
-          const axisLabel = axisPtr.label || {};
-          return {
-            ...y,
-            axisPointer: {
-              ...axisPtr,
-              show: !!isHovered,
-              label: {
-                ...axisLabel,
-                show: !!isHovered,
-              },
-            },
-          };
-        });
-
-        // 3) 应用部分更新（不合并 series，不触发布局重算）
-        const partial = {
-          tooltip: newTooltip,
-        };
-        if (newYAxis.length > 0) {
-          partial.yAxis = newYAxis;
-        }
-
-        chartInstance.setOption(partial, false);
-      } catch {}
-    });
-  }
-
   function syncFocusPosition(idx) {
     const vm = _vmRef.vm;
     if (!vm) return;
@@ -178,9 +207,7 @@ export function useViewRenderHub() {
     const arr = vm.candles.value || [];
     const len = arr.length;
 
-    if (!Number.isFinite(idx) || idx < 0 || idx >= len) {
-      return;
-    }
+    if (!Number.isFinite(idx) || idx < 0 || idx >= len) return;
 
     _currentFocusIdx.value = idx;
   }
@@ -198,16 +225,12 @@ export function useViewRenderHub() {
     const eIdxNow = zoomRange?.eIdx ?? len - 1;
 
     let startIdx = _currentFocusIdx.value;
-
-    if (startIdx < 0 || startIdx >= len) {
-      startIdx = eIdxNow;
-    }
+    if (startIdx < 0 || startIdx >= len) startIdx = eIdxNow;
 
     const nextIdx = Math.max(
       0,
       Math.min(len - 1, startIdx + (dir < 0 ? -1 : 1))
     );
-
     syncFocusPosition(nextIdx);
 
     activeChart?.dispatchAction({
@@ -266,7 +289,6 @@ export function useViewRenderHub() {
     return null;
   }
 
-  // ===== 核心修复：每次设置时使用新数组引用，触发内部 watch =====
   function setIndicatorPanes(panes) {
     _indicatorPanes.value = Array.isArray(panes) ? [...panes] : [];
   }
@@ -277,7 +299,6 @@ export function useViewRenderHub() {
     const hub = useViewCommandHub();
     hub.setMarketView(vm);
 
-    // ===== 原有：数据变化触发渲染 =====
     watch(
       () => [
         vm.candles.value,
@@ -294,18 +315,7 @@ export function useViewRenderHub() {
       }
     );
 
-    // ===== 新增：订阅标记宽度变化（缩放时刷新标记）=====
-    hub.onChange((state) => {
-      // 检测标记宽度是否变化
-      if (state.markerWidthPx !== _lastMarkerWidth.value) {
-        _lastMarkerWidth.value = state.markerWidthPx;
-
-        // 触发重新渲染（更新标记宽度）
-        if (!_batchFlag.value) {
-          _computeAndPublish();
-        }
-      }
-    });
+    // RenderHub 不再因“宽度变化”做全量重算；宽度由实例侧 WidthController+widthState 驱动。
   }
 
   function onRender(cb) {
@@ -362,63 +372,210 @@ export function useViewRenderHub() {
     return { symbol: sym, ipoYmd };
   }
 
+  // ===== tsArr 缓存（避免每次 candles.map(ts)）=====
+  const _tsArrMemo = {
+    candlesRef: null,
+    len: 0,
+    firstTs: null,
+    lastTs: null,
+    tsArr: null,
+  };
+
+  function _getTsArr(candles) {
+    const arr = Array.isArray(candles) ? candles : [];
+    const len = arr.length;
+    if (!len) {
+      _tsArrMemo.candlesRef = null;
+      _tsArrMemo.len = 0;
+      _tsArrMemo.firstTs = null;
+      _tsArrMemo.lastTs = null;
+      _tsArrMemo.tsArr = [];
+      return [];
+    }
+
+    const firstTs = arr[0]?.ts;
+    const lastTs = arr[len - 1]?.ts;
+
+    if (
+      _tsArrMemo.candlesRef === arr &&
+      _tsArrMemo.len === len &&
+      _tsArrMemo.firstTs === firstTs &&
+      _tsArrMemo.lastTs === lastTs &&
+      Array.isArray(_tsArrMemo.tsArr) &&
+      _tsArrMemo.tsArr.length === len
+    ) {
+      return _tsArrMemo.tsArr;
+    }
+
+    const tsArr = new Array(len);
+    for (let i = 0; i < len; i++) tsArr[i] = arr[i]?.ts;
+
+    _tsArrMemo.candlesRef = arr;
+    _tsArrMemo.len = len;
+    _tsArrMemo.firstTs = firstTs;
+    _tsArrMemo.lastTs = lastTs;
+    _tsArrMemo.tsArr = tsArr;
+
+    return tsArr;
+  }
+
+  // upperBound: 返回最后一个 <= target 的索引（若全部 > target 则返回 -1）
+  function upperBoundLE(arr, target) {
+    const n = Array.isArray(arr) ? arr.length : 0;
+    if (!n) return -1;
+    let lo = 0,
+      hi = n - 1,
+      ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const v = Number(arr[mid]);
+      if (!Number.isFinite(v)) {
+        hi = mid - 1;
+        continue;
+      }
+      if (v <= target) {
+        ans = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return ans;
+  }
+
+  // ===== Chan 缓存分层：includeMemo + derivedMemo =====
+  const _includeMemo = {
+    key: null,
+    value: null,
+  };
+  const _chanDerivedMemo = {
+    key: null,
+    value: null,
+  };
+
+  function _makeCandlesKey(candles) {
+    const arr = Array.isArray(candles) ? candles : [];
+    const len = arr.length;
+    if (!len) return "0";
+    const first = arr[0]?.ts;
+    const last = arr[len - 1]?.ts;
+    return `${len}|${first}|${last}`;
+  }
+
+  function _makeIncludeKey({ candlesKey, anchorPolicy, ipoYmd }) {
+    return `${candlesKey}|ap=${anchorPolicy}|ipo=${ipoYmd ?? "null"}`;
+  }
+
+  function _makeDerivedKey({ includeKey, frMinTick, frMinPct, frMinCond }) {
+    return `${includeKey}|tick=${frMinTick}|pct=${frMinPct}|cond=${frMinCond}`;
+  }
+
+  function _emptyChanStruct() {
+    return {
+      reduced: [],
+      map: [],
+      meta: null,
+      fractals: [],
+      fractalConfirmPairs: { pairs: [], paired: [], role: [] },
+      pens: { confirmed: [] },
+      metaSegments: [],
+      finalSegments: [],
+      barriersIndices: [],
+      pivots: [],
+    };
+  }
+
   function _calculateChanStructures(candles) {
     if (!candles || !candles.length) {
-      return {
-        reduced: [],
-        map: [],
-        meta: null,
-        fractals: [],
-        fractalConfirmPairs: { pairs: [], paired: [], role: [] },
-        pens: { confirmed: [] },
-        // NEW: metaSegments / finalSegments
-        metaSegments: [],
-        finalSegments: [],
-        barriersIndices: [],
-        pivots: [],
-      };
+      // 清理 memo（避免旧引用误用）
+      _includeMemo.key = null;
+      _includeMemo.value = null;
+      _chanDerivedMemo.key = null;
+      _chanDerivedMemo.value = null;
+      return _emptyChanStruct();
     }
 
     const { ipoYmd } = _resolveSymbolMetaForCurrent();
+    const anchorPolicy =
+      settings.chanTheory.chanSettings.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
 
-    const policy =
-      settings.chanTheory.chanSettings.anchorPolicy ||
-      CHAN_DEFAULTS.anchorPolicy;
+    const frMinTick = settings.chanTheory.fractalSettings.minTickCount || 0;
+    const frMinPct = settings.chanTheory.fractalSettings.minPct || 0;
+    const frMinCond = String(settings.chanTheory.fractalSettings.minCond || "or");
 
-    const res = computeInclude(candles, {
-      anchorPolicy: policy,
-      ipoYmd,
+    const candlesKey = _makeCandlesKey(candles);
+
+    // ===== L1: include 缓存 =====
+    const includeKey = _makeIncludeKey({ candlesKey, anchorPolicy, ipoYmd });
+
+    let includeRes = null;
+    if (_includeMemo.key === includeKey && _includeMemo.value) {
+      includeRes = _includeMemo.value;
+    } else {
+      includeRes = computeInclude(candles, { anchorPolicy, ipoYmd });
+
+      // 仅当结果结构可用时写入 memo
+      _includeMemo.key = includeKey;
+      _includeMemo.value = includeRes;
+
+      // include 变更会导致 derived 全部失效（最简清理）
+      _chanDerivedMemo.key = null;
+      _chanDerivedMemo.value = null;
+    }
+
+    const reducedBars = includeRes?.reducedBars || [];
+    const mapOrigToReduced = includeRes?.mapOrigToReduced || [];
+    const meta = includeRes?.meta || null;
+
+    // ===== L2: derived 缓存（基于 includeKey + fractal 参数）=====
+    const derivedKey = _makeDerivedKey({
+      includeKey,
+      frMinTick,
+      frMinPct,
+      frMinCond,
     });
 
-    // ===== 改动点：computeFractals 需要 candles（Single Source of Truth）=====
-    const fr = computeFractals(candles, res.reducedBars || [], {
-      minTickCount: settings.chanTheory.fractalSettings.minTickCount || 0,
-      minPct: settings.chanTheory.fractalSettings.minPct || 0,
-      minCond: String(settings.chanTheory.fractalSettings.minCond || "or"),
+    if (_chanDerivedMemo.key === derivedKey && _chanDerivedMemo.value) {
+      const v = _chanDerivedMemo.value;
+      return {
+        reduced: reducedBars,
+        map: mapOrigToReduced,
+        meta,
+        fractals: v.fractals,
+        fractalConfirmPairs: v.fractalConfirmPairs,
+        pens: v.pens,
+        metaSegments: v.metaSegments,
+        finalSegments: v.finalSegments,
+        barriersIndices: v.barriersIndices,
+        pivots: v.pivots,
+      };
+    }
+
+    const fr = computeFractals(candles, reducedBars, {
+      minTickCount: frMinTick,
+      minPct: frMinPct,
+      minCond: frMinCond,
     });
 
-    // ===== NEW: 确认分型（派生结构）=====
-    const frConfirm = computeFractalConfirmPairs(
-      candles,
-      res.reducedBars || [],
-      fr || []
-    );
+    const frConfirm = computeFractalConfirmPairs(candles, reducedBars, fr || []);
 
-    // NEW: 笔算法改为显式传入 candles（单一真相源）
     const pens = computePens(
       candles,
-      res.reducedBars || [],
+      reducedBars,
       fr || [],
-      res.mapOrigToReduced || [],
+      mapOrigToReduced || [],
       { minGapReduced: 4 }
     );
 
-    // NEW: computeSegments 返回 { metaSegments, finalSegments }
-    const segRes = computeSegments(candles, res.reducedBars || [], pens.confirmed || []);
-    const metaSegments = Array.isArray(segRes?.metaSegments) ? segRes.metaSegments : [];
-    const finalSegments = Array.isArray(segRes?.finalSegments) ? segRes.finalSegments : [];
+    const segRes = computeSegments(candles, reducedBars, pens.confirmed || []);
+    const metaSegments = Array.isArray(segRes?.metaSegments)
+      ? segRes.metaSegments
+      : [];
+    const finalSegments = Array.isArray(segRes?.finalSegments)
+      ? segRes.finalSegments
+      : [];
 
-    const barrierIdxList = (res.reducedBars || []).reduce((acc, cur, i, arr) => {
+    const barrierIdxList = (reducedBars || []).reduce((acc, cur, i, arr) => {
       if (cur && cur.barrier_after_prev_bool) {
         const prev = i > 0 ? arr[i - 1] : null;
         if (prev) acc.push(prev.end_idx_orig);
@@ -429,10 +586,21 @@ export function useViewRenderHub() {
 
     const pivots = computePenPivots(pens.confirmed || []);
 
+    _chanDerivedMemo.key = derivedKey;
+    _chanDerivedMemo.value = {
+      fractals: fr,
+      fractalConfirmPairs: frConfirm,
+      pens,
+      metaSegments,
+      finalSegments,
+      barriersIndices: barrierIdxList,
+      pivots,
+    };
+
     return {
-      reduced: res.reducedBars,
-      map: res.mapOrigToReduced,
-      meta: res.meta,
+      reduced: reducedBars,
+      map: mapOrigToReduced,
+      meta,
       fractals: fr,
       fractalConfirmPairs: frConfirm,
       pens,
@@ -443,13 +611,7 @@ export function useViewRenderHub() {
     };
   }
 
-  function _buildOverlaySeriesForOption({
-    hostW,
-    visCount,
-    markerW,
-    chanCache,
-    candles,
-  }) {
+  function _buildOverlaySeriesForOption({ hostW, visCount, chanCache, candles }) {
     const out = [];
     const {
       reduced,
@@ -462,16 +624,14 @@ export function useViewRenderHub() {
       pivots,
     } = chanCache;
 
-    if (barriersIndices?.length) {
+    if (barriersIndices?.length)
       out.push(...(buildBarrierLines(barriersIndices).series || []));
-    }
 
     if (settings.chanTheory.chanSettings.showUpDownMarkers && reduced?.length) {
       out.push(
         ...(buildUpDownMarkers(reduced, {
           hostWidth: hostW,
           visCount,
-          symbolWidthPx: markerW,
         }).series || [])
       );
     }
@@ -487,20 +647,14 @@ export function useViewRenderHub() {
           confirmPairs: fractalConfirmPairs,
           hostWidth: hostW,
           visCount,
-          symbolWidthPx: markerW,
         }).series || [])
       );
     }
 
     const penEnabled =
-      (settings.chanTheory.chanSettings?.pen?.enabled ??
-        PENS_DEFAULTS.enabled) === true;
-    if (
-      penEnabled &&
-      reduced?.length &&
-      (pens?.confirmed?.length || pens?.provisional)
-    ) {
-      // NEW: 笔渲染需要 candles 以回溯端点 y
+      (settings.chanTheory.chanSettings?.pen?.enabled ?? PENS_DEFAULTS.enabled) ===
+      true;
+    if (penEnabled && reduced?.length && (pens?.confirmed?.length || pens?.provisional)) {
       out.push(
         ...(buildPenLines(pens, {
           candles,
@@ -509,10 +663,7 @@ export function useViewRenderHub() {
       );
     }
 
-    // NEW: 同时绘制 元线段 + 最终线段
-    // 最终线段样式：沿用当前 settings.chanTheory.chanSettings.segment（由 buildSegmentLines 内部处理）
-    // 元线段样式：由 buildSegmentLines 内部使用 META_SEGMENT_DEFAULTS 常量处理
-    if ((metaSegments?.length || finalSegments?.length)) {
+    if (metaSegments?.length || finalSegments?.length) {
       out.push(
         ...(buildSegmentLines(
           { metaSegments, finalSegments },
@@ -523,7 +674,8 @@ export function useViewRenderHub() {
 
     if (pivots?.length) {
       out.push(
-        ...(buildPenPivotAreas(pivots, { barrierIdxList: barriersIndices }).series || [])
+        ...(buildPenPivotAreas(pivots, { barrierIdxList: barriersIndices }).series ||
+          [])
       );
     }
 
@@ -534,9 +686,7 @@ export function useViewRenderHub() {
     const { initialRange, tipPositioner, hoveredKey, st, bars } = context;
 
     const buildMain = await chartBuilderRegistry.get("MAIN");
-    if (!buildMain) {
-      return { series: [] };
-    }
+    if (!buildMain) return { series: [] };
 
     const anyMarkers =
       (settings.chanTheory.chanSettings.showUpDownMarkers ?? true) &&
@@ -556,7 +706,6 @@ export function useViewRenderHub() {
         adjust: vm.adjust.value,
         reducedBars: chanCache.reduced,
         mapOrigToReduced: chanCache.map,
-        // NEW: 传给主图 builder，用于合并K动态锚点推导
         anchorPolicy: settings.chanTheory.chanSettings.anchorPolicy,
       },
       {
@@ -572,7 +721,6 @@ export function useViewRenderHub() {
     const overlaySeries = _buildOverlaySeriesForOption({
       hostW: st.hostWidthPx,
       visCount: bars,
-      markerW: st.markerWidthPx,
       chanCache,
       candles: vm.candles.value,
     });
@@ -588,11 +736,8 @@ export function useViewRenderHub() {
     if (!vm) return null;
 
     const key = String(kind || "").toUpperCase();
-
     const builder = await chartBuilderRegistry.get(key);
-    if (!builder) {
-      return null;
-    }
+    if (!builder) return null;
 
     const commonParams = {
       candles: vm.candles.value,
@@ -602,17 +747,8 @@ export function useViewRenderHub() {
 
     if (key === "VOL" || key === "AMOUNT") {
       const volCfg = settings.chartDisplay.volSettings || {};
-      const st = getCommandState();
-      const volEnv = {
-        hostWidth: st.hostWidthPx,
-        visCount: st.barsCount,
-        overrideMarkWidth: st.markerWidthPx,
-      };
-      const finalVolCfg = {
-        ...volCfg,
-        mode: key === "AMOUNT" ? "amount" : "vol",
-      };
-      return builder({ ...commonParams, volCfg: finalVolCfg, volEnv }, ui);
+      const finalVolCfg = { ...volCfg, mode: key === "AMOUNT" ? "amount" : "vol" };
+      return builder({ ...commonParams, volCfg: finalVolCfg }, ui);
     }
 
     if (key === "MACD") {
@@ -620,12 +756,8 @@ export function useViewRenderHub() {
       return builder({ ...commonParams, macdCfg }, ui);
     }
 
-    if (key === "KDJ") {
-      return builder({ ...commonParams, useKDJ: true }, ui);
-    }
-    if (key === "RSI") {
-      return builder({ ...commonParams, useRSI: true }, ui);
-    }
+    if (key === "KDJ") return builder({ ...commonParams, useKDJ: true }, ui);
+    if (key === "RSI") return builder({ ...commonParams, useRSI: true }, ui);
 
     return builder(commonParams, ui);
   }
@@ -639,15 +771,25 @@ export function useViewRenderHub() {
       const paneKey = `indicator:${pane.id}`;
 
       try {
-        const option = await _getIndicatorOption(pane.kind, {
-          initialRange,
-          tooltipPositioner: tipPositioner,
-          isHovered: hoveredKey === paneKey,
-        });
+        const kind = String(pane.kind || "").toUpperCase();
 
-        if (option) {
-          indicatorOptions[pane.id] = option;
-        }
+        const ui =
+          kind === "VOL" || kind === "AMOUNT"
+            ? {
+                initialRange,
+                tooltipPositioner: tipPositioner,
+                isHovered: hoveredKey === paneKey,
+                paneId: pane.id,
+              }
+            : {
+                initialRange,
+                tooltipPositioner: tipPositioner,
+                isHovered: hoveredKey === paneKey,
+              };
+
+        const option = await _getIndicatorOption(pane.kind, ui);
+
+        if (option) indicatorOptions[pane.id] = option;
       } catch {}
     }
 
@@ -663,17 +805,14 @@ export function useViewRenderHub() {
     const st = getCommandState();
     const bars = Math.max(1, Number(st.barsCount || 1));
 
-    const tsArr = candles.map((d) => d.ts);
+    const tsArr = _getTsArr(candles);
 
     let eIdx = len - 1;
     if (Number.isFinite(st.rightTs)) {
-      for (let i = len - 1; i >= 0; i--) {
-        if (tsArr[i] <= st.rightTs) {
-          eIdx = i;
-          break;
-        }
-      }
+      const pos = upperBoundLE(tsArr, st.rightTs);
+      eIdx = pos >= 0 ? pos : 0;
     }
+
     let sIdx = Math.max(0, eIdx - bars + 1);
     if (sIdx === 0 && eIdx - sIdx + 1 < bars) {
       eIdx = Math.min(len - 1, bars - 1);
@@ -705,7 +844,6 @@ export function useViewRenderHub() {
         eIdx,
         allRows: len,
         atRightEdge: !!st.atRightEdge,
-        markerWidthPx: st.markerWidthPx,
         hoveredPanelKey: context.hoveredKey,
       },
       main: {
@@ -721,11 +859,8 @@ export function useViewRenderHub() {
     };
 
     _publish(snapshot);
-    // 每次完整渲染后，按当前悬浮窗体重新修正各图的 axisPointer 模式
-    _updateAxisPointerModes();
   }
 
-  // ===== 批处理执行函数 =====
   async function _executeBatch(asyncTask) {
     _batchFlag.value = true;
     _pendingCompute.value = false;

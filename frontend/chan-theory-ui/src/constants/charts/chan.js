@@ -12,8 +12,18 @@ export const CHAN_DEFAULTS = {
   // --- 总开关（设置窗已暴露）---
   showUpDownMarkers: true,  // 是否显示涨跌标记（✅ 设置窗可改）
 
-  // --- 承载点策略（设置窗已暴露）---
-  anchorPolicy: "extreme",  // 承载点位置："extreme"=极值点 | "right"=右端点（✅ 设置窗可改）
+  // --- 承载点策略（设置窗已移除，改为常量唯一真相源）---
+  // policy:
+  //   - 'left'   -> start_idx_orig
+  //   - 'right'  -> end_idx_orig
+  //   - 'extreme'-> dir_int>0 取 g_idx_orig；dir_int<0 取 d_idx_orig；dir_int==0 兜底 right
+  anchorPolicy: "extreme",  // 承载点位置（✅ 内部可改；❌ 设置窗不再暴露）
+
+  // --- NEW: 涨跌标记宽%（设置窗已暴露：涨跌标记行）---
+  // 语义与分型 markerPercent 完全一致：
+  //   markerWidthPx = barWidthPx* × upDownMarkerPercent（其中 barWidthPx*=stepPx×barPercent）
+  // 取值范围 50~100，步长 1（由 UI_LIMITS.markerWidthPercent 控制）
+  upDownMarkerPercent: 80,
 
   // --- 标记尺寸（设置窗未暴露）---
   markerMinPx: 1,           // 标记最小宽度（像素）（❌ 设置窗未暴露，直接用常量）
@@ -32,10 +42,34 @@ export const CHAN_DEFAULTS = {
   maxVisibleMarkers: 10000, // 最大可见标记数（降采样阈值）（❌ 设置窗未暴露，直接用常量）
 };
 
+// ===== 分型标记宽度（像素）限制：用于 markerWidthPx 落地前 clamp =====
+// 说明：
+//   - 本轮新增：分型 markerWidthPx 完全由 ECharts convertToPixel 推导。
+//   - 为避免极端缩放/极端容器导致过大/过小，增加统一 clamp 常量。
+//   - 注意：最终还会叠加一个“<= barWidthPx*”的兜底（且尊重 min 优先级）。
+export const FRACTAL_MARKER_WIDTH_PX_LIMITS = {
+  minPx: 1,
+  maxPx: 16,
+};
+
+// ===== NEW: 涨跌标记宽度（像素）限制：用于 markerWidthPx 落地前 clamp =====
+// 说明：
+//   - 与分型一致走 stepPx 推导，但为了满足“各类分别用一套 min/max”的约束，单独提供常量。
+export const UPDOWN_MARKER_WIDTH_PX_LIMITS = {
+  minPx: 1,
+  maxPx: 16,
+};
+
 // ===== 分型配置 =====
 export const FRACTAL_DEFAULTS = {
   // --- 总开关（设置窗已暴露）---
-  enabled: true,            // 是否启用分型识别（✅ 设置窗可改，通过三态总控）
+  enabled: true, // 是否启用分型识别（✅ 设置窗可改，通过三态总控）
+
+  // --- NEW: 分型标记宽%（设置窗已暴露：分型总控行）---
+  // 语义：
+  //   - markerWidthPx = barWidthPx* × markerPercent（其中 barWidthPx*=categoryBandPx×barPercent）
+  //   - 取值范围 50~100，步长 1（由 UI_LIMITS.markerWidthPercent 控制）
+  markerPercent: 80,
 
   // --- 确认连线（设置窗未暴露）---
   showConfirmLink: false,   // 是否显示确认分型的连线（❌ 设置窗未暴露，直接用常量）

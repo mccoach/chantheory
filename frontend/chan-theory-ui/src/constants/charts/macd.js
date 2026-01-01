@@ -30,7 +30,7 @@ export const DEFAULT_MACD_SETTINGS = {
   // --- 柱体样式（设置窗已暴露）---
   hist: {
     enabled: true,                             // 是否绘制 MACD 柱体
-    barPercent: 80,                            // 柱宽百分比
+    barPercent: 88,                            // 柱宽百分比（默认88）
     upColor: STYLE_PALETTE.bars.macd.positive, // 多方颜色（HIST>=0）
     downColor: STYLE_PALETTE.bars.macd.negative, // 空方颜色（HIST<0）
     z: 3,                                      // 柱体图层 z 值

@@ -1,9 +1,10 @@
 // src/charts/options/builders/main.js
 // ==============================
-// V7.0 - 添加诊断日志版
-//
-// 新增：
-//   - 第150行后：输出主图的 yAxis[1] 和 series 使用情况
+// V8.0 - 主图柱宽单一参数版（barPercent 统一控制原始K与合并K）
+// 改动：
+//   1) 新增：统一读取 klineStyle.barPercent（10~100, integer）
+//   2) 原始K(candlestick) 与 合并K(bar stack) 统一显式设置 barWidth
+//   3) 删除旧逻辑：仅当 barPercent < 100 才设置 barWidth（避免隐式默认宽度产生第二套规则）
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -47,6 +48,12 @@ export function buildMainChartOption(
 
   const ks = klineStyle || DEFAULT_KLINE_STYLE || {};
   const MK = ks.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
+
+  // ===== NEW: 主图柱宽（单一参数）=====
+  const barPercent = Number.isFinite(+ks.barPercent)
+    ? Math.max(10, Math.min(100, Math.round(+ks.barPercent)))
+    : Math.max(10, Math.min(100, Math.round(+DEFAULT_KLINE_STYLE.barPercent || 88)));
+
   const showOriginal = (ks.originalEnabled ?? true) === true;
   const showMerged = (ks.mergedEnabled ?? true) === true;
   const mergedFirst = String(MK.displayOrder || "first") === "first";
@@ -80,10 +87,11 @@ export function buildMainChartOption(
           borderWidth:
             ks.originalBorderWidth ?? DEFAULT_KLINE_STYLE.originalBorderWidth,
         },
+        // NEW: 显式应用柱宽（单一参数）
+        barWidth: `${barPercent}%`,
         z: originalZ,
       };
-      if (ks.barPercent && ks.barPercent < 100)
-        klineSeries.barWidth = `${ks.barPercent}%`;
+
       series.push(klineSeries);
     }
 
@@ -137,9 +145,8 @@ export function buildMainChartOption(
         stack: "merged_k",
         data: baseLow,
         itemStyle: { color: "transparent" },
-        ...(ks.barPercent && ks.barPercent < 100
-          ? { barWidth: `${ks.barPercent}%` }
-          : {}),
+        // NEW: 显式应用柱宽（单一参数）
+        barWidth: `${barPercent}%`,
         barGap: "-100%",
         silent: true,
         z: mergedZ,
@@ -160,9 +167,8 @@ export function buildMainChartOption(
                 },
               }
         ),
-        ...(ks.barPercent && ks.barPercent < 100
-          ? { barWidth: `${ks.barPercent}%` }
-          : {}),
+        // NEW: 显式应用柱宽（单一参数）
+        barWidth: `${barPercent}%`,
         barGap: "-100%",
         itemStyle: {
           color: (p) => (upIndexSet.has(p.dataIndex) ? upFill : dnFill),

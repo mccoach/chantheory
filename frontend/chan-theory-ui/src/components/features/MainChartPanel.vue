@@ -1,12 +1,8 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartPanel.vue -->
 <!-- ============================== -->
-<!-- V8.0 - 性能优化版（删除调试日志）
-     
-     本版附加改动（复权控制）：
-       - 在顶部右侧增加一组三联按钮：前复权 / 不复权 / 后复权。
-       - 位置：主行情窗“设置”按钮左侧紧邻。
-       - 点击时调用 useUserSettings.setAdjust('qfq'|'none'|'hfq')，触发已有 watch(adjust) 重算逻辑。
--->
+<!-- 本轮改动：主图分型+涨跌 markerWidth 由通用 WidthController 管理
+     - 每次 renderHub 下发主图 option 并 setOption(notMerge:true) 后，显式调用 scheduleWidthUpdate()
+       作为“option 已落地”的强时序信号，消除竞态。 -->
 <template>
   <MainChartControls />
 
@@ -23,50 +19,37 @@
       <div class="right-box">
         <div class="status">
           <span v-if="vm.loading.value" class="badge busy">更新中…</span>
-          
+
           <transition name="hintfade">
-            <span 
-              v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'" 
+            <span
+              v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'"
               class="badge done"
             >
               已刷新 {{ refreshStatus.refreshedAtHHMMSS.value }}
             </span>
           </transition>
-          
-          <span 
-            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" 
-            class="badge warn" 
+
+          <span
+            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'"
+            class="badge warn"
             title="近端数据更新失败，当前为历史缓存"
           >
             数据不完整 {{ refreshStatus.refreshedAtHHMMSS.value }}
           </span>
         </div>
 
-        <!-- NEW: 复权三联按钮组（前 / 无 / 后） -->
         <div class="adj-seg" title="复权方式">
-          <button
-            class="adj-btn"
-            :class="{ active: isAdjust('qfq') }"
-            @click="setAdjust('qfq')"
-          >
+          <button class="adj-btn" :class="{ active: isAdjust('qfq') }" @click="setAdjust('qfq')">
             前
           </button>
-          <button
-            class="adj-btn"
-            :class="{ active: isAdjust('none') }"
-            @click="setAdjust('none')"
-          >
+          <button class="adj-btn" :class="{ active: isAdjust('none') }" @click="setAdjust('none')">
             无
           </button>
-          <button
-            class="adj-btn"
-            :class="{ active: isAdjust('hfq') }"
-            @click="setAdjust('hfq')"
-          >
+          <button class="adj-btn" :class="{ active: isAdjust('hfq') }" @click="setAdjust('hfq')">
             后
           </button>
         </div>
-        
+
         <button
           class="btn-settings"
           @click="openSettingsDialog"
@@ -76,9 +59,9 @@
         ></button>
       </div>
     </div>
-    
+
     <div ref="host" class="canvas-host"></div>
-    
+
     <div
       class="bottom-strip"
       title="上下拖拽调整窗体高度"
@@ -102,11 +85,8 @@ const hub = inject("viewCommandHub");
 const dialogManager = inject("dialogManager");
 
 const refreshStatus = useRefreshStatus(vm.loading, vm.error);
-
-// NEW: 引入用户设置，用于设置 adjust 偏好
 const settings = useUserSettings();
 
-// ===== 通用 chart 面板逻辑 =====
 const {
   wrapRef: wrap,
   hostRef: host,
@@ -114,6 +94,7 @@ const {
   onResizeHandleDown,
   onMouseEnter,
   onMouseLeave,
+  scheduleWidthUpdate,
 } = useChartPanel({
   panelKey: ref("main"),
   vm: vm,
@@ -122,6 +103,7 @@ const {
   onChartReady: (instance) => {
     try {
       renderHub.registerChart("main", instance);
+
       host.value?.addEventListener("mouseenter", () => {
         renderHub.setActivePanel("main");
       });
@@ -133,17 +115,20 @@ const {
               notMerge: true,
               silent: true,
             });
+
+            // 关键时序信号：option 已落地，再更新 widthState 并触发最小重绘
+            scheduleWidthUpdate?.();
           }
         } catch (e) {
           console.error("MainChartPanel onRender error:", e);
         }
       });
+
       onBeforeUnmount(() => renderHub.offRender(unsubId));
     } catch {}
   },
 });
 
-// ===== 复权三联按钮：状态 & 操作 =====
 const currentAdjust = computed(() => String(vm.adjust?.value || "none"));
 
 function isAdjust(kind) {
@@ -152,7 +137,6 @@ function isAdjust(kind) {
 }
 
 function setAdjust(kind) {
-  // 统一使用 setter，确保偏好被持久化；watch(adjust) 将自动触发重算
   const k = kind === "qfq" || kind === "hfq" ? kind : "none";
   try {
     settings.setAdjust(k);
@@ -173,7 +157,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== 样式保持不变（原有部分） ===== */
 .top-info {
   position: absolute;
   left: 0;
@@ -247,7 +230,6 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 
-/* NEW: 复权三联按钮组样式 */
 .adj-seg {
   display: inline-flex;
   align-items: center;

@@ -4,6 +4,10 @@
 - 职责：仅负责渲染缠论相关的设置UI，不再管理状态。
 - 数据流：通过 `inject` 获取来自外壳的响应式草稿对象 (chanDraft, fractalDraft)，并直接绑定。
 - 逻辑：分型总控的三态切换逻辑 (useTriMasterToggle) 依然保留在此，因为它与 UI 渲染紧密相关。
+本轮改动（涨跌标记迁移）：
+  1) “涨跌标记”行移除“承载点”，原位替换为“标记宽%”（chanDraft.upDownMarkerPercent）
+  2) 承载点 anchorPolicy 改为仅 constants 决定（CHAN_DEFAULTS.anchorPolicy），设置窗不再暴露
+  3) 标记宽% 取值与分型 markerPercent 完全一致：50~100 step=1，默认 100
 ============================== -->
 <template>
   <SettingsGrid
@@ -26,7 +30,6 @@ import {
   CHAN_DEFAULTS,
   FRACTAL_DEFAULTS,
   LINE_STYLES,
-  ANCHOR_POLICY_OPTIONS,
   MIN_COND_OPTIONS,
   CHAN_PEN_PIVOT_DEFAULTS,
   META_SEGMENT_DEFAULTS,
@@ -43,7 +46,7 @@ import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 const chanDraft = inject("chanDraft");
 const fractalDraft = inject("fractalDraft");
 
-// NEW: 注入 resetter（本文件原实现使用了 chanResetter/fractalResetter 但未 inject，补齐）
+// 注入 resetter（只改草稿，不保存、不刷新）
 const chanResetter = inject("chanResetter", null);
 const fractalResetter = inject("fractalResetter", null);
 
@@ -78,7 +81,7 @@ const rows = computed(() => {
   const ff = fractalDraft || {};
   const out = [];
 
-  // 涨跌标记
+  // 涨跌标记（承载点 UI 已移除：改为标记宽%）
   out.push({
     key: "chan-updown",
     name: "涨跌标记",
@@ -87,20 +90,21 @@ const rows = computed(() => {
       { key: "upColor", label: "上涨颜色" },
       { key: "downShape", label: "下跌符号" },
       { key: "downColor", label: "下跌颜色" },
-      { key: "anchorPolicy", label: "承载点" },
+      { key: "updown-markerPercent", label: "标记宽%" },
     ],
     check: { type: "single", checked: !!cf.showUpDownMarkers },
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 分型总控（显著度参数 + 总控复选）
+  // 分型总控（显著度参数 + 总控复选 + 标记宽%）
   out.push({
     key: "fr-global",
-    name: "分型判定",
+    name: "分型总控",
     items: [
       { key: "fr-minTick", label: "最小tick" },
       { key: "fr-minPct", label: "最小幅度%" },
       { key: "fr-minCond", label: "判断条件" },
+      { key: "fr-markerPercent", label: "标记宽%" },
     ],
     check: {
       type: "tri",
@@ -155,7 +159,7 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // NEW: 元线段（放在线段上方，简笔下方）
+  // 元线段
   out.push({
     key: "metaSegment",
     name: "元线段",
@@ -246,7 +250,7 @@ function onRowToggle(row) {
     return;
   }
 
-  // NEW: 元线段 toggle（完全参照 segment）
+  // 元线段 toggle
   if (key === "metaSegment") {
     const ms = cf.metaSegment || {};
     cf.metaSegment = {
@@ -273,6 +277,7 @@ function onRowToggle(row) {
 // 行重置（统一调用 resetter；只改草稿，不保存、不刷新）
 function onRowReset(row) {
   const key = String(row.key || "");
+
   if (key === "chan-updown") {
     // 重置涨跌标记相关字段（保留 pen/segment/penPivot）
     chanResetter?.resetPath("showUpDownMarkers");
@@ -280,19 +285,17 @@ function onRowReset(row) {
     chanResetter?.resetPath("upColor");
     chanResetter?.resetPath("downShape");
     chanResetter?.resetPath("downColor");
-    chanResetter?.resetPath("anchorPolicy");
-    // 如需同步最小/最大/高度/偏移，亦可按需加入：
-    // chanResetter?.resetPath("markerMinPx");
-    // chanResetter?.resetPath("markerMaxPx");
-    // chanResetter?.resetPath("markerHeightPx");
-    // chanResetter?.resetPath("markerYOffsetPx");
+    // NEW: 标记宽%（涨跌标记）
+    chanResetter?.resetPath("upDownMarkerPercent");
     return;
   }
+
   if (key === "fr-global") {
-    // 重置分型判定总控（与缠论页正确链路一致）
+    // 重置分型总控
     fractalResetter?.resetPath("minTickCount");
     fractalResetter?.resetPath("minPct");
     fractalResetter?.resetPath("minCond");
+    fractalResetter?.resetPath("markerPercent");
     fractalResetter?.resetPath("showStrength");
     fractalResetter?.resetPath("confirmStyle");
     frTri.updateSnapshot();
@@ -313,6 +316,7 @@ function onRowReset(row) {
     frTri.updateSnapshot();
     return;
   }
+
   if (key === "pen") {
     chanResetter?.resetPath("pen");
     return;
@@ -328,6 +332,7 @@ function onRowReset(row) {
     chanResetter?.resetPath("segment");
     return;
   }
+
   if (key === "penPivot") {
     chanResetter?.resetPath("penPivot");
     return;
@@ -376,15 +381,17 @@ const { renderControl } = useSettingsRenderer({
       onInput: (e) => (chanDraft.downColor = e.target.value),
     }),
   },
-  anchorPolicy: {
-    component: "select",
+
+  // NEW: 涨跌标记宽%
+  "updown-markerPercent": {
+    component: NumberSpinner,
     getProps: () => ({
-      class: "input",
-      value: chanDraft.anchorPolicy,
-      onChange: (e) => (chanDraft.anchorPolicy = e.target.value),
-      innerHTML: ANCHOR_POLICY_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
+      modelValue: chanDraft.upDownMarkerPercent,
+      min: UI_LIMITS.markerWidthPercent.min,
+      max: UI_LIMITS.markerWidthPercent.max,
+      step: UI_LIMITS.markerWidthPercent.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (chanDraft.upDownMarkerPercent = v),
     }),
   },
   "fr-minTick": {
@@ -417,6 +424,18 @@ const { renderControl } = useSettingsRenderer({
       innerHTML: MIN_COND_OPTIONS.map(
         (o) => `<option value="${o.v}">${o.label}</option>`
       ).join(""),
+    }),
+  },
+  // 分型标记宽%
+  "fr-markerPercent": {
+    component: NumberSpinner,
+    getProps: () => ({
+      modelValue: fractalDraft.markerPercent,
+      min: UI_LIMITS.markerWidthPercent.min,
+      max: UI_LIMITS.markerWidthPercent.max,
+      step: UI_LIMITS.markerWidthPercent.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (fractalDraft.markerPercent = v),
     }),
   },
   ...Object.fromEntries(

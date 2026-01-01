@@ -3,11 +3,11 @@
 // 说明：MACD 副图 Option 构造器（使用集中预设 DEFAULT_MACD_SETTINGS）
 // - 周期：由 engines/indicators.js 按 macdSettings.period 计算好 DIF/DEA/HIST
 // - 本文件只负责：用 macdSettings.lines / macdSettings.hist 渲染样式
-// - 柱宽：统一按 BAR_USABLE_RATIO 预留间隙，即便配置 100% 也不会挤成一团
+// - 本轮改动：柱宽仅由 hist.barPercent 决定，不再进行 BAR_USABLE_RATIO 缩放
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
-import { DEFAULT_MACD_SETTINGS, BAR_USABLE_RATIO } from "@/constants";
+import { DEFAULT_MACD_SETTINGS } from "@/constants";
 import { makeMacdTooltipFormatter } from "../tooltips/index";
 import { createTechSkeleton } from "../skeleton/tech";
 import { formatNumberScaled } from "@/utils/numberUtils";
@@ -35,6 +35,14 @@ export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
 
   // ===== 柱体（HIST）=====
   if (histCfg.enabled && hasHIST) {
+    const barPercent = Math.max(
+      10,
+      Math.min(
+        100,
+        Math.round(histCfg.barPercent ?? DEFAULT_MACD_SETTINGS.hist.barPercent)
+      )
+    );
+
     series.push({
       id: "MACD_HIST",
       type: "bar",
@@ -50,19 +58,7 @@ export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
             : (histCfg.downColor ?? DEFAULT_MACD_SETTINGS.hist.downColor);
         },
       },
-      // 即便用户配置 100%，仍按 BAR_USABLE_RATIO 预留间隙
-      barWidth: `${
-        Math.max(
-          1,
-          Math.min(
-            100,
-            Math.round(
-              ((histCfg.barPercent ?? DEFAULT_MACD_SETTINGS.hist.barPercent) *
-                BAR_USABLE_RATIO)
-            )
-          )
-        )
-      }%`,
+      barWidth: `${barPercent}%`, // ← 单一参数
       z: histCfg.z ?? DEFAULT_MACD_SETTINGS.hist.z,
     });
   }
@@ -80,7 +76,7 @@ export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
         width: linesCfg.width ?? DEFAULT_MACD_SETTINGS.lines.width,
         type: linesCfg.difStyle ?? DEFAULT_MACD_SETTINGS.lines.difStyle,
       },
-      color: linesCfg.difColor ?? DEFAULT_MACD_SETTINGS.lines.difColor, 
+      color: linesCfg.difColor ?? DEFAULT_MACD_SETTINGS.lines.difColor,
       z: linesCfg.z ?? DEFAULT_MACD_SETTINGS.lines.z,
     });
 

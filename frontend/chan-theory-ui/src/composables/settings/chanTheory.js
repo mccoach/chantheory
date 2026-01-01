@@ -6,7 +6,7 @@
 
 import { reactive } from "vue";
 import { CHAN_DEFAULTS, FRACTAL_DEFAULTS } from "@/constants";
-import { deepMerge } from "@/utils/objectUtils"; // NEW
+import { deepMerge } from "@/utils/objectUtils";
 
 // 分型设置的特殊合并逻辑
 function mergeFractalSettings(local = {}) {
@@ -14,7 +14,15 @@ function mergeFractalSettings(local = {}) {
   const merged = deepMerge(defaults, local);
   // 确保 enabled 是布尔值
   if (local.confirmStyle) {
-    merged.confirmStyle.enabled = (local.confirmStyle.enabled ?? defaults.confirmStyle.enabled) === true;
+    merged.confirmStyle.enabled =
+      (local.confirmStyle.enabled ?? defaults.confirmStyle.enabled) === true;
+  }
+  // NEW: 确保 markerPercent 为整数（50~100 由 UI 控制，这里只做兜底）
+  if (merged.markerPercent == null) {
+    merged.markerPercent = defaults.markerPercent;
+  } else {
+    const n = Math.round(Number(merged.markerPercent));
+    merged.markerPercent = Number.isFinite(n) ? n : defaults.markerPercent;
   }
   return merged;
 }

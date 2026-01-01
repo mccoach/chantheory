@@ -9,8 +9,12 @@ import { STYLE_PALETTE } from "../common";
 
 // ===== 主图 K 线样式配置 =====
 export const DEFAULT_KLINE_STYLE = {
-  // --- 柱体宽度（设置窗未暴露）---
-  barPercent: 100,          // K线柱体宽度百分比（100=不压缩）（❌ 设置窗未暴露，直接用常量）
+  // --- 柱体宽度（设置窗已暴露）---
+  // 说明：
+  //   - 本字段作为主图所有“柱体宽度”的唯一参数（统一应用：原始K线 + 合并K线）。
+  //   - 取值为百分比（10~100，整数），UI 约束使用 UI_LIMITS.barWidthPercent。
+  //   - 本轮改动：柱宽计算不再使用 BAR_USABLE_RATIO 缩放；barWidth 直接使用本百分比。
+  barPercent: 88,          // K线柱体宽度百分比（默认88）（✅ 设置窗已暴露）
 
   // --- 原始K线样式（设置窗已暴露）---
   upColor: "#f56c6c",       // 阳线颜色（✅ 设置窗可改）

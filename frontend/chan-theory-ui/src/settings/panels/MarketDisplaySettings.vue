@@ -1,9 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\MarketDisplaySettings.vue -->
 <!-- ==============================
 说明：行情设置面板（新版：UI-only, 数据驱动渲染）
-- 职责：仅负责渲染行情相关的设置UI。
-- 数据流：通过 `inject` 获取响应式草稿对象。
-- 渲染：使用新的通用渲染器 `useSettingsRenderer` 替代手写的 `renderControl`。
+本轮改动：
+  1) 删除设置窗内“复权(adjust)”通道：复权仅保留页面按钮三联。
+  2) 原位新增“柱宽%(barPercent)”：绑定 klineDraft.barPercent，约束完全参照量窗柱宽%（UI_LIMITS.barWidthPercent）。
 ============================== -->
 <template>
   <SettingsGrid
@@ -24,9 +24,7 @@ import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 import {
   DEFAULT_KLINE_STYLE,
   DEFAULT_MA_CONFIGS,
-  DEFAULT_APP_PREFERENCES,
   LINE_STYLES,
-  ADJUST_OPTIONS,
   DISPLAY_ORDER_OPTIONS,
   UI_LIMITS,
 } from "@/constants";
@@ -37,7 +35,6 @@ import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
 // 通过 inject 获取共享的草稿状态
 const klineDraft = inject("klineDraft");
 const maDraft = inject("maDraft");
-const adjustDraft = inject("adjustDraft");
 
 // NEW: 注入统一重置器
 const klineResetter = inject("klineResetter");
@@ -69,7 +66,7 @@ const rows = computed(() => {
     key: "k-original",
     name: "原始K线",
     items: [
-      { key: "adjust", label: "复权" },
+      { key: "barPercent", label: "柱宽%" }, // ← 原位替换“复权”
       { key: "upColor", label: "阳线颜色" },
       { key: "upFade", label: "阳线淡显" },
       { key: "downColor", label: "阴线颜色" },
@@ -156,13 +153,13 @@ function onRowToggle(row) {
 function onRowReset(row) {
   const key = String(row.key || "");
   if (key === "k-original") {
-    // 原始K线：重置相关字段到默认；复权 UI 草稿一并回默认
+    // 原始K线：重置相关字段到默认（包含新增 barPercent）
+    klineResetter?.resetPath("barPercent");
     klineResetter?.resetPath("upColor");
     klineResetter?.resetPath("downColor");
     klineResetter?.resetPath("originalFadeUpPercent");
     klineResetter?.resetPath("originalFadeDownPercent");
     klineResetter?.resetPath("originalEnabled");
-    adjustDraft.value = DEFAULT_APP_PREFERENCES.adjust;
     return;
   }
   if (key === "k-merged") {
@@ -181,15 +178,15 @@ function onRowReset(row) {
 
 // 使用新的通用渲染器
 const { renderControl } = useSettingsRenderer({
-  adjust: {
-    component: "select",
+  barPercent: {
+    component: NumberSpinner,
     getProps: () => ({
-      class: "input",
-      value: adjustDraft.value,
-      onChange: (e) => (adjustDraft.value = e.target.value),
-      innerHTML: ADJUST_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
+      modelValue: klineDraft.barPercent,
+      min: UI_LIMITS.barWidthPercent.min,
+      max: UI_LIMITS.barWidthPercent.max,
+      step: UI_LIMITS.barWidthPercent.step,
+      integer: true,
+      "onUpdate:modelValue": (v) => (klineDraft.barPercent = v),
     }),
   },
   upColor: {

@@ -1,11 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\tech\IndicatorPanel.vue -->
-
-<!-- ============================== -->
-<!-- 合并版 IndicatorPanel：既可渲染 成交量/成交额，也可渲染 MACD/KDJ/RSI/BOLL/OFF
-     - FIX: 移除本地 setOption 调用，完全依赖渲染中枢的快照进行渲染。
-     - FIX: onRender 回调中，从快照中查找为本面板ID预先生成的 option。
-     - FIX: onKindChange 只 emit 更新，不再执行任何副作用。
--->
 <template>
   <div
     ref="wrap"
@@ -83,8 +76,8 @@ import {
   computed,
 } from "vue";
 import { openIndicatorSettings } from "@/settings/indicatorShell";
-import { useChartPanel } from "@/composables/useChartPanel"; // NEW: Import the common panel hook
-import { SETTINGS_ICON_SVG, CLOSE_ICON_SVG } from "@/constants/icons"; // NEW: Import SVG constants
+import { useChartPanel } from "@/composables/useChartPanel";
+import { SETTINGS_ICON_SVG, CLOSE_ICON_SVG } from "@/constants/icons";
 
 // --- props / emits (No changes) ---
 const props = defineProps({
@@ -99,7 +92,14 @@ const hub = inject("viewCommandHub");
 const renderHub = inject("renderHub");
 const dialogManager = inject("dialogManager");
 
-// --- NEW: Use the common chart panel logic ---
+const kindLocal = ref(props.kind.toUpperCase());
+watch(
+  () => props.kind,
+  (v) => {
+    kindLocal.value = String(v || "MACD").toUpperCase();
+  }
+);
+
 const panelKey = computed(() => `indicator:${props.id}`);
 const {
   wrapRef: wrap,
@@ -108,11 +108,15 @@ const {
   onResizeHandleDown,
   onMouseEnter,
   onMouseLeave,
+  scheduleWidthUpdate,
+  scheduleMarkerUpdate,
 } = useChartPanel({
   panelKey,
   vm,
   hub,
   renderHub,
+  // NEW: 告知 useChartPanel 当前 panel 的 kind，用于按需启停量窗 WidthController
+  getPanelKind: () => kindLocal.value,
   onChartReady: (instance) => {
     // 指标图特有的初始化逻辑
     try {
@@ -120,7 +124,7 @@ const {
       host.value?.addEventListener("mouseenter", () => {
         renderHub.setActivePanel(panelKey.value);
       });
-      
+
       // FIX: Unified render subscription logic
       const unsubId = renderHub.onRender((snapshot) => {
         try {
@@ -134,6 +138,12 @@ const {
           if (option) {
             // Ensure clean state on each render
             instance.setOption(option, { notMerge: true, silent: true });
+
+            // PERF: 仅量窗（VOL/AMOUNT）需要宽度系统刷新
+            if (kind === "VOL" || kind === "AMOUNT") {
+              scheduleWidthUpdate?.();
+              scheduleMarkerUpdate?.();
+            }
           }
         } catch (e) {
           console.error(`IndicatorPanel[${props.id}] onRender error:`, e);
@@ -144,16 +154,6 @@ const {
   }
 });
 
-// --- Component-Specific Logic ---
-
-// Indicator Kind Selector
-const kindLocal = ref(props.kind.toUpperCase());
-watch(
-  () => props.kind,
-  (v) => {
-    kindLocal.value = String(v || "MACD").toUpperCase();
-  }
-);
 function onKindChange() {
   emit("update:kind", kindLocal.value);
 }
@@ -315,12 +315,5 @@ onBeforeUnmount(() => {
   background-size: 4px 6px;
   background-position: center;
   opacity: 0.7;
-}
-
-/* 指标设置占位提示 */
-.settings-hint {
-  color: #bbb;
-  font-size: 13px;
-  padding: 4px 2px;
 }
 </style>

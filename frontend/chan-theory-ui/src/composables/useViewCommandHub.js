@@ -1,14 +1,20 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewCommandHub.js
 // ==============================
-// V5.5 - 视图状态与设置系统统一持久化版
+// V5.6 - 清理 markerWidthPx/hostWidthPx 旧宽度体系（去冗余）
 //
-// 核心改造：
-//   1. 移除对 localStorage 的直接读写，改为调用 useUserSettings.viewState 的 setViewBars/setRightTs，
-//      再通过 settings.saveAll() 统一写入 LS_KEY。
-//   2. 保留原有 PERSIST_DEBOUNCE_MS 防抖机制，仍然只在拖拽/缩放结束后一小段时间内落盘，
-//      避免高频 dataZoom 事件导致频繁 I/O。
-//   3. 其余逻辑（barsCount/rightTs 计算、ChangeFreq/ChangeWidthPreset 等）保持不变，
-//      以保证与原有行为完美回归（除持久化路径外）。
+// 背景：
+//   - 主图/量窗的 marker 宽度已统一迁移到 ECharts 实例侧 WidthController + widthState：
+//       * 宽度估算在实例侧完成（基于 dataZoom + chartWidth + barPercent + markerPercent）
+//       * series.symbolSize 动态读取 widthState
+//       * 宽度刷新通过空 patch 触发 ECharts 重算 symbolSize
+//   - 因此 ViewCommandHub 内的 markerWidthPx/hostWidthPx/_recalcMarkerWidth 体系已无任何真实消费，
+//     且属于“旧链路残留”，应彻底删除以减少维护成本与潜在隐性开销。
+//
+// 本轮改动（零冗余）：
+//   1) 删除 markerWidthPx、hostWidthPx、_recalcMarkerWidth
+//   2) 删除 setHostWidth 与 execute('ResizeHost') 分支
+//   3) 删除 getState 中的 markerWidthPx/hostWidthPx 输出字段
+//   4) 删除所有分支中对 _recalcMarkerWidth 的调用
 // ==============================
 
 import { ref, computed } from "vue";
@@ -17,7 +23,6 @@ import {
   pickPresetByBarsCountDown,
   presetToBars,
   PERSIST_DEBOUNCE_MS,
-  BAR_USABLE_RATIO,
 } from "@/constants";
 
 let _hubSingleton = null;
@@ -29,8 +34,6 @@ export function useViewCommandHub() {
 
   const barsCount = ref(1);
   const rightTs = ref(null);
-  const markerWidthPx = ref(8);
-  const hostWidthPx = ref(800);
   const allRows = ref(0);
   const currentFreq = ref(settings.preferences.freq || "1d");
   const currentSymbol = ref(settings.preferences.lastSymbol || "");
@@ -89,13 +92,6 @@ export function useViewCommandHub() {
   let _rafScheduled = false;
   let _rafTickCount = 0;
   let _pendingNotify = false;
-
-  function _recalcMarkerWidth() {
-    const b = Math.max(1, Number(barsCount.value || 1));
-    const w = Math.max(1, Number(hostWidthPx.value || 1));
-    const approx = Math.round((w * BAR_USABLE_RATIO) / b);
-    markerWidthPx.value = Math.max(1, Math.min(16, approx));
-  }
 
   let _persistTimer = null;
 
@@ -178,7 +174,6 @@ export function useViewCommandHub() {
     barsCount.value = Math.max(1, Number(savedBars || 1));
     rightTs.value = Number.isFinite(+savedTs) ? +savedTs : null;
 
-    _recalcMarkerWidth();
     _scheduleNotify();
   }
 
@@ -205,12 +200,6 @@ export function useViewCommandHub() {
     _scheduleNotify();
   }
 
-  function setHostWidth(px) {
-    hostWidthPx.value = Math.max(1, Number(px || 1));
-    _recalcMarkerWidth();
-    _scheduleNotify();
-  }
-
   function setMarketView(vm) {
     _vmRef.vm = vm;
   }
@@ -220,16 +209,11 @@ export function useViewCommandHub() {
       barsCount: Math.max(1, Number(barsCount.value || 1)),
       rightTs: rightTs.value != null ? Number(rightTs.value) : null,
       leftTs: leftTs.value,
-      markerWidthPx: Math.max(
-        1,
-        Math.min(16, Number(markerWidthPx.value || 8))
-      ),
       atRightEdge: atRightEdge.value,
       allRows: Math.max(0, Number(allRows.value || 0)),
       presetKey: currentPresetKey.value,
       freq: String(currentFreq.value || "1d"),
       symbol: String(currentSymbol.value || ""),
-      hostWidthPx: Math.max(1, Number(hostWidthPx.value || 1)),
     };
   }
 
@@ -257,7 +241,6 @@ export function useViewCommandHub() {
         barsCount.value = nextBars;
         rightTs.value = nextTs;
 
-        _recalcMarkerWidth();
         _persistDebounced();
 
         if (!p.silent) {
@@ -319,7 +302,6 @@ export function useViewCommandHub() {
           rightTs.value = maxTsAvailable;
           autoAll = true;
         } else {
-          // ===== 智能收缩：限制在实际数据范围内 =====
           barsNew =
             total > 0 ? Math.min(barsTheoretical, total) : barsTheoretical;
 
@@ -339,7 +321,6 @@ export function useViewCommandHub() {
             rightTs.value = +p.maxTs;
         }
 
-        _recalcMarkerWidth();
         _persistImmediate();
         _scheduleNotify();
         break;
@@ -366,7 +347,6 @@ export function useViewCommandHub() {
           }
         }
 
-        _recalcMarkerWidth();
         _persistDebounced();
         _scheduleNotify();
         break;
@@ -387,14 +367,6 @@ export function useViewCommandHub() {
         break;
       }
 
-      case "ResizeHost": {
-        const w = Math.max(1, Number(p.widthPx || hostWidthPx.value || 1));
-        hostWidthPx.value = w;
-        _recalcMarkerWidth();
-        _scheduleNotify();
-        break;
-      }
-
       default: {
         // 未知指令：静默忽略
       }
@@ -407,12 +379,10 @@ export function useViewCommandHub() {
     offChange,
     initFromPersist,
     setDatasetBounds,
-    setHostWidth,
     setMarketView,
     execute,
     barsCount,
     rightTs,
-    markerWidthPx,
     leftTs,
     atRightEdge,
     currentPresetKey,

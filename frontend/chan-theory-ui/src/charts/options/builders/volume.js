@@ -1,7 +1,10 @@
 // src/charts/options/builders/volume.js
 // ==============================
-// V10.0 - 架构统一版（复用 tech.js）
-// + 柱体 barWidth 按 BAR_USABLE_RATIO 缩放，预留基础间隙
+// V15.0 - 放/缩量点集迁移到实例侧 MarkerPointsController（去掉 builder 全量扫描 O(N)）
+// 改动：
+//   - 删除 pumpPts/dumpPts 的全量扫描逻辑（O(N)）
+//   - marker series 仍保留（用于渲染），data 初始为空；点集由实例侧最小 patch 更新
+//   - marker symbolSize 仍读取 widthState（宽度由 WidthController 管理）
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -10,11 +13,11 @@ import {
   STYLE_PALETTE,
   DEFAULT_VOL_SETTINGS,
   DEFAULT_VOL_MARKER_SIZE,
-  BAR_USABLE_RATIO, // 统一柱体可用宽度比例
 } from "@/constants";
 import { makeVolumeTooltipFormatter } from "../tooltips/index";
-import { createTechSkeleton } from "../skeleton/tech"; // 复用骨架
-import { applyLayout } from "../positioning/layout"; // 覆盖布局
+import { createTechSkeleton } from "../skeleton/tech";
+import { applyLayout } from "../positioning/layout";
+import { getWidthPx } from "@/charts/width/widthState";
 
 function asArray(x) {
   return Array.isArray(x) ? x : [];
@@ -24,7 +27,7 @@ function asIndicators(x) {
 }
 
 export function buildVolumeOption(
-  { candles, indicators, freq, volCfg, volEnv },
+  { candles, indicators, freq, volCfg },
   ui
 ) {
   const theme = getChartTheme();
@@ -38,19 +41,11 @@ export function buildVolumeOption(
       ? list.map((d) => (typeof d.a === "number" ? d.a : null))
       : inds.VOLUME || list.map((d) => (typeof d.v === "number" ? d.v : null));
 
-  // ===== 构造 series（量窗特有逻辑）=====
   const series = [];
   const vb = volCfg?.volBar || {};
   const barPercent = Number.isFinite(+vb.barPercent)
     ? Math.max(10, Math.min(100, Math.round(+vb.barPercent)))
     : 100;
-
-  // 统一柱体宽度：通过 BAR_USABLE_RATIO 预留基础间隙
-  // 即便用户配置 100%，实际 barWidth 也只占 BAR_USABLE_RATIO * 100%，避免挤成一团。
-  const effectiveBarWidthPercent = Math.max(
-    1,
-    Math.min(100, Math.round(barPercent * BAR_USABLE_RATIO))
-  );
 
   const upColor = vb.upColor || STYLE_PALETTE.bars.volume.up;
   const downColor = vb.downColor || STYLE_PALETTE.bars.volume.down;
@@ -68,7 +63,7 @@ export function buildVolumeOption(
         return Number(k.c) >= Number(k.o) ? upColor : downColor;
       },
     },
-    barWidth: `${effectiveBarWidthPercent}%`, // ← 使用缩放后的柱宽
+    barWidth: `${barPercent}%`,
   });
 
   const namePrefixCN = baseMode === "amount" ? "额MA" : "量MA";
@@ -129,94 +124,30 @@ export function buildVolumeOption(
     });
   }
 
-  // ===== 标记尺寸计算（量窗特有）=====
-  const hostW = Math.max(1, Number(volEnv?.hostWidth || 0));
-  const visCount = Math.max(1, Number(volEnv?.visCount || baseScaled.length));
-  const overrideW = Number(volEnv?.overrideMarkWidth);
-  const layoutCfg = DEFAULT_VOL_SETTINGS.layout;
-  const approxBarWidthPx =
-    hostW > 1 && visCount > 0
-      ? Math.max(
-          1,
-          Math.floor(
-            ((hostW *
-              (layoutCfg.barUsableRatio ?? BAR_USABLE_RATIO)) /
-              visCount) *
-              (barPercent / 100)
-          )
-        )
-      : layoutCfg.fallbackBarWidth;
-  const MARKER_W_MIN = DEFAULT_VOL_MARKER_SIZE.minPx;
-  const MARKER_W_MAX = DEFAULT_VOL_MARKER_SIZE.maxPx;
-  const markerW = Number.isFinite(overrideW)
-    ? Math.max(MARKER_W_MIN, Math.min(MARKER_W_MAX, Math.round(overrideW)))
-    : Math.max(
-        MARKER_W_MIN,
-        Math.min(MARKER_W_MAX, Math.round(approxBarWidthPx))
-      );
+  // ===== marker series：仅保留形状/颜色/offset/宽度读取；点集由实例侧 patch =====
   const markerH = DEFAULT_VOL_MARKER_SIZE.markerHeightPx;
   const markerYOffset = DEFAULT_VOL_MARKER_SIZE.markerYOffsetPx;
   const offsetDownPx = Math.round(markerH + markerYOffset);
   const symbolOffsetBelow = [0, offsetDownPx];
 
-  // ===== 标记计算（量窗特有）=====
-  const allConfiguredPeriods = Object.values(volCfg?.mavolStyles || {})
-    .filter((s) => s && Number.isFinite(+s.period) && +s.period > 0)
-    .sort((a, b) => +a.period - +b.period);
+  const paneId = ui?.paneId != null ? String(ui.paneId) : "";
+  const widthKey = paneId ? `indicator:${paneId}:volMarker` : "vol:marker";
+  const fallbackW = Math.max(1, DEFAULT_VOL_MARKER_SIZE.minPx);
+  const markerW = () => getWidthPx(widthKey, fallbackW);
 
-  const primPeriodForMarkers = allConfiguredPeriods.length
-    ? +allConfiguredPeriods[0].period
-    : null;
-
-  let primSeriesForMarkers = null;
-  if (primPeriodForMarkers) {
-    if (mavolMap[primPeriodForMarkers]) {
-      primSeriesForMarkers = mavolMap[primPeriodForMarkers];
-    } else {
-      primSeriesForMarkers = sma(baseScaled, primPeriodForMarkers);
-    }
-  }
-
-  const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
-    ? +volCfg.markerPump.threshold
-    : DEFAULT_VOL_SETTINGS.markerPump.threshold;
-  const dumpK = Number.isFinite(+volCfg?.markerDump?.threshold)
-    ? +volCfg.markerDump.threshold
-    : DEFAULT_VOL_SETTINGS.markerDump.threshold;
   const pumpEnabled = (volCfg?.markerPump?.enabled ?? true) === true;
   const dumpEnabled = (volCfg?.markerDump?.enabled ?? true) === true;
-  const pumpPts = [];
-  const dumpPts = [];
 
-  if (primSeriesForMarkers) {
-    if (pumpEnabled && pumpK > 0) {
-      for (let i = 0; i < baseScaled.length; i++) {
-        const v = baseScaled[i],
-          m = primSeriesForMarkers[i];
-        if (!Number.isFinite(v) || !Number.isFinite(m) || m <= 0) continue;
-        if (v >= pumpK * m) pumpPts.push([i, 0]);
-      }
-    }
-    if (dumpEnabled && dumpK > 0) {
-      for (let i = 0; i < baseScaled.length; i++) {
-        const v = baseScaled[i],
-          m = primSeriesForMarkers[i];
-        if (!Number.isFinite(v) || !Number.isFinite(m) || m <= 0) continue;
-        if (v <= dumpK * m) dumpPts.push([i, 0]);
-      }
-    }
-  }
-
-  if (pumpEnabled && pumpPts.length) {
+  if (pumpEnabled) {
     series.push({
       id: "VOL_PUMP_MARK",
       type: "scatter",
       name: "放量标记",
-      yAxisIndex: 1, // ← 使用标记专用轴
-      data: pumpPts,
+      yAxisIndex: 1,
+      data: [], // 点集由实例侧 MarkerPointsController patch
       symbol:
         volCfg?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
-      symbolSize: () => [markerW, markerH],
+      symbolSize: () => [markerW(), markerH],
       symbolOffset: symbolOffsetBelow,
       itemStyle: {
         color:
@@ -226,17 +157,18 @@ export function buildVolumeOption(
       z: 4,
     });
   }
-  if (dumpEnabled && dumpPts.length) {
+
+  if (dumpEnabled) {
     series.push({
       id: "VOL_DUMP_MARK",
       type: "scatter",
       name: "缩量标记",
-      yAxisIndex: 1, // ← 使用标记专用轴
-      data: dumpPts,
+      yAxisIndex: 1,
+      data: [], // 点集由实例侧 MarkerPointsController patch
       symbol:
         volCfg?.markerDump?.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
       symbolRotate: 180,
-      symbolSize: () => [markerW, markerH],
+      symbolSize: () => [markerW(), markerH],
       symbolOffset: symbolOffsetBelow,
       itemStyle: {
         color:
@@ -247,7 +179,6 @@ export function buildVolumeOption(
     });
   }
 
-  // ===== 复用 tech.js 骨架 =====
   const option = createTechSkeleton(
     {
       candles: list,
@@ -257,18 +188,16 @@ export function buildVolumeOption(
         freq,
         baseName,
         mavolMap,
+        volCfg, // NEW: tooltip 内按 idx 计算放/缩状态
       }),
     },
     ui,
     (val) => formatNumberScaled(val, { minIntDigitsToScale: 5 })
   );
 
-  // 填充 series
   option.series = series;
 
-  // ===== 覆盖布局参数（量窗特有的底部间距）=====
-  const anyMarkers =
-    (pumpEnabled && pumpPts.length > 0) || (dumpEnabled && dumpPts.length > 0);
+  const anyMarkers = pumpEnabled || dumpEnabled;
   const extraBottomPx = anyMarkers ? offsetDownPx : 0;
   const xAxisLabelMargin = anyMarkers ? offsetDownPx + 12 : 12;
 

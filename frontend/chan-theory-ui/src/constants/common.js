@@ -3,8 +3,8 @@
 // 说明：全局通用配置常量
 // 职责：提供配色方案、应用偏好、UI限制、选项源、预设映射
 // 设计：按用途分组，每个常量都有详细注释
-// V3.2 改动：
-//   1. 删除 DEFAULT_EXPORT_SETTINGS（死代码）
+// V3.3 改动：
+//   1) 删除 BAR_USABLE_RATIO（旧 marker 宽度估算残留，已无真实消费）
 // ==============================
 
 // ===== 基础调色板（所有图表共用）=====
@@ -41,7 +41,7 @@ export const STYLE_PALETTE = {
 export const DEFAULT_APP_PREFERENCES = {
   chartType: "kline",       // 图表类型："kline"=K线图 | "line"=折线图（❌ 设置窗未暴露，直接用常量）
   freq: "1d",               // 默认频率："1m/5m/15m/30m/60m/1d/1w/1M"（❌ 设置窗未暴露，通过顶部按钮切换）
-  adjust: "qfq",            // 默认复权方式："none"=不复权 | "qfq"=前复权 | "hfq"=后复权（✅ 设置窗可改）
+  adjust: "qfq",            // 默认复权方式："none"=不复权 | "qfq"=前复权 | "hfq"=后复权（✅ 页面按钮可改）
   windowPreset: "ALL",      // 默认窗宽预设："5D/10D/1M/3M/6M/1Y/3Y/5Y/ALL"（❌ 设置窗未暴露，通过顶部按钮切换）
   useMACD: true,            // 是否启用MACD指标（❌ 设置窗未暴露，通过副图下拉选择）
   useKDJ: false,            // 是否启用KDJ指标（❌ 设置窗未暴露，通过副图下拉选择）
@@ -78,6 +78,14 @@ export const UI_LIMITS = {
     max: 100,               // 最大值（100%，不压缩）
     step: 1,                // 调整步长
   },
+
+  // --- NEW: 分型标记宽度百分比限制 (50-100) ---
+  // 说明：分型标记宽%（markerPercent）仅用于分型层 markerWidthPx 推导，语义与 barPercent 对齐。
+  markerWidthPercent: {
+    min: 50,
+    max: 100,
+    step: 1,
+  },
   
   // --- 正整数限制（用于周期、计数等，≥ 1）---
   positiveInteger: {
@@ -98,15 +106,6 @@ export const UI_LIMITS = {
   },
 };
 
-// ===== 通用柱体可用宽度比例（所有柱体统一使用）=====
-/**
- * BAR_USABLE_RATIO：
- *   - 代表“每个类别宽度中，用于实际柱体的比例”
- *   - 例如 0.88 表示：即便配置柱宽 100%，实际也只占 88% 的类宽，预留 12% 间隙。
- *   - 用于：量图柱体、MACD 柱体、标记宽度估算等所有柱体几何。
- */
-export const BAR_USABLE_RATIO = 0.88;
-
 // ===== UI 选项源（下拉框/选择器）=====
 
 // --- 线型选项 ---
@@ -123,13 +122,6 @@ export const ADJUST_OPTIONS = [
   { v: "hfq", label: "后复权" },    // 后复权（以上市价为基准）
 ];
 
-// --- 承载点策略选项 ---
-export const ANCHOR_POLICY_OPTIONS = [
-  { v: "right", label: "右端" },    // 承载点取合并K线的右端（end_idx_orig）
-  { v: "extreme", label: "极值" },  // 承载点取合并K线的极值点（上涨取g_idx_orig，下跌取d_idx_orig）
-];
-
-// --- 显示层级选项 ---
 export const DISPLAY_ORDER_OPTIONS = [
   { v: "first", label: "前端" },    // 显示在原始K线前面
   { v: "after", label: "后端" },    // 显示在原始K线后面
