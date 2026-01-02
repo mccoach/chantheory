@@ -44,6 +44,13 @@ export function createPreferencesState(localData = {}) {
           (x) => x && typeof x.symbol === "string" && Number.isFinite(+x.ts)
         )
       : [],
+
+    // NEW: 各窗体高度持久化（按 panelKey 存 px）
+    // 结构：{ [panelKey: string]: number }
+    panelHeights:
+      localData.panelHeights && typeof localData.panelHeights === "object"
+        ? localData.panelHeights
+        : {},
   });
 
   // Setters
@@ -100,6 +107,26 @@ export function createPreferencesState(localData = {}) {
         ? state.symbolHistory.slice()
         : [];
       return list.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+    },
+
+    // NEW: 窗体高度读写（panelKey -> px）
+    setPanelHeight: (panelKey, px) => {
+      const k = String(panelKey || "").trim();
+      const n = Number(px);
+      if (!k) return;
+      if (!Number.isFinite(n) || n <= 0) {
+        const next = { ...(state.panelHeights || {}) };
+        delete next[k];
+        state.panelHeights = next;
+        return;
+      }
+      state.panelHeights = { ...(state.panelHeights || {}), [k]: Math.round(n) };
+    },
+    getPanelHeight: (panelKey) => {
+      const k = String(panelKey || "").trim();
+      if (!k) return null;
+      const v = state.panelHeights?.[k];
+      return Number.isFinite(+v) ? Math.round(+v) : null;
     },
   };
 

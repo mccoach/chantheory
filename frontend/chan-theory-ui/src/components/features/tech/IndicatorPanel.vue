@@ -61,8 +61,9 @@
     <!-- 底部高度拖拽条 -->
     <div
       class="bottom-strip"
-      title="上下拖拽调整窗体高度"
+      title="上下拖拽调整窗体高度（双击恢复默认）"
       @mousedown="onResizeHandleDown('bottom', $event)"
+      @dblclick.stop.prevent="resetHeightToDefault"
     ></div>
   </div>
 </template>
@@ -106,6 +107,7 @@ const {
   hostRef: host,
   displayTitle,
   onResizeHandleDown,
+  resetHeightToDefault,
   onMouseEnter,
   onMouseLeave,
   scheduleWidthUpdate,

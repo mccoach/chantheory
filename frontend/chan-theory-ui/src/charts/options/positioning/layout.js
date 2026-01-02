@@ -139,6 +139,11 @@ export function applyLayout(option, ui, { candles, freq }) {
     ? { startValue: 0, endValue: len - 1 }
     : {};
 
+  // NEW: 副图也补齐 slider，保证 dataZoom 结构一致；
+  //      默认 sliderHeightPx=0 且 show=false，不在页面显示，仅用于联动信号接收。
+  const nonMainSliderHeightPx =
+    ui?.sliderHeightPx != null ? Number(ui.sliderHeightPx) : 0;
+
   option.dataZoom = isMain
     ? [
         Object.assign(
@@ -163,6 +168,20 @@ export function applyLayout(option, ui, { candles, freq }) {
           { type: "inside" },
           initialRange,
           option.dataZoom && option.dataZoom[0] ? option.dataZoom[0] : {}
+        ),
+        Object.assign(
+          {
+            type: "slider",
+            // 默认隐藏：高度为 0，且 show=false（不占视觉空间）
+            show: false,
+            height: nonMainSliderHeightPx,
+            bottom: 0,
+            showDetail: false,
+            labelFormatter: labelFmt,
+          },
+          initialRange,
+          // 若历史 option.dataZoom[1] 存在则合并（向后兼容，但不额外造逻辑）
+          option.dataZoom && option.dataZoom[1] ? option.dataZoom[1] : {}
         ),
       ];
 

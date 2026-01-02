@@ -38,4 +38,11 @@ export const COMMON_CHART_LAYOUT = {
   MIN_HEIGHT_PX: 160,       // 图表最小高度（像素）（❌ 设置窗未暴露，直接用常量）
   MAX_HEIGHT_PX: 800,       // 图表最大高度（像素）（❌ 设置窗未暴露，直接用常量）
   RESIZE_HANDLE_HEIGHT: 8,  // 底部拖拽条高度（像素）（❌ 设置窗未暴露，直接用常量）
+
+  // NEW: 默认窗高（用于“重置默认窗高”与初始化策略的单一真相源）
+  // 说明：
+  //   - 目前主图/副窗默认高度分别散落在各自组件 CSS 中；
+  //   - 本常量提供一个统一的默认值来源，供拖拽双击“恢复默认高度”使用。
+  MAIN_DEFAULT_HEIGHT_PX: 520,
+  INDICATOR_DEFAULT_HEIGHT_PX: 220,
 };

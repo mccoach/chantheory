@@ -47,7 +47,12 @@
 
     <div ref="host" class="canvas-host"></div>
 
-    <div class="bottom-strip" title="上下拖拽调整窗体高度" @mousedown="onResizeHandleDown('bottom', $event)"></div>
+    <div
+      class="bottom-strip"
+      title="上下拖拽调整窗体高度（双击恢复默认）"
+      @mousedown="onResizeHandleDown('bottom', $event)"
+      @dblclick.stop.prevent="resetHeightToDefault"
+    ></div>
   </div>
 </template>
 
@@ -73,6 +78,7 @@ const {
   hostRef: host,
   displayTitle,
   onResizeHandleDown,
+  resetHeightToDefault,
   onMouseEnter,
   onMouseLeave,
   scheduleWidthUpdate,
@@ -146,6 +152,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* 样式保持原样，仅 title 文案已在模板更新 */
 .top-info {
   position: absolute;
   left: 0;

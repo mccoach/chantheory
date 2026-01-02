@@ -1,15 +1,7 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useChartPanel.js
 // ==============================
-// V7.1 - 主图 barPercentReader 去冗余：不再从 chart.getOption() 反解，改为直接读 settings
-//
-// 背景：
-//   - 主图柱宽% 的唯一真相源是 settings.chartDisplay.klineStyle.barPercent（builder 明确设置 barWidth）
-//   - WidthController 继续从 option 反解属于重复路径
-//
-// 本轮改动：
-//   - isMain 分支 barPercentReader 改为读取 settings.chartDisplay.klineStyle.barPercent
-//   - 移除 createMainBarPercentReader 的 import（避免死代码）
-//   - 其它逻辑保持不变（完美回归）
+// V7.4 - PERF: 拖拽改高 resize 合并到 rAF（每帧最多一次），提升丝滑度与降低开销
+// V7.5 - NEW: 窗高拖拽结束/双击恢复后立即持久化（panelKey -> preferences.panelHeights）
 // ==============================
 
 import {
@@ -31,6 +23,7 @@ import {
   UPDOWN_MARKER_WIDTH_PX_LIMITS,
   VOL_MARKER_WIDTH_PX_LIMITS,
 } from "@/constants";
+import { COMMON_CHART_LAYOUT } from "@/constants/chartLayout";
 
 function clampInt(n, min, max) {
   const x = Math.round(Number(n));
@@ -59,27 +52,27 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
           width: hostRef.value.clientWidth,
           height: hostRef.value.clientHeight,
         });
-      } catch {}
+      } catch { }
     });
   }
 
   function scheduleWidthUpdate() {
     try {
       _widthCtl?.scheduleUpdate();
-    } catch {}
+    } catch { }
   }
 
   function scheduleMarkerUpdate() {
     try {
       _markerPtsCtl?.scheduleUpdate();
-    } catch {}
+    } catch { }
   }
 
   function disposeWidthController() {
     if (!_widthCtl) return;
     try {
       _widthCtl.dispose();
-    } catch {}
+    } catch { }
     _widthCtl = null;
   }
 
@@ -87,7 +80,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     if (!_markerPtsCtl) return;
     try {
       _markerPtsCtl.dispose();
-    } catch {}
+    } catch { }
     _markerPtsCtl = null;
   }
 
@@ -128,7 +121,143 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     };
   }
 
+  // NEW: 按 panelKey 读取/写入持久化高度
+  function getPanelKeyString() {
+    return String(panelKey?.value || panelKey || "").trim();
+  }
+
+  function clampHeight(px) {
+    const minH = Number(COMMON_CHART_LAYOUT.MIN_HEIGHT_PX || 160);
+    const maxH = Number(COMMON_CHART_LAYOUT.MAX_HEIGHT_PX || 800);
+    const n = Number(px);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(minH, Math.min(maxH, n));
+  }
+
+  function persistHeightNow(px) {
+    const key = getPanelKeyString();
+    const h = clampHeight(px);
+    if (!key || h == null) return;
+    try {
+      // useUserSettings 已对 setter 自动 saveAll（非 viewState 方法）
+      settings.setPanelHeight(key, Math.round(h));
+    } catch { }
+  }
+
+  // ==============================
+  // 拖拽改高（rAF 合并版）
+  // ==============================
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+
+  let _resizeRafId = null;
+  let _pendingHeightPx = null;
+  let _lastAppliedHeightPx = null;
+
+  function _applyPendingHeightOnce() {
+    _resizeRafId = null;
+
+    const h0 = Number(_pendingHeightPx);
+    _pendingHeightPx = null;
+
+    const h = clampHeight(h0);
+    if (h == null || !wrapRef.value) return;
+
+    _lastAppliedHeightPx = h;
+    wrapRef.value.style.height = `${Math.floor(h)}px`;
+
+    try {
+      chart.value?.resize?.({
+        width: hostRef.value?.clientWidth,
+        height: hostRef.value?.clientHeight,
+      });
+    } catch { }
+  }
+
+  function _scheduleApplyHeight() {
+    if (_resizeRafId != null) return;
+    _resizeRafId = requestAnimationFrame(_applyPendingHeightOnce);
+  }
+
+  function onResizeHandleMove(e) {
+    if (!dragging || !wrapRef.value) return;
+
+    const next = startH + (e.clientY - startY);
+    _pendingHeightPx = next;
+    _scheduleApplyHeight();
+  }
+
+  function onResizeHandleUp() {
+    dragging = false;
+    window.removeEventListener("mousemove", onResizeHandleMove);
+
+    // 确保最终高度已落地后再持久化（“修改完并生效后立即持久化”）
+    if (_pendingHeightPx != null) {
+      _scheduleApplyHeight();
+    }
+    requestAnimationFrame(() => {
+      if (_lastAppliedHeightPx != null) {
+        persistHeightNow(_lastAppliedHeightPx);
+      }
+    });
+  }
+
+  // FIX: 兼容两种调用签名：
+  //   - onResizeHandleDown(event)
+  //   - onResizeHandleDown('bottom', event)
+  function onResizeHandleDown(posOrEvent, maybeEvent) {
+    const e =
+      posOrEvent && typeof posOrEvent === "object" && typeof posOrEvent.clientY === "number"
+        ? posOrEvent
+        : maybeEvent;
+
+    if (!e || typeof e.clientY !== "number") return;
+
+    dragging = true;
+    startY = e.clientY;
+    startH = wrapRef.value?.clientHeight || 0;
+
+    _pendingHeightPx = null;
+
+    window.addEventListener("mousemove", onResizeHandleMove);
+    window.addEventListener("mouseup", onResizeHandleUp, { once: true });
+  }
+
+  function resetHeightToDefault() {
+    const pk = getPanelKeyString();
+    const isMain = pk === "main";
+
+    const defH = isMain
+      ? Number(COMMON_CHART_LAYOUT.MAIN_DEFAULT_HEIGHT_PX || 520)
+      : Number(COMMON_CHART_LAYOUT.INDICATOR_DEFAULT_HEIGHT_PX || 220);
+
+    const next = clampHeight(defH);
+    if (next == null) return;
+
+    _pendingHeightPx = next;
+    _scheduleApplyHeight();
+
+    // 双击恢复默认：也要求立即持久化
+    requestAnimationFrame(() => {
+      if (_lastAppliedHeightPx != null) {
+        persistHeightNow(_lastAppliedHeightPx);
+      }
+    });
+  }
+
   onMounted(() => {
+    // NEW: 启动时应用持久化窗高（若存在）
+    try {
+      const key = getPanelKeyString();
+      const saved = settings.getPanelHeight(key);
+      const h = clampHeight(saved);
+      if (h != null && wrapRef.value) {
+        _pendingHeightPx = h;
+        _scheduleApplyHeight();
+      }
+    } catch { }
+
     if (!hostRef.value) return;
 
     const instance = echarts.init(hostRef.value, null, {
@@ -140,19 +269,17 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     instance.group = "ct-sync";
     try {
       echarts.connect("ct-sync");
-    } catch {}
+    } catch { }
 
     chart.value = instance;
 
-    // 单一 dataZoom 入口（由 handleDataZoom 统一注入范围 + 调度宽度/点集）
     instance.on("dataZoom", handleDataZoom);
 
-    const pk = String(panelKey?.value || panelKey || "");
+    const pk = getPanelKeyString();
     const isMain = pk === "main";
     const isIndicator = pk.startsWith("indicator:");
 
     if (isMain) {
-      // PERF: 主图 barPercent 直接来自 settings（唯一真相源），不再从 option 反解
       const barPercentReader = () => {
         const bp = settings?.chartDisplay?.klineStyle?.barPercent;
         return clampInt(bp, 10, 100) || 88;
@@ -311,72 +438,13 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
       }
     }
 
-    // ts->idx 缓存（按 candles 引用缓存）
-    const tsIdxCache = {
-      candlesRef: null,
-      map: null,
-    };
-
-    function ensureTsIdxMap(arr) {
-      if (!Array.isArray(arr) || !arr.length) {
-        tsIdxCache.candlesRef = null;
-        tsIdxCache.map = null;
-        return null;
-      }
-      if (tsIdxCache.candlesRef === arr && tsIdxCache.map) return tsIdxCache.map;
-
-      const m = new Map();
-      for (let i = 0; i < arr.length; i++) {
-        const ts = arr[i]?.ts;
-        if (Number.isFinite(ts)) m.set(ts, i);
-      }
-      tsIdxCache.candlesRef = arr;
-      tsIdxCache.map = m;
-      return m;
-    }
-
-    instance.on("updateAxisPointer", (params) => {
-      try {
-        const list = vm.candles.value || [];
-        const len = list.length;
-        if (!len) return;
-
-        let idx = -1;
-        const sd = Array.isArray(params?.seriesData)
-          ? params.seriesData.find((x) => Number.isFinite(x?.dataIndex))
-          : null;
-
-        if (sd && Number.isFinite(sd.dataIndex)) {
-          idx = sd.dataIndex;
-        } else {
-          const xInfo = Array.isArray(params?.axesInfo)
-            ? params.axesInfo.find((ai) => ai && ai.axisDim === "x")
-            : null;
-          const v = xInfo?.value;
-
-          if (Number.isFinite(v)) {
-            idx = Math.max(0, Math.min(len - 1, Number(v)));
-          } else if (typeof v === "string" && v) {
-            const targetDate = new Date(v).getTime();
-            const map = ensureTsIdxMap(list);
-            const hit = map ? map.get(targetDate) : undefined;
-            idx = Number.isFinite(hit) ? hit : -1;
-          }
-        }
-
-        if (idx >= 0 && idx < len) {
-          renderHub?.syncFocusPosition?.(idx);
-        }
-      } catch {}
-    });
-
     try {
       ro = new ResizeObserver(() => {
         safeResize();
         scheduleWidthUpdate();
       });
       ro.observe(hostRef.value);
-    } catch {}
+    } catch { }
 
     requestAnimationFrame(() => {
       safeResize();
@@ -390,6 +458,12 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
   });
 
   onBeforeUnmount(() => {
+    if (_resizeRafId != null) {
+      try { cancelAnimationFrame(_resizeRafId); } catch { }
+      _resizeRafId = null;
+    }
+    _pendingHeightPx = null;
+
     disposeMarkerPointsController();
     disposeWidthController();
 
@@ -400,34 +474,10 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     if (chart.value) {
       try {
         chart.value.dispose();
-      } catch {}
+      } catch { }
       chart.value = null;
     }
   });
-
-  let dragging = false,
-    startY = 0,
-    startH = 0;
-
-  function onResizeHandleMove(e) {
-    if (!dragging || !wrapRef.value) return;
-    const next = Math.max(160, Math.min(800, startH + (e.clientY - startY)));
-    wrapRef.value.style.height = `${Math.floor(next)}px`;
-    safeResize();
-  }
-
-  function onResizeHandleUp() {
-    dragging = false;
-    window.removeEventListener("mousemove", onResizeHandleMove);
-  }
-
-  function onResizeHandleDown(e) {
-    dragging = true;
-    startY = e.clientY;
-    startH = wrapRef.value?.clientHeight || 0;
-    window.addEventListener("mousemove", onResizeHandleMove);
-    window.addEventListener("mouseup", onResizeHandleUp, { once: true });
-  }
 
   function handleDataZoom(params) {
     try {
@@ -459,10 +509,10 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
 
       try {
         _widthCtl?.setZoomRange?.({ sIdx, eIdx });
-      } catch {}
+      } catch { }
       try {
         _markerPtsCtl?.setZoomRange?.({ sIdx, eIdx });
-      } catch {}
+      } catch { }
 
       scheduleWidthUpdate();
       scheduleMarkerUpdate();
@@ -476,7 +526,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
         barsCount: bars_new,
         rightTs: anchorTs,
       });
-    } catch {}
+    } catch { }
   }
 
   const onMouseEnter = () => renderHub.setHoveredPanel(panelKey.value);
@@ -491,7 +541,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
       srcLabel = src ? `（${src}）` : "";
     const adjText =
       { none: "", qfq: " 前复权", hfq: " 后复权" }[
-        String(vm.adjust.value || "none")
+      String(vm.adjust.value || "none")
       ] || "";
     return n
       ? `${n}（${c}）：${f}${srcLabel}${adjText}`
@@ -504,7 +554,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     let name = "";
     try {
       name = findBySymbol(sym)?.name?.trim() || "";
-    } catch {}
+    } catch { }
     displayHeader.value = { name, code: sym, freq: frq };
   }
 
@@ -522,6 +572,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     chart,
     displayTitle,
     onResizeHandleDown,
+    resetHeightToDefault,
     onMouseEnter,
     onMouseLeave,
     scheduleWidthUpdate,
