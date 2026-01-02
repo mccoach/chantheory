@@ -120,7 +120,7 @@ export const FRACTAL_DEFAULTS = {
       topShape: "triangle",
       topColor: "#FFFF00",
       fill: "solid",
-      enabled: true,
+      enabled: false,
     },
     weak: {                  // 弱分型样式（✅ 设置窗可改）
       bottomShape: "triangle",
@@ -128,7 +128,7 @@ export const FRACTAL_DEFAULTS = {
       topShape: "triangle",
       topColor: "#90EE90",
       fill: "hollow",          // 弱分型默认空心
-      enabled: true,
+      enabled: false,
     },
   },
 
@@ -162,7 +162,7 @@ export const META_SEGMENT_DEFAULTS = {
 
   // --- 线条样式（设置窗已暴露）---
   color: "rgba(16, 238, 208, 0.93)", // 元线段颜色（✅ 设置窗可改）
-  lineWidth: 2,           // 元线段宽度（✅ 设置窗可改）
+  lineWidth: 6,           // 元线段宽度（✅ 设置窗可改）
   lineStyle: "dotted",      // 元线段样式（✅ 设置窗可改）
 };
 

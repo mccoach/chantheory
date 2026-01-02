@@ -73,7 +73,7 @@ export function useViewRenderHub() {
       tipMode.value = m === "follow" ? "follow" : "fixed";
       _computeAndPublish();
     });
-  } catch {}
+  } catch { }
 
   function _getTipPositioner() {
     if (tipMode.value === "fixed") return createFixedTooltipPositioner("left");
@@ -111,7 +111,7 @@ export function useViewRenderHub() {
 
     try {
       chartInstance.setOption({ tooltip, yAxis }, false);
-    } catch {}
+    } catch { }
   }
 
   function _applyHoverModeByKey(panelKey, isHovered) {
@@ -285,7 +285,7 @@ export function useViewRenderHub() {
         const eIdx = Math.max(0, Math.min(len - 1, Number(z.endValue)));
         return { sIdx: Math.min(sIdx, eIdx), eIdx: Math.max(sIdx, eIdx) };
       }
-    } catch {}
+    } catch { }
     return null;
   }
 
@@ -320,7 +320,7 @@ export function useViewRenderHub() {
 
   function onRender(cb) {
     const id = _nextId++;
-    _subs.set(id, typeof cb === "function" ? cb : () => {});
+    _subs.set(id, typeof cb === "function" ? cb : () => { });
     if (_lastSnapshot.value) cb(_lastSnapshot.value);
     return id;
   }
@@ -334,7 +334,7 @@ export function useViewRenderHub() {
     _subs.forEach((cb) => {
       try {
         cb(snapshot);
-      } catch {}
+      } catch { }
     });
   }
 
@@ -367,7 +367,7 @@ export function useViewRenderHub() {
           }
         }
       }
-    } catch {}
+    } catch { }
 
     return { symbol: sym, ipoYmd };
   }
@@ -776,21 +776,21 @@ export function useViewRenderHub() {
         const ui =
           kind === "VOL" || kind === "AMOUNT"
             ? {
-                initialRange,
-                tooltipPositioner: tipPositioner,
-                isHovered: hoveredKey === paneKey,
-                paneId: pane.id,
-              }
+              initialRange,
+              tooltipPositioner: tipPositioner,
+              isHovered: hoveredKey === paneKey,
+              paneId: pane.id,
+            }
             : {
-                initialRange,
-                tooltipPositioner: tipPositioner,
-                isHovered: hoveredKey === paneKey,
-              };
+              initialRange,
+              tooltipPositioner: tipPositioner,
+              isHovered: hoveredKey === paneKey,
+            };
 
         const option = await _getIndicatorOption(pane.kind, ui);
 
         if (option) indicatorOptions[pane.id] = option;
-      } catch {}
+      } catch { }
     }
 
     return indicatorOptions;
@@ -828,6 +828,14 @@ export function useViewRenderHub() {
 
     _chanCache.value = _calculateChanStructures(candles);
 
+    // DEV ONLY: 暴露 Chan 结构中间数据，便于控制台导出定位（不影响生产）
+    if (import.meta.env.DEV) {
+      try {
+        window.__DEBUG__ = window.__DEBUG__ || {};
+        window.__DEBUG__.chanCache = _chanCache.value;
+      } catch { }
+    }
+
     const mainOption = await _buildMainOption(vm, _chanCache.value, context);
     const indicatorOptions = await _buildIndicatorOptions(context);
 
@@ -857,6 +865,14 @@ export function useViewRenderHub() {
         downsample_from: vm.meta.value?.downsample_from || null,
       },
     };
+
+    // DEV ONLY: 暴露最后一次渲染快照（含 main option / indicatorOptions）
+    if (import.meta.env.DEV) {
+      try {
+        window.__DEBUG__ = window.__DEBUG__ || {};
+        window.__DEBUG__.lastSnapshot = snapshot;
+      } catch { }
+    }
 
     _publish(snapshot);
   }

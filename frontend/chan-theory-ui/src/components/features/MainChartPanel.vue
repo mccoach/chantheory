@@ -6,14 +6,8 @@
 <template>
   <MainChartControls />
 
-  <div
-    ref="wrap"
-    class="chart"
-    tabindex="0"
-    @mouseenter="onMouseEnter"
-    @mouseleave="onMouseLeave"
-    @dblclick="openSettingsDialog"
-  >
+  <div ref="wrap" class="chart" tabindex="0" @mouseenter="onMouseEnter" @mouseleave="onMouseLeave"
+    @dblclick="openSettingsDialog">
     <div class="top-info">
       <div class="title">{{ displayTitle }}</div>
       <div class="right-box">
@@ -23,17 +17,13 @@
           <transition name="hintfade">
             <span
               v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'"
-              class="badge done"
-            >
+              class="badge done">
               已刷新 {{ refreshStatus.refreshedAtHHMMSS.value }}
             </span>
           </transition>
 
-          <span
-            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'"
-            class="badge warn"
-            title="近端数据更新失败，当前为历史缓存"
-          >
+          <span v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" class="badge warn"
+            title="近端数据更新失败，当前为历史缓存">
             数据不完整 {{ refreshStatus.refreshedAtHHMMSS.value }}
           </span>
         </div>
@@ -50,23 +40,14 @@
           </button>
         </div>
 
-        <button
-          class="btn-settings"
-          @click="openSettingsDialog"
-          title="主图设置"
-          aria-label="主图设置"
-          v-html="SETTINGS_ICON_SVG"
-        ></button>
+        <button class="btn-settings" @click="openSettingsDialog" title="主图设置" aria-label="主图设置"
+          v-html="SETTINGS_ICON_SVG"></button>
       </div>
     </div>
 
     <div ref="host" class="canvas-host"></div>
 
-    <div
-      class="bottom-strip"
-      title="上下拖拽调整窗体高度"
-      @mousedown="onResizeHandleDown('bottom', $event)"
-    ></div>
+    <div class="bottom-strip" title="上下拖拽调整窗体高度" @mousedown="onResizeHandleDown('bottom', $event)"></div>
   </div>
 </template>
 
@@ -104,6 +85,14 @@ const {
     try {
       renderHub.registerChart("main", instance);
 
+      // DEV ONLY: 暴露主图实例到 window，便于控制台导出中间数据
+      if (import.meta.env.DEV) {
+        try {
+          window.__CHARTS__ = window.__CHARTS__ || {};
+          window.__CHARTS__.main = instance;
+        } catch { }
+      }
+
       host.value?.addEventListener("mouseenter", () => {
         renderHub.setActivePanel("main");
       });
@@ -125,7 +114,7 @@ const {
       });
 
       onBeforeUnmount(() => renderHub.offRender(unsubId));
-    } catch {}
+    } catch { }
   },
 });
 
@@ -148,7 +137,7 @@ function setAdjust(kind) {
 function openSettingsDialog() {
   try {
     openMainChartSettings(dialogManager, { activeTab: "chan" });
-  } catch (e) {}
+  } catch (e) { }
 }
 
 onBeforeUnmount(() => {
@@ -170,27 +159,32 @@ onBeforeUnmount(() => {
   z-index: 100;
   pointer-events: none;
 }
+
 .top-info * {
   pointer-events: auto;
 }
+
 .top-info .title {
   font-size: 13px;
   font-weight: 600;
   color: #ddd;
   user-select: none;
 }
+
 .top-info .right-box {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
+
 .status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   user-select: none;
 }
+
 .btn-settings {
   width: 24px;
   height: 24px;
@@ -199,6 +193,7 @@ onBeforeUnmount(() => {
   padding: 0;
   cursor: pointer;
 }
+
 .badge {
   display: inline-block;
   font-size: 12px;
@@ -206,25 +201,30 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   line-height: 18px;
 }
+
 .badge.busy {
   background: rgba(255, 193, 7, 0.15);
   border: 1px solid rgba(255, 193, 7, 0.35);
   color: #ffca28;
 }
+
 .badge.done {
   background: rgba(46, 204, 113, 0.15);
   border: 1px solid rgba(46, 204, 113, 0.35);
   color: #2ecc71;
 }
+
 .badge.warn {
   background: rgba(231, 76, 60, 0.15);
   border: 1px solid rgba(231, 76, 60, 0.4);
   color: #e74c3c;
   cursor: help;
 }
+
 .hintfade-leave-active {
   transition: opacity 1000ms ease;
 }
+
 .hintfade-enter-from,
 .hintfade-leave-to {
   opacity: 0;
@@ -239,6 +239,7 @@ onBeforeUnmount(() => {
   background: #1a1a1a;
   height: 24px;
 }
+
 .adj-btn {
   background: transparent;
   color: #ccc;
@@ -250,9 +251,11 @@ onBeforeUnmount(() => {
   line-height: 20px;
   height: 24px;
 }
-.adj-btn + .adj-btn {
+
+.adj-btn+.adj-btn {
   border-left: 1px solid #444;
 }
+
 .adj-btn.active {
   background: #2b4b7e;
   color: #fff;
@@ -268,6 +271,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   outline: none;
 }
+
 .canvas-host {
   position: absolute;
   left: 0;
@@ -275,6 +279,7 @@ onBeforeUnmount(() => {
   top: 28px;
   bottom: 18px;
 }
+
 .bottom-strip {
   position: absolute;
   left: 0;
@@ -283,6 +288,7 @@ onBeforeUnmount(() => {
   height: 8px;
   background: transparent;
 }
+
 .bottom-strip:hover {
   cursor: ns-resize;
 }

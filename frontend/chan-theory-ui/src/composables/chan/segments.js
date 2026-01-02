@@ -168,22 +168,77 @@ function computeInternalGapBool({ candles, arrEntries, seg, penIndexToLocalEntry
   });
 }
 
+function findExtremeIdxInClosedRange(candles, leftIdxOrig, rightIdxOrig, dirUp) {
+  const a = toNonNegIntIdx(leftIdxOrig);
+  const b = toNonNegIntIdx(rightIdxOrig);
+  if (a == null || b == null) return null;
+
+  const s = Math.min(a, b);
+  const e = Math.max(a, b);
+
+  let bestIdx = null;
+  let bestVal = dirUp ? -Infinity : Infinity;
+
+  for (let i = s; i <= e; i++) {
+    const v = dirUp ? candleH(candles, i) : candleL(candles, i);
+    if (!Number.isFinite(v)) continue;
+
+    if (dirUp) {
+      if (v > bestVal) {
+        bestVal = v;
+        bestIdx = i;
+      }
+    } else {
+      if (v < bestVal) {
+        bestVal = v;
+        bestIdx = i;
+      }
+    }
+  }
+
+  return bestIdx;
+}
+
 function alignOppositeSegmentsByExtreme(candles, A, B) {
   const A2 = { ...A };
   const B2 = { ...B };
 
-  const dirUp = isUpSeg(A2);
-  const aEnd = endpointPriceOfSegment(candles, A2, "end");
-  const bStart = endpointPriceOfSegment(candles, B2, "start");
+  const aEndIdx = toNonNegIntIdx(A2.end_idx_orig);
+  const bStartIdx = toNonNegIntIdx(B2.start_idx_orig);
 
-  if (!Number.isFinite(aEnd) || !Number.isFinite(bStart)) {
+  // 兜底：无法读取端点 idx 时，仍按原逻辑强制共点（用 A.end）
+  if (aEndIdx == null || bStartIdx == null) {
     B2.start_idx_orig = A2.end_idx_orig;
     return { A2, B2 };
   }
 
-  const aMoreExtreme = dirUp ? aEnd > bStart : aEnd < bStart;
-  if (aMoreExtreme) B2.start_idx_orig = A2.end_idx_orig;
-  else A2.end_idx_orig = B2.start_idx_orig;
+  const dirUp = isUpSeg(A2);
+
+  // NEW: 反向且存在外部缺口时，连接点应取闭区间 [A.end, B.start] 内的极值点
+  //      - UP 段取最高点（high）
+  //      - DOWN 段取最低点（low）
+  const pivotIdx = findExtremeIdxInClosedRange(candles, aEndIdx, bStartIdx, dirUp);
+
+  if (pivotIdx == null) {
+    // 兜底：无法找到极值点，退回到原先“端点二选一”逻辑
+    const aEnd = endpointPriceOfSegment(candles, A2, "end");
+    const bStart = endpointPriceOfSegment(candles, B2, "start");
+
+    if (!Number.isFinite(aEnd) || !Number.isFinite(bStart)) {
+      B2.start_idx_orig = A2.end_idx_orig;
+      return { A2, B2 };
+    }
+
+    const aMoreExtreme = dirUp ? aEnd > bStart : aEnd < bStart;
+    if (aMoreExtreme) B2.start_idx_orig = A2.end_idx_orig;
+    else A2.end_idx_orig = B2.start_idx_orig;
+
+    return { A2, B2 };
+  }
+
+  // 将前段终点与后段起点都对齐到 pivotIdx，使转折发生在区间极值点
+  A2.end_idx_orig = pivotIdx;
+  B2.start_idx_orig = pivotIdx;
 
   return { A2, B2 };
 }
@@ -295,7 +350,15 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
     // ignore B
   }
 
-  // 岛尾：最后一条最终线段自动成立（不用于兜底 pendingA）
+  // 岛尾：最后一条元线段自动成立
+  // FIX: 若存在 pendingA（最多一条），在岛尾无法再通过“下一次反向连接事件”触发确认，
+  //      因此在收尾阶段直接确认并入列，避免漏段。
+  if (pendingA) {
+    confirm(pendingA);
+    finalSegs.push(pendingA);
+    pendingA = null;
+  }
+
   confirm(A);
   finalSegs.push(A);
 
