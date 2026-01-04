@@ -4,35 +4,26 @@
 // - 同时绘制元线段(metaSegments) + 最终线段(finalSegments)
 // - 元线段样式：chanSettings.metaSegment（与 segment 平起平坐，已进入设置窗）
 // - 最终线段样式：chanSettings.segment（原有）
+//
+// V2 - 统一语义回溯：端点价回溯迁移到 chan/accessors.js（消除重复实现）
 // ==============================
 
 import { SEGMENT_DEFAULTS, META_SEGMENT_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { sampleSeriesByBarriers } from "./sampler";
-import { candleH, candleL, toNonNegIntIdx } from "@/composables/chan/common";
+import { toNonNegIntIdx } from "@/composables/chan/common";
+import { createChanAccessors } from "@/composables/chan/accessors";
 
 /**
  * 把单条 Segment（Idx-Only）采样为多段 series data
  */
-function sampleSegmentToChunks(seg, candles, barrierIdxSet) {
+function sampleSegmentToChunks(seg, acc, barrierIdxSet) {
   const xStart = toNonNegIntIdx(seg?.start_idx_orig);
   const xEnd = toNonNegIntIdx(seg?.end_idx_orig);
   if (xStart == null || xEnd == null) return [];
 
-  const dir = String(seg?.dir_enum || "").toUpperCase();
-
-  function endpointY(which, x) {
-    if (dir === "UP") {
-      return which === "start" ? candleL(candles, x) : candleH(candles, x);
-    }
-    if (dir === "DOWN") {
-      return which === "start" ? candleH(candles, x) : candleL(candles, x);
-    }
-    return NaN;
-  }
-
-  const yStart = endpointY("start", xStart);
-  const yEnd = endpointY("end", xEnd);
+  const yStart = acc.segmentEndpointY(seg, "start");
+  const yEnd = acc.segmentEndpointY(seg, "end");
   if (![yStart, yEnd].every((v) => Number.isFinite(v))) return [];
 
   const dx = xEnd - xStart;
@@ -91,6 +82,8 @@ export function buildSegmentLines(segmentsOrObj, env = {}) {
   const candles = Array.isArray(env?.candles) ? env.candles : null;
   if (!candles || !candles.length) return { series: [] };
 
+  const acc = createChanAccessors(candles);
+
   const barrierIdxSet = new Set(
     Array.isArray(env.barrierIdxList) ? env.barrierIdxList.map((x) => +x) : []
   );
@@ -110,7 +103,7 @@ export function buildSegmentLines(segmentsOrObj, env = {}) {
   // 元线段（z 低一些）
   if (metaEnabled && metaSegments.length) {
     for (const s of metaSegments) {
-      const chunks = sampleSegmentToChunks(s, candles, barrierIdxSet);
+      const chunks = sampleSegmentToChunks(s, acc, barrierIdxSet);
       for (let k = 0; k < chunks.length; k++) {
         out.push({
           id: `CHAN_META_SEG_${s.start_idx_orig}_${s.end_idx_orig}_${k}_${seqCounter++}`,
@@ -137,7 +130,7 @@ export function buildSegmentLines(segmentsOrObj, env = {}) {
   // 最终线段（z 高一些）
   if (finalEnabled && finalSegments.length) {
     for (const s of finalSegments) {
-      const chunks = sampleSegmentToChunks(s, candles, barrierIdxSet);
+      const chunks = sampleSegmentToChunks(s, acc, barrierIdxSet);
       for (let k = 0; k < chunks.length; k++) {
         out.push({
           id: `CHAN_FINAL_SEG_${s.start_idx_orig}_${s.end_idx_orig}_${k}_${seqCounter++}`,

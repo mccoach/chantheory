@@ -14,6 +14,7 @@
 //      使得仅变更分型显著度参数时，不再重算 include。
 //   2) 对外返回结构保持完全一致：_calculateChanStructures(candles) 仍返回同一 shape。
 //   3) 严控范围：仅改本文件；不改算法实现、不改渲染层、不改设置协议。
+//
 // ==============================
 
 import { ref, watch, nextTick } from "vue";
@@ -584,7 +585,8 @@ export function useViewRenderHub() {
       return acc;
     }, []);
 
-    const pivots = computePenPivots(pens.confirmed || []);
+    // ===== 本轮关键改动：pivots 需要 candles 进行语义回溯 =====
+    const pivots = computePenPivots(candles, pens.confirmed || []);
 
     _chanDerivedMemo.key = derivedKey;
     _chanDerivedMemo.value = {

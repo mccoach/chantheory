@@ -7,6 +7,21 @@
 //     1) computeFractals：严格按 Fractal Schema，仅包含关键索引与属性字段；严禁输出 ts/pri/cf_* 等字段。
 //     2) computeFractalConfirmPairs：返回 confirmPairs 派生结构（与 fractals 同级），用于渲染确认分型与确认连线。
 //        confirmPairs 本身也遵循 Idx-Only：只保存 fractals 数组下标，不保存任何价格/时间。
+//
+// 本轮新增（边界分型扩展，第一性原理）：
+//   - 常规分型识别完成后，对每个连续性岛（seq_id）做“首末 bar 分型扩展”。
+//   - 目的：让分型序列覆盖岛的首/末合并K，从而笔算法无需修改即可自然延伸至边界。
+//   - 规则：
+//       A) 若岛内存在常规分型：
+//            * 若岛内第一个常规分型是 top，则首 bar 追加 bottom；若是 bottom，则首 bar 追加 top
+//            * 若岛内最后一个常规分型是 top，则末 bar 追加 bottom；若是 bottom，则末 bar 追加 top
+//       B) 若岛内不存在常规分型：
+//            * 若岛的第二个 bar 为上涨（dir_int>0），则首 bar 追加 bottom；若为下跌（dir_int<0），则首 bar 追加 top
+//            * 若岛的末 bar 为下跌（dir_int<0），则末 bar 追加 bottom；若为上涨（dir_int>0），则末 bar 追加 top
+//       C) 若全岛合并K数 < 2：不做任何扩展处理
+//   - 边界分型字段要求：
+//       * 不做三元组退化：k1/k3_idx_red 允许为空（null），k2_idx_red/k2_idx_orig 如实填充
+//       * strength_enum 统一写死为 'standard'（保证可视化可控且不引入歧义）
 // ==============================
 
 import { candleH, candleL, toNonNegIntIdx } from "./common";
@@ -229,6 +244,194 @@ export function computeFractals(candles, reducedBars, params = {}) {
     }
   }
 
+  // ==============================
+  // NEW: 岛首/岛末分型扩展（后处理）
+  // ==============================
+
+  // 若 reducedBars 总数 < 2，则不做任何扩展（按你的要求）
+  if (N < 2) {
+    return out;
+  }
+
+  // 预计算：每个 seq_id 的首/末 reduced idx
+  const firstRedIdxBySeq = new Map();
+  const lastRedIdxBySeq = new Map();
+  for (let i = 0; i < N; i++) {
+    const sid = Number(seqIds[i] || 1);
+    if (!firstRedIdxBySeq.has(sid)) firstRedIdxBySeq.set(sid, i);
+    lastRedIdxBySeq.set(sid, i);
+  }
+
+  // 将常规分型按 seq_id 分组并按 k2_idx_red 排序
+  const frBySeq = new Map();
+  for (let fi = 0; fi < out.length; fi++) {
+    const f = out[fi];
+    const sid = Number(f?.seq_id || 1);
+    const arr = frBySeq.get(sid) || [];
+    arr.push(f);
+    frBySeq.set(sid, arr);
+  }
+  for (const [sid, arr] of frBySeq.entries()) {
+    arr.sort((a, b) => Number(a?.k2_idx_red) - Number(b?.k2_idx_red));
+  }
+
+  function oppositeKind(kind) {
+    return String(kind) === "top" ? "bottom" : "top";
+  }
+
+  function makeEdgeFractal({ sid, idxRed, kind }) {
+    const rb = reducedBars[idxRed];
+    if (!rb) return null;
+
+    const k2_idx_red = toNonNegIntIdx(idxRed);
+    if (k2_idx_red == null) return null;
+
+    const k2_idx_orig = k2IdxOrigFor(kind, idxRed);
+    if (k2_idx_orig == null) return null;
+
+    // 不做三元组退化：k1/k3 为空
+    return {
+      k1_idx_red: null,
+      k2_idx_red,
+      k3_idx_red: null,
+      k2_idx_orig,
+      kind_enum: kind,
+      strength_enum: "standard", // 按你的要求写死标准型
+      seq_id: Number(sid || 1),
+    };
+  }
+
+  // 去重：避免重复添加（例如常规分型已经落在首/末 bar）
+  // key: `${seq_id}|${k2_idx_red}|${kind_enum}`
+  const seen = new Set();
+  for (const f of out) {
+    const sid = Number(f?.seq_id || 1);
+    const k2r = toNonNegIntIdx(f?.k2_idx_red);
+    const kind = String(f?.kind_enum || "");
+    if (k2r == null || (kind !== "top" && kind !== "bottom")) continue;
+    seen.add(`${sid}|${k2r}|${kind}`);
+  }
+
+  // 对每个岛执行扩展
+  for (const [sid, idxList] of bySeq.entries()) {
+    const list = Array.isArray(idxList) ? idxList : [];
+    // 全岛合并K数 < 2：不扩展（按你的要求）
+    if (list.length < 2) continue;
+
+    const firstRedIdx = firstRedIdxBySeq.get(sid);
+    const lastRedIdx = lastRedIdxBySeq.get(sid);
+
+    if (!Number.isFinite(firstRedIdx) || !Number.isFinite(lastRedIdx)) continue;
+
+    const regular = frBySeq.get(sid) || [];
+
+    if (regular.length > 0) {
+      // ===== A) 有常规分型：按“首/末常规分型的相反类型”扩展 =====
+      const firstF = regular[0];
+      const lastF = regular[regular.length - 1];
+
+      const firstKind = String(firstF?.kind_enum || "");
+      const lastKind = String(lastF?.kind_enum || "");
+
+      if (firstKind === "top" || firstKind === "bottom") {
+        const k = oppositeKind(firstKind);
+        const key = `${sid}|${firstRedIdx}|${k}`;
+        if (!seen.has(key)) {
+          const edge = makeEdgeFractal({ sid, idxRed: firstRedIdx, kind: k });
+          if (edge) {
+            out.push(edge);
+            seen.add(key);
+          }
+        }
+      }
+
+      if (lastKind === "top" || lastKind === "bottom") {
+        const k = oppositeKind(lastKind);
+        const key = `${sid}|${lastRedIdx}|${k}`;
+        if (!seen.has(key)) {
+          const edge = makeEdgeFractal({ sid, idxRed: lastRedIdx, kind: k });
+          if (edge) {
+            out.push(edge);
+            seen.add(key);
+          }
+        }
+      }
+
+      continue;
+    }
+
+    // ===== B) 无常规分型：按你给的兜底规则 =====
+
+    // 首 bar：取第二个 bar 的 dir_int
+    const secondRedIdx = list[1];
+    const d2 = Number(dirs[secondRedIdx] || 0);
+    if (d2 > 0) {
+      // 第二bar上涨 => 首bar=底分型
+      const k = "bottom";
+      const key = `${sid}|${firstRedIdx}|${k}`;
+      if (!seen.has(key)) {
+        const edge = makeEdgeFractal({ sid, idxRed: firstRedIdx, kind: k });
+        if (edge) {
+          out.push(edge);
+          seen.add(key);
+        }
+      }
+    } else if (d2 < 0) {
+      // 第二bar下跌 => 首bar=顶分型
+      const k = "top";
+      const key = `${sid}|${firstRedIdx}|${k}`;
+      if (!seen.has(key)) {
+        const edge = makeEdgeFractal({ sid, idxRed: firstRedIdx, kind: k });
+        if (edge) {
+          out.push(edge);
+          seen.add(key);
+        }
+      }
+    }
+
+    // 末 bar：取末 bar 的 dir_int
+    const dLast = Number(dirs[lastRedIdx] || 0);
+    if (dLast < 0) {
+      // 末bar下跌 => 末bar=底分型
+      const k = "bottom";
+      const key = `${sid}|${lastRedIdx}|${k}`;
+      if (!seen.has(key)) {
+        const edge = makeEdgeFractal({ sid, idxRed: lastRedIdx, kind: k });
+        if (edge) {
+          out.push(edge);
+          seen.add(key);
+        }
+      }
+    } else if (dLast > 0) {
+      // 末bar上涨 => 末bar=顶分型
+      const k = "top";
+      const key = `${sid}|${lastRedIdx}|${k}`;
+      if (!seen.has(key)) {
+        const edge = makeEdgeFractal({ sid, idxRed: lastRedIdx, kind: k });
+        if (edge) {
+          out.push(edge);
+          seen.add(key);
+        }
+      }
+    }
+  }
+
+  // 扩展后：为确保后续模块（pens/confirmPairs）按时间顺序消费，做一次全局排序
+  out.sort((a, b) => {
+    const sa = Number(a?.seq_id || 1);
+    const sb = Number(b?.seq_id || 1);
+    if (sa !== sb) return sa - sb;
+
+    const ka = Number.isFinite(+a?.k2_idx_red) ? +a.k2_idx_red : 0;
+    const kb = Number.isFinite(+b?.k2_idx_red) ? +b.k2_idx_red : 0;
+    if (ka !== kb) return ka - kb;
+
+    // 同一位置：保证 bottom 在前、top 在后（稳定性更好，避免同点顺序不确定）
+    const pa = String(a?.kind_enum || "") === "bottom" ? 0 : 1;
+    const pb = String(b?.kind_enum || "") === "bottom" ? 0 : 1;
+    return pa - pb;
+  });
+
   return out;
 }
 
@@ -333,7 +536,7 @@ export function computeFractalConfirmPairs(candles, reducedBars, fractals) {
 
         if (String(b.kind_enum || "") !== aKind) continue;
 
-        // ===== 旧判定��件逐项等价回归（但数值从 candles 回溯） =====
+        // ===== 旧判定条件逐项等价回归（但数值从 candles 回溯） =====
         if (aKind === "top") {
           const G2a = G(a.k2_idx_red);
           const G3a = G(a.k3_idx_red);

@@ -1,47 +1,29 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\chan\pens.js
 // ==============================
 // 说明：笔识别模块（Idx-Only Schema 版）
-// - 核心职责：从分型序列中识别出符合规则的笔。
-// - 规则要义（与原实现保持一致）：
-//   1) 仅在同 seq_id（连续性岛）内识别与推进，不跨岛。
-//   2) 先修极值（区间排他）、再验三条（方向/净距/排他）。
-//   3) 首尾相连：后一笔起点必须等于前一笔终点；起点修正需向左传播，直到岛内稳定。
-//   4) 净距 >= MIN_GAP（默认 4，保持原实现）。
-//   5) 相等不触发修正（严格不等比较）。
 //
-// ✅ 本轮重构目标：
-//   - 输出 Pen 严格按 Schema：只存 idx（start/end idx_red & idx_orig）+ 可选 fractal 下标 + dir_enum + seq_id；
-//   - 严禁输出任何 pri/ts/y 等衍生字段；
-//   - 任何价格比较通过 idx_orig 回溯 candles 读取（单一真相源）。
+// 阶段1（已完成）：新增“K2整体升降”兜底筛选（严格不等，基于合并K区间）
+//   - 不替代原有条件：排他/净距/方向/首尾相连/同类更极值 仍为硬条件
+//   - 仅在排他通过且净距通过后，作为落笔前最后门槛
+//
+// 阶段2（已完成）：任务调度机制改造（选A + 策略C）
+//   - 候选点搜索永远向右（怎么找）：扫描 seqArr（按 k2_idx_red 排序）向右推进
+//   - 向左回溯是任务切换（做什么）：当发现“起点需要修正（fix=start / 同类更极值）”时，立即切换到更左一笔
+//   - 选A：一旦触发更左任务，立即截断到更左笔（右侧全部失效）
+//   - 策略C：更左笔端点一旦确认改变，右侧全部失效，从该笔开始继续向右重算
+//
+// 阶段3（本轮）：首笔纳入同一验证管线（仅改“候选生成”，不改“验证规则”）
+//   - 首笔与后续笔共享同一套“确认笔”的硬条件管线：
+//       方向/反向类型 -> 排他性(exclusivityOK，闭环) -> 净距(gapOK) -> K2整体升降(endpointsShiftOK)
+//   - 首笔阶段的差异仅在于“候选点生成器”没有左侧可抢占任务：
+//       exclusivityOK 若 fix=start，在首笔阶段直接把起点候选替换为 culprit（同类更极值修正），继续闭环；
+//       fix=end 同理替换终点候选；从而保证首笔也严格通过同一管线。
+//   - 本轮不改变输出 schema，不改变后续调度器机制，仅统一首笔确认过程。
 // ==============================
 
 import { candleH, candleL, toNonNegIntIdx } from "./common";
 
-/**
- * 识别笔（Idx-Only 输出）
- *
- * Pen Schema（必须满足）：
- *   - start_idx_red, end_idx_red
- *   - start_idx_orig, end_idx_orig
- *   - start_frac_idx, end_frac_idx（可选）
- *   - dir_enum ('UP'|'DOWN')
- *   - seq_id
- *
- * @param {Array<object>} candles - 原始K线（唯一真相源）
- * @param {Array<object>} reducedBars - 合并K线（Idx-Only，本算法不依赖其数值字段）
- * @param {Array<object>} fractals - 分型（Idx-Only）
- * @param {Array<any>} _mapOrigToReduced - 兼容保留（本算法不再依赖）
- * @param {object} params
- * @param {number} params.minGapReduced - 最小净距（默认 4，与原实现一致）
- * @returns {{confirmed:Array<object>, provisional:null, all:Array<object>}}
- */
-export function computePens(
-  candles,
-  reducedBars,
-  fractals,
-  _mapOrigToReduced,
-  params = {}
-) {
+export function computePens(candles, reducedBars, fractals, _mapOrigToReduced, params = {}) {
   const pens = [];
   const MIN_GAP = Math.max(1, Number(params?.minGapReduced ?? 4));
 
@@ -56,21 +38,37 @@ export function computePens(
     bySeq.get(sid).push({ f, fi });
   }
 
-  // === 分型值（顶/底）===（严格从 candles 回溯，不落盘）
+  // ===== 缓存（跨岛复用；值只依赖 candles/reducedBars，不影响语义）=====
+  // 1) 分型极值缓存：key = `${kind}:${idx_orig}`
+  const _fractalValueCache = new Map();
+  // 2) 合并K区间缓存：key = redIdx
+  const _mergedK2RangeCache = new Map();
+
+  // ===== 原子：分型极值值（用于“更极值筛选”）=====
   function fractalValue(fr) {
     if (!fr) return NaN;
+
     const idx = toNonNegIntIdx(fr.k2_idx_orig);
     if (idx == null) return NaN;
+
     const kind = String(fr.kind_enum || "");
+    if (kind !== "top" && kind !== "bottom") return NaN;
+
+    const key = `${kind}:${idx}`;
+    const cached = _fractalValueCache.get(key);
+    if (cached != null) return cached;
+
+    let v = NaN;
     if (kind === "top") {
-      const v = candleH(candles, idx);
-      return Number.isFinite(v) ? v : NaN;
+      const x = candleH(candles, idx);
+      v = Number.isFinite(x) ? x : NaN;
+    } else {
+      const x = candleL(candles, idx);
+      v = Number.isFinite(x) ? x : NaN;
     }
-    if (kind === "bottom") {
-      const v = candleL(candles, idx);
-      return Number.isFinite(v) ? v : NaN;
-    }
-    return NaN;
+
+    _fractalValueCache.set(key, v);
+    return v;
   }
 
   function rid(fr) {
@@ -107,8 +105,61 @@ export function computePens(
     return null;
   }
 
-  // 区间极值排他（开区间），返回 {ok, fix, culprit}
-  // culprit 为 {f,fi}（与 seqArr 同构）
+  // ===== K2整体升降（严格不等），基于合并K区间（reducedBars）=====
+  function mergedK2Range(fr) {
+    const redIdx = toNonNegIntIdx(fr?.k2_idx_red);
+    if (redIdx == null) return null;
+
+    const cached = _mergedK2RangeCache.get(redIdx);
+    if (cached !== undefined) return cached;
+
+    const rb = Array.isArray(reducedBars) ? reducedBars[redIdx] : null;
+    if (!rb) {
+      _mergedK2RangeCache.set(redIdx, null);
+      return null;
+    }
+
+    const gi = toNonNegIntIdx(rb.g_idx_orig);
+    const di = toNonNegIntIdx(rb.d_idx_orig);
+    if (gi == null || di == null) {
+      _mergedK2RangeCache.set(redIdx, null);
+      return null;
+    }
+
+    const h = candleH(candles, gi);
+    const l = candleL(candles, di);
+    if (!Number.isFinite(h) || !Number.isFinite(l)) {
+      _mergedK2RangeCache.set(redIdx, null);
+      return null;
+    }
+
+    const out = { h, l };
+    _mergedK2RangeCache.set(redIdx, out);
+    return out;
+  }
+
+  function k2ShiftOKByDir(startFr, endFr, dir) {
+    const a = mergedK2Range(startFr);
+    const b = mergedK2Range(endFr);
+    if (!a || !b) return false;
+
+    const d = String(dir || "").toUpperCase();
+    if (d === "UP") return b.h > a.h && b.l > a.l;
+    if (d === "DOWN") return b.h < a.h && b.l < a.l;
+    return false;
+  }
+
+  function endpointsShiftOK(S, E) {
+    const d = dirOf(S, E);
+    if (!d) return false;
+    return k2ShiftOKByDir(S.f, E.f, d);
+  }
+
+  // 本轮依旧：使用 Symbol 绑定每岛 posMap 到 seqArr 上
+  const POS_BY_FI = Symbol("posByFi");
+
+  // ===== 区间极值排他（硬约束）=====
+  // 返回 {ok, fix, culprit}；culprit 为 {f,fi}
   function exclusivityOK(S, E, seqArr) {
     if (!S || !E) return { ok: false, fix: null, culprit: null };
 
@@ -131,11 +182,41 @@ export function computePens(
       return { ok: false, fix: null, culprit: null };
     }
 
-    for (const it of seqArr || []) {
+    // 优化：优先按 pos 扫描区间切片；无法定位则回退全量扫描
+    let startPos = -1;
+    let endPos = -1;
+
+    try {
+      const posByFi = seqArr && seqArr[POS_BY_FI];
+      if (posByFi && Number.isFinite(S.fi) && Number.isFinite(E.fi)) {
+        const pS = posByFi.get(S.fi);
+        const pE = posByFi.get(E.fi);
+        if (Number.isFinite(pS) && Number.isFinite(pE)) {
+          startPos = Math.min(pS, pE) + 1;
+          endPos = Math.max(pS, pE) - 1;
+        }
+      }
+    } catch {}
+
+    const scanSlice =
+      Number.isFinite(startPos) &&
+      Number.isFinite(endPos) &&
+      startPos >= 0 &&
+      endPos < (seqArr?.length || 0) &&
+      startPos <= endPos;
+
+    const iter = scanSlice
+      ? (function* () {
+          for (let i = startPos; i <= endPos; i++) yield seqArr[i];
+        })()
+      : (seqArr || []);
+
+    for (const it of iter) {
       const f = it.f;
+
       const k = rid(f);
       if (!Number.isFinite(k)) continue;
-      if (k <= l || k >= r) continue; // 开区间
+      if (k <= l || k >= r) continue;
 
       const kind = String(f.kind_enum || "");
       const v = fractalValue(f);
@@ -174,266 +255,365 @@ export function computePens(
     };
   }
 
-  /**
-   * 首尾相连 + 极值修正的“无限向左递归传播”
-   *
-   * ✅ 对齐旧实现要点：
-   *   - 每次将上一笔的 end 强制对齐为 carryEnd；
-   *   - 若该笔退化（start>=end）则删除并继续向更左；
-   *   - 对该笔执行 exclusivityOK：
-   *       * fix=start：调整 start -> culprit，并令 carryEnd=culprit，继续向更左传播（这就是“无限向左直到稳定”）
-   *       * fix=end  ：调整 end -> culprit，并结束传播（与旧实现一致：该分支很少见）
-   *       * ok       ：结束传播
-   *
-   * @param {{f:object,fi:number}} newStart
-   * @param {number} sid
-   * @param {Map<number, {f:object,fi:number}>} fiToEntry
-   * @param {Array<{f:object,fi:number}>} seqArr
-   */
-  function propagateToPreviousPens(newStart, sid, fiToEntry, seqArr) {
-    if (!pens.length || !newStart) return;
+  // 在 seqArr 中定位 entry 的位置（用于“从候选点继续向右”）
+  function findEntryPos(seqArr, entry) {
+    if (!entry) return -1;
 
-    let i = pens.length - 1;
-    let carryEnd = newStart;
-
-    while (i >= 0) {
-      const pen = pens[i];
-      if (Number(pen?.seq_id) !== Number(sid)) break;
-
-      const nextEndRed = toNonNegIntIdx(carryEnd.f.k2_idx_red);
-      const nextEndOrig = toNonNegIntIdx(carryEnd.f.k2_idx_orig);
-      if (nextEndRed == null || nextEndOrig == null) break;
-
-      // 1) 先强制对齐上一笔的终点
-      pen.end_idx_red = nextEndRed;
-      pen.end_idx_orig = nextEndOrig;
-      pen.end_frac_idx = carryEnd.fi;
-
-      // 2) 若退化则删除该笔并继续向左（carryEnd 不变）
-      if (
-        !Number.isFinite(pen.start_idx_red) ||
-        !Number.isFinite(pen.end_idx_red) ||
-        pen.start_idx_red >= pen.end_idx_red
-      ) {
-        pens.splice(i, 1);
-        i -= 1;
-        continue;
-      }
-
-      // 3) 执行排他性复验（使用分型下标快速定位 S/E）
-      const sFi = toNonNegIntIdx(pen.start_frac_idx);
-      const eFi = toNonNegIntIdx(pen.end_frac_idx);
-      if (sFi == null || eFi == null) break;
-
-      const S = fiToEntry.get(sFi) || null;
-      const E = fiToEntry.get(eFi) || null;
-      if (!S || !E) break;
-
-      const ex = exclusivityOK(S, E, seqArr);
-
-      if (!ex.ok && ex.fix === "start" && ex.culprit) {
-        // fix=start：调整起点为更极值，并把 carryEnd 设为该新起点，继续向更左传播（无限递归本质）
-        pen.start_idx_red = toNonNegIntIdx(ex.culprit.f.k2_idx_red);
-        pen.start_idx_orig = toNonNegIntIdx(ex.culprit.f.k2_idx_orig);
-        pen.start_frac_idx = ex.culprit.fi;
-
-        carryEnd = ex.culprit;
-        i -= 1;
-        continue;
-      }
-
-      if (!ex.ok && ex.fix === "end" && ex.culprit) {
-        // fix=end：对当前笔自身调整终点为更极值（与旧实现一致：不继续左传）
-        pen.end_idx_red = toNonNegIntIdx(ex.culprit.f.k2_idx_red);
-        pen.end_idx_orig = toNonNegIntIdx(ex.culprit.f.k2_idx_orig);
-        pen.end_frac_idx = ex.culprit.fi;
-        break;
-      }
-
-      // ok：稳定，停止回溯
-      break;
+    const m = seqArr && seqArr[POS_BY_FI];
+    if (m && Number.isFinite(entry.fi)) {
+      const p = m.get(entry.fi);
+      if (p != null) return p;
     }
+
+    const rr = rid(entry.f);
+    if (!Number.isFinite(rr)) return -1;
+    for (let i = 0; i < seqArr.length; i++) {
+      if (Number(seqArr[i]?.f?.k2_idx_red) === rr) return i;
+    }
+    return -1;
   }
 
   // ===== 分岛推进 =====
   for (const [sid, arr0] of bySeq.entries()) {
-    const seqArr = (arr0 || [])
-      .slice()
-      .sort((a, b) => Number(a.f.k2_idx_red) - Number(b.f.k2_idx_red));
+    const seqArr = (arr0 || []).slice().sort((a, b) => Number(a.f.k2_idx_red) - Number(b.f.k2_idx_red));
     if (!seqArr.length) continue;
 
-    // 建立 fi->entry 映射（保障回溯传播稳定不“找不到S/E”而提前中断）
     const fiToEntry = new Map();
-    for (const it of seqArr) {
-      fiToEntry.set(it.fi, it);
+    for (const it of seqArr) fiToEntry.set(it.fi, it);
+
+    const posByFi = new Map();
+    for (let i = 0; i < seqArr.length; i++) posByFi.set(seqArr[i].fi, i);
+    seqArr[POS_BY_FI] = posByFi;
+
+    const pensLocal = [];
+
+    function truncateToPenIndex(idxInclusive) {
+      const n = pensLocal.length;
+      const idx = Math.max(-1, Math.min(n - 1, Number(idxInclusive)));
+      pensLocal.splice(idx + 1);
     }
 
-    let bestTop = null;
-    let bestBottom = null;
-    let haveFirstPen = false;
+    function getPenStartEntry(pen) {
+      const sFi = toNonNegIntIdx(pen?.start_frac_idx);
+      return sFi == null ? null : (fiToEntry.get(sFi) || null);
+    }
+    function getPenEndEntry(pen) {
+      const eFi = toNonNegIntIdx(pen?.end_frac_idx);
+      return eFi == null ? null : (fiToEntry.get(eFi) || null);
+    }
 
-    let S = null;
-    let E = null;
+    // ===== 统一的“确认一条笔”验证管线 =====
+    // 输入：起点/终点候选 entry（{f,fi}）
+    // 返回：{ ok:true, pen, S, E } 或 { ok:false, reason, S, E }
+    // 说明：
+    //   - 排他闭环：fix=end 直接修 E 并继续；fix=start 的处理由 caller 决定（首笔=就地修S；后续=触发更左任务）
+    function confirmPenPipeline({ candS, candE, allowFixStartInPlace }) {
+      if (!candS || !candE) return { ok: false, reason: "null", S: candS, E: candE };
 
-    const betterTop = (a, b) => fractalValue(a.f) > fractalValue(b.f);
-    const betterBottom = (a, b) => fractalValue(a.f) < fractalValue(b.f);
+      // 方向/反向类型硬约束
+      if (!isOppositePair(candS, candE)) return { ok: false, reason: "not-opposite", S: candS, E: candE };
 
-    const tryMakeFirstPen = () => {
-      if (!bestTop || !bestBottom) return false;
+      // 排他闭环（硬约束）
+      let S = candS;
+      let E = candE;
 
-      let candS = null,
-        candE = null;
+      let guard = 0;
+      while (guard++ < 50) {
+        const ex = exclusivityOK(S, E, seqArr);
+        if (ex.ok) break;
 
-      const rTop = rid(bestTop.f);
-      const rBot = rid(bestBottom.f);
-      if (!Number.isFinite(rTop) || !Number.isFinite(rBot)) return false;
-
-      if (rBot < rTop) {
-        candS = bestBottom;
-        candE = bestTop;
-      } else if (rTop < rBot) {
-        candS = bestTop;
-        candE = bestBottom;
-      } else {
-        return false;
-      }
-
-      if (!isOppositePair(candS, candE)) return false;
-
-      const ex = exclusivityOK(candS, candE, seqArr);
-      if (!ex.ok) {
-        if (ex.culprit) {
-          const ck = String(ex.culprit.f.kind_enum || "");
-          if (ck === "top") {
-            if (!bestTop || betterTop(ex.culprit, bestTop)) bestTop = ex.culprit;
-          } else if (ck === "bottom") {
-            if (!bestBottom || betterBottom(ex.culprit, bestBottom)) bestBottom = ex.culprit;
-          }
+        if (ex.fix === "end" && ex.culprit) {
+          E = ex.culprit;
+          continue;
         }
-        return false;
+
+        if (ex.fix === "start" && ex.culprit) {
+          if (!allowFixStartInPlace) {
+            return { ok: false, reason: "need-preempt", S, E, culprit: ex.culprit };
+          }
+          S = ex.culprit;
+          continue;
+        }
+
+        return { ok: false, reason: "ex-bad", S, E };
       }
 
-      if (!gapOK(candS, candE)) return false;
+      // 净距硬约束
+      if (!gapOK(S, E)) return { ok: false, reason: "gap", S, E };
 
-      const pen = buildPen(candS, candE, sid);
+      // K2整体升降硬约束
+      if (!endpointsShiftOK(S, E)) return { ok: false, reason: "k2shift", S, E };
+
+      const pen = buildPen(S, E, sid);
       if (
         pen.start_idx_red == null ||
         pen.end_idx_red == null ||
         pen.start_idx_orig == null ||
         pen.end_idx_orig == null
       ) {
+        return { ok: false, reason: "schema", S, E };
+      }
+
+      return { ok: true, pen, S, E };
+    }
+
+    // ========= 阶段3：首笔候选生成器（bestTop/bestBottom），但确认走统一管线 =========
+    let bestTop = null;
+    let bestBottom = null;
+    const betterTop = (a, b) => fractalValue(a.f) > fractalValue(b.f);
+    const betterBottom = (a, b) => fractalValue(a.f) < fractalValue(b.f);
+
+    // 首笔扫描位置
+    let scanPos = 0;
+
+    // 首笔生成：只要 bestTop/bestBottom 都存在，就尝试确认
+    function tryConfirmFirstPenFromBests() {
+      if (!bestTop || !bestBottom) return false;
+
+      const rTop = rid(bestTop.f);
+      const rBot = rid(bestBottom.f);
+      if (!Number.isFinite(rTop) || !Number.isFinite(rBot)) return false;
+      if (rTop === rBot) return false;
+
+      // 按时间顺序决定 (S,E)
+      let candS = null;
+      let candE = null;
+      if (rBot < rTop) {
+        candS = bestBottom;
+        candE = bestTop;
+      } else {
+        candS = bestTop;
+        candE = bestBottom;
+      }
+
+      // 首笔阶段：允许 fix=start 就地修正（因为无更左可抢占）
+      const res = confirmPenPipeline({ candS, candE, allowFixStartInPlace: true });
+      if (!res.ok) {
+        // 首笔未成：保持 best 指针继续向右扫描
+        // 注意：res.S/res.E 可能已被 fix=end/fix=start 就地修正，但不强行写回 best，
+        // 以保持与原先 “bestTop/bestBottom 仅由更极值触发更新” 的语义一致。
         return false;
       }
 
-      pens.push(pen);
-      S = candE;
-      E = null;
-      haveFirstPen = true;
+      pensLocal.push(res.pen);
       return true;
-    };
+    }
 
-    for (let i = 0; i < seqArr.length; i++) {
-      const cur = seqArr[i];
+    while (scanPos < seqArr.length && !pensLocal.length) {
+      const cur = seqArr[scanPos++];
+      const kind = String(cur.f.kind_enum || "");
+      if (kind === "top") {
+        if (!bestTop || betterTop(cur, bestTop)) {
+          bestTop = cur;
+          tryConfirmFirstPenFromBests();
+        }
+      } else if (kind === "bottom") {
+        if (!bestBottom || betterBottom(cur, bestBottom)) {
+          bestBottom = cur;
+          tryConfirmFirstPenFromBests();
+        }
+      }
+    }
 
-      if (!haveFirstPen) {
-        if (String(cur.f.kind_enum || "") === "top") {
-          if (!bestTop || betterTop(cur, bestTop)) {
-            bestTop = cur;
-            tryMakeFirstPen();
-          }
-        } else if (String(cur.f.kind_enum || "") === "bottom") {
-          if (!bestBottom || betterBottom(cur, bestBottom)) {
-            bestBottom = cur;
-            tryMakeFirstPen();
+    if (!pensLocal.length) continue;
+
+    // ========= 阶段2调度器（保持不变） =========
+
+    let activeStart = getPenEndEntry(pensLocal[pensLocal.length - 1]);
+    if (!activeStart) continue;
+
+    // 从“首笔扫描停止的位置”与“首笔终点之后”两者取最大，确保扫描单调不回退
+    scanPos = Math.max(scanPos, Math.max(0, findEntryPos(seqArr, activeStart) + 1));
+
+    let activeEnd = null;
+    let activeEndVal = NaN;
+
+    function moveActiveStartTo(entry) {
+      activeStart = entry;
+      activeEnd = null;
+      activeEndVal = NaN;
+      const p = findEntryPos(seqArr, entry);
+      if (p >= 0) scanPos = Math.max(scanPos, p + 1);
+    }
+
+    function applyPendingShiftToPrevPenEnd(newEndEntry) {
+      const lastIdx = pensLocal.length - 1;
+      if (lastIdx < 0) return false;
+
+      const pen = pensLocal[lastIdx];
+      pen.end_idx_red = toNonNegIntIdx(newEndEntry.f.k2_idx_red);
+      pen.end_idx_orig = toNonNegIntIdx(newEndEntry.f.k2_idx_orig);
+      pen.end_frac_idx = newEndEntry.fi;
+      return true;
+    }
+
+    function preemptToLeftPen(leftPenIndex, pendingEndEntry) {
+      truncateToPenIndex(leftPenIndex);
+
+      if (!pensLocal.length) return false;
+
+      const tail = pensLocal[pensLocal.length - 1];
+      tail.end_idx_red = toNonNegIntIdx(pendingEndEntry.f.k2_idx_red);
+      tail.end_idx_orig = toNonNegIntIdx(pendingEndEntry.f.k2_idx_orig);
+      tail.end_frac_idx = pendingEndEntry.fi;
+
+      moveActiveStartTo(pendingEndEntry);
+      return true;
+    }
+
+    function validateAndRepairTailPen() {
+      const tailIdx = pensLocal.length - 1;
+      if (tailIdx < 0) return { ok: false, preempt: false };
+
+      const pen = pensLocal[tailIdx];
+      const S = getPenStartEntry(pen);
+      const E = getPenEndEntry(pen);
+      if (!S || !E) return { ok: false, preempt: false };
+
+      const sRid = toNonNegIntIdx(pen.start_idx_red);
+      const eRid = toNonNegIntIdx(pen.end_idx_red);
+      if (!Number.isFinite(sRid) || !Number.isFinite(eRid) || sRid >= eRid) {
+        pensLocal.splice(tailIdx, 1);
+        const newTail = pensLocal[pensLocal.length - 1];
+        const newEnd = newTail ? getPenEndEntry(newTail) : null;
+        if (newEnd) moveActiveStartTo(newEnd);
+        return { ok: false, preempt: false };
+      }
+
+      let guard = 0;
+      while (guard++ < 50) {
+        const ex = exclusivityOK(S, E, seqArr);
+        if (ex.ok) break;
+
+        if (ex.fix === "end" && ex.culprit) {
+          pen.end_idx_red = toNonNegIntIdx(ex.culprit.f.k2_idx_red);
+          pen.end_idx_orig = toNonNegIntIdx(ex.culprit.f.k2_idx_orig);
+          pen.end_frac_idx = ex.culprit.fi;
+          moveActiveStartTo(ex.culprit);
+          continue;
+        }
+
+        if (ex.fix === "start" && ex.culprit) {
+          const leftIdx = tailIdx - 1;
+          if (leftIdx < 0) return { ok: false, preempt: false };
+          preemptToLeftPen(leftIdx, ex.culprit);
+          return { ok: false, preempt: true };
+        }
+
+        break;
+      }
+
+      if (!gapOK(S, E)) return { ok: false, preempt: false };
+      if (!endpointsShiftOK(S, E)) return { ok: false, preempt: false };
+
+      return { ok: true, preempt: false };
+    }
+
+    const MAX_STEPS = Math.max(1000, seqArr.length * 50);
+    let steps = 0;
+
+    while (steps++ < MAX_STEPS && scanPos < seqArr.length && pensLocal.length) {
+      const cur = seqArr[scanPos++];
+      const sKind = String(activeStart?.f?.kind_enum || "");
+      const dir = sKind === "bottom" ? "UP" : "DOWN";
+      const endKind = dir === "UP" ? "top" : "bottom";
+      const kind = String(cur.f.kind_enum || "");
+
+      if (kind === sKind) {
+        const sVal = fractalValue(activeStart.f);
+        const cVal = fractalValue(cur.f);
+        if (Number.isFinite(sVal) && Number.isFinite(cVal)) {
+          const moreExtremeStart =
+            (dir === "UP" && cVal < sVal) ||
+            (dir === "DOWN" && cVal > sVal);
+
+          if (moreExtremeStart) {
+            applyPendingShiftToPrevPenEnd(cur);
+            moveActiveStartTo(cur);
+
+            const vr = validateAndRepairTailPen();
+            if (vr.preempt) continue;
+            continue;
           }
         }
         continue;
       }
 
-      const sKind = String(S?.f?.kind_enum || "");
-      const curDir = sKind === "bottom" ? "UP" : "DOWN";
-
-      const kind = String(cur.f.kind_enum || "");
-      if (kind === sKind) {
-        const sVal = fractalValue(S.f);
+      if (kind === endKind) {
         const cVal = fractalValue(cur.f);
-        if (!Number.isFinite(sVal) || !Number.isFinite(cVal)) continue;
+        if (!Number.isFinite(cVal)) continue;
 
-        const shouldMoveStart =
-          (curDir === "UP" && cVal < sVal) ||
-          (curDir === "DOWN" && cVal > sVal);
-
-        if (shouldMoveStart) {
-          S = cur;
-          propagateToPreviousPens(S, sid, fiToEntry, seqArr);
-          if (E && rid(S.f) >= rid(E.f)) E = null;
-        }
-      } else {
-        if (!E) {
-          E = cur;
+        if (!activeEnd) {
+          activeEnd = cur;
+          activeEndVal = cVal;
         } else {
-          const eVal = fractalValue(E.f);
-          const cVal = fractalValue(cur.f);
-          if (!Number.isFinite(eVal) || !Number.isFinite(cVal)) continue;
+          const moreExtremeEnd =
+            (dir === "UP" && cVal > activeEndVal) ||
+            (dir === "DOWN" && cVal < activeEndVal);
 
-          const shouldReplaceEnd =
-            (curDir === "UP" && cVal > eVal) ||
-            (curDir === "DOWN" && cVal < eVal);
-
-          if (shouldReplaceEnd) {
-            E = cur;
+          if (moreExtremeEnd) {
+            activeEnd = cur;
+            activeEndVal = cVal;
+          } else {
+            continue;
           }
         }
-      }
 
-      if (E) {
-        const ex = exclusivityOK(S, E, seqArr);
-        if (!ex.ok) {
-          if (ex.fix === "start" && ex.culprit) {
-            S = ex.culprit;
-            propagateToPreviousPens(S, sid, fiToEntry, seqArr);
-            if (E && rid(S.f) >= rid(E.f)) E = null;
-          } else if (ex.fix === "end" && ex.culprit) {
-            E = ex.culprit;
+        // 使用统一管线确认“后续笔”：不允许 fix=start 就地修（必须抢占）
+        const res = confirmPenPipeline({ candS: activeStart, candE: activeEnd, allowFixStartInPlace: false });
+
+        if (!res.ok) {
+          if (res.reason === "need-preempt" && res.culprit) {
+            const leftIdx = pensLocal.length - 1;
+            if (leftIdx >= 0) {
+              preemptToLeftPen(leftIdx, res.culprit);
+            }
           }
+          // 不成立：保持 scanPos 向右，按现有策略清空终点候选（避免状态污染）
+          activeEnd = null;
+          activeEndVal = NaN;
           continue;
         }
 
-        if (gapOK(S, E)) {
-          // 兜底：确保上一笔终点=当前 S（首尾相连）
-          if (pens.length) {
-            const prevPen = pens[pens.length - 1];
-            if (Number(prevPen?.seq_id) === Number(sid)) {
-              const nextEndRed = toNonNegIntIdx(S.f.k2_idx_red);
-              const nextEndOrig = toNonNegIntIdx(S.f.k2_idx_orig);
-              if (nextEndRed != null && nextEndOrig != null) {
-                prevPen.end_idx_red = nextEndRed;
-                prevPen.end_idx_orig = nextEndOrig;
-                prevPen.end_frac_idx = S.fi;
-              }
-            }
-          }
+        const pen = res.pen;
 
-          const pen = buildPen(S, E, sid);
-          if (
-            pen.start_idx_red == null ||
-            pen.end_idx_red == null ||
-            pen.start_idx_orig == null ||
-            pen.end_idx_orig == null
-          ) {
-            S = E;
-            E = null;
-            continue;
-          }
-
-          pens.push(pen);
-
-          S = E;
-          E = null;
+        if (pensLocal.length) {
+          const prevPen = pensLocal[pensLocal.length - 1];
+          prevPen.end_idx_red = toNonNegIntIdx(activeStart.f.k2_idx_red);
+          prevPen.end_idx_orig = toNonNegIntIdx(activeStart.f.k2_idx_orig);
+          prevPen.end_frac_idx = activeStart.fi;
         }
+
+        pensLocal.push(pen);
+
+        // 下一笔起点=本笔终点
+        moveActiveStartTo(res.E);
+
+        activeEnd = null;
+        activeEndVal = NaN;
+
+        continue;
       }
     }
+
+    for (const p of pensLocal) pens.push(p);
   }
+
+  // ===== DEBUG SNAPSHOT（仅用于控制台导出排查断笔；不影响算法语义）=====
+  try {
+    if (typeof window !== "undefined") {
+      window.__CHAN_DEBUG__ = window.__CHAN_DEBUG__ || {};
+      window.__CHAN_DEBUG__.lastPensSnapshot = {
+        t: Date.now(),
+        candles,
+        reducedBars,
+        fractals,
+        pens
+      };
+      // 可选：记录当前版本标识，方便你确认浏览器是否加载了最新代码
+      window.__CHAN_DEBUG__.lastPensSnapshotTag = "pens.js debug snapshot enabled";
+    }
+  } catch {}
 
   return { confirmed: pens, provisional: null, all: pens };
 }

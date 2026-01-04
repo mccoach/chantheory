@@ -10,7 +10,7 @@
 import { getChartTheme } from "@/charts/theme";
 import { hexToRgba } from "@/utils/colorUtils";
 import { formatNumberScaled } from "@/utils/numberUtils";
-import { STYLE_PALETTE, DEFAULT_KLINE_STYLE } from "@/constants";
+import { STYLE_PALETTE, DEFAULT_KLINE_STYLE, ORIGINAL_KLINE_BAR_SHRINK_PERCENT } from "@/constants";
 import { applyLayout } from "../positioning/layout";
 import { makeMainTooltipFormatter } from "../tooltips/index";
 
@@ -54,6 +54,12 @@ export function buildMainChartOption(
     ? Math.max(10, Math.min(100, Math.round(+ks.barPercent)))
     : Math.max(10, Math.min(100, Math.round(+DEFAULT_KLINE_STYLE.barPercent || 88)));
 
+  // ===== NEW: 原始K额外收缩（合并K不受影响）=====
+  const shrink = Number.isFinite(+ORIGINAL_KLINE_BAR_SHRINK_PERCENT)
+    ? Math.max(0, Math.round(+ORIGINAL_KLINE_BAR_SHRINK_PERCENT))
+    : 0;
+  const originalBarPercent = barPercent - shrink;
+
   const showOriginal = (ks.originalEnabled ?? true) === true;
   const showMerged = (ks.mergedEnabled ?? true) === true;
   const mergedFirst = String(MK.displayOrder || "first") === "first";
@@ -87,8 +93,8 @@ export function buildMainChartOption(
           borderWidth:
             ks.originalBorderWidth ?? DEFAULT_KLINE_STYLE.originalBorderWidth,
         },
-        // NEW: 显式应用柱宽（单一参数）
-        barWidth: `${barPercent}%`,
+        // CHANGED: 原始K柱宽在现有 barPercent 基础上额外减 shrink%
+        barWidth: `${originalBarPercent}%`,
         z: originalZ,
       };
 
@@ -145,7 +151,7 @@ export function buildMainChartOption(
         stack: "merged_k",
         data: baseLow,
         itemStyle: { color: "transparent" },
-        // NEW: 显式应用柱宽（单一参数）
+        // 保持不变：合并K仍使用原 barPercent（现有机制）
         barWidth: `${barPercent}%`,
         barGap: "-100%",
         silent: true,
@@ -167,7 +173,7 @@ export function buildMainChartOption(
                 },
               }
         ),
-        // NEW: 显式应用柱宽（单一参数）
+        // 保持不变：合并K仍使用原 barPercent（现有机制）
         barWidth: `${barPercent}%`,
         barGap: "-100%",
         itemStyle: {

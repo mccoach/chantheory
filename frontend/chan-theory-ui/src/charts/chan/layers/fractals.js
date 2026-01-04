@@ -1,4 +1,4 @@
-// src/charts/chan/layers/fractals.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\charts\chan\layers\fractals.js
 // ==============================
 // 缠论图层：分型标记 (Fractals) - Idx-Only Schema + confirmPairs 版
 //
@@ -7,13 +7,16 @@
 //       * 8 个分型 scatter series 共用 widthState key: "main:fractal"
 //       * symbolSize 读取 widthState，避免 notMerge 覆盖造成的竞态
 //   - 不再依赖 env.symbolWidthPx / renderHub 推导宽度
+//
+// V2 - 统一语义回溯：yOfFractal 迁移到 chan/accessors.js（消除重复语义）
 // ==============================
 
 import { FRACTAL_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { deriveSymbolSize } from "./geometry";
-import { candleH, candleL, toNonNegIntIdx } from "@/composables/chan/common";
+import { toNonNegIntIdx } from "@/composables/chan/common";
 import { getWidthPx } from "@/charts/width/widthState";
+import { createChanAccessors } from "@/composables/chan/accessors";
 
 const WIDTH_KEY = "main:fractal";
 
@@ -30,6 +33,8 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
 
   const candles = Array.isArray(env?.candles) ? env.candles : null;
   if (!candles || !candles.length) return { series: [] };
+
+  const acc = createChanAccessors(candles);
 
   const confirmPairs = env?.confirmPairs || null;
   const pairedArr = Array.isArray(confirmPairs?.paired) ? confirmPairs.paired : null;
@@ -50,12 +55,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const yOffBottom = +(markerH / 2 + apexGap);
 
   function yOfFractal(f) {
-    const idx = toNonNegIntIdx(f?.k2_idx_orig);
-    if (idx == null) return null;
-    if (String(f?.kind_enum || "") === "top") {
-      return candleH(candles, idx);
-    }
-    return candleL(candles, idx);
+    return acc.fractalY(f);
   }
 
   const bins = {

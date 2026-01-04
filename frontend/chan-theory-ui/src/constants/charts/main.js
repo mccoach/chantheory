@@ -14,7 +14,7 @@ export const DEFAULT_KLINE_STYLE = {
   //   - 本字段作为主图所有“柱体宽度”的唯一参数（统一应用：原始K线 + 合并K线）。
   //   - 取值为百分比（10~100，整数），UI 约束使用 UI_LIMITS.barWidthPercent。
   //   - 本轮改动：柱宽计算不再使用 BAR_USABLE_RATIO 缩放；barWidth 直接使用本百分比。
-  barPercent: 88,          // K线柱体宽度百分比（默认88）（✅ 设置窗已暴露）
+  barPercent: 85,          // K线柱体宽度百分比（默认88）（✅ 设置窗已暴露）
 
   // --- 原始K线样式（设置窗已暴露）---
   upColor: "#f56c6c",       // 阳线颜色（✅ 设置窗可改）
@@ -36,6 +36,13 @@ export const DEFAULT_KLINE_STYLE = {
     displayOrder: "first",  // 显示层级："first"=前端 | "after"=后端（✅ 设置窗可改）
   },
 };
+
+// ===== NEW: 原始K线柱宽额外收缩（百分比点）=====
+// 说明：
+//   - 在“单一 barPercent”机制基础上，仅对“原始K线”额外减小该百分比点；
+//   - 合并K线仍完全使用 barPercent（不受影响）；
+//   - builder 内会对结果做 10~100 clamp，避免减到过小。
+export const ORIGINAL_KLINE_BAR_SHRINK_PERCENT = 20;
 
 // ===== 主图 MA 均线配置 =====
 export const DEFAULT_MA_CONFIGS = {

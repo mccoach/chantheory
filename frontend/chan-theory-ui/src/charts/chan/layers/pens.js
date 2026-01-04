@@ -4,12 +4,15 @@
 // - 核心职责：将笔数据转换为 ECharts 线图系列（line series）。
 // - 按屏障分段渲染：通过 barrierIdxList 切段，避免跨屏障连接。
 // - 单一真相源：笔不存 y/pri，渲染端点 y 值通过 idx_orig 回溯 candles 读取。
+//
+// V2 - 统一语义回溯：端点价回溯迁移到 chan/accessors.js（消除重复实现）
 // ==============================
 
 import { PENS_DEFAULTS } from "@/constants";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { sampleSeriesByBarriers } from "./sampler";
-import { candleH, candleL, toNonNegIntIdx } from "@/composables/chan/common";
+import { toNonNegIntIdx } from "@/composables/chan/common";
+import { createChanAccessors } from "@/composables/chan/accessors";
 
 // 画笔折线（每段 series）
 export function buildPenLines(pensObj, env = {}) {
@@ -25,6 +28,8 @@ export function buildPenLines(pensObj, env = {}) {
 
   const candles = Array.isArray(env?.candles) ? env.candles : null;
   if (!candles || !candles.length) return { series: [] };
+
+  const acc = createChanAccessors(candles);
 
   const pens = pensObj || {};
   const confirmed = Array.isArray(pens.confirmed) ? pens.confirmed : [];
@@ -46,22 +51,7 @@ export function buildPenLines(pensObj, env = {}) {
   );
 
   function endpointY(pen, which) {
-    const dir = String(pen?.dir_enum || "").toUpperCase();
-    const x =
-      which === "start"
-        ? toNonNegIntIdx(pen?.start_idx_orig)
-        : toNonNegIntIdx(pen?.end_idx_orig);
-    if (x == null) return NaN;
-
-    if (dir === "UP") {
-      // UP：start=bottom(low)，end=top(high)
-      return which === "start" ? candleL(candles, x) : candleH(candles, x);
-    }
-    if (dir === "DOWN") {
-      // DOWN：start=top(high)，end=bottom(low)
-      return which === "start" ? candleH(candles, x) : candleL(candles, x);
-    }
-    return NaN;
+    return acc.penEndpointY(pen, which);
   }
 
   function samplePenToChunks(p) {
@@ -95,9 +85,7 @@ export function buildPenLines(pensObj, env = {}) {
     for (let k = 0; k < chunks.length; k++) {
       const data = chunks[k];
       series.push({
-        id: `CHAN_PEN_CONF_${p.start_idx_orig}_${
-          p.end_idx_orig
-        }_${k}_${seqCounter++}`,
+        id: `CHAN_PEN_CONF_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
         name: "CHAN_PENS_CONFIRMED",
         type: "line",
         yAxisIndex: 0,
@@ -118,9 +106,7 @@ export function buildPenLines(pensObj, env = {}) {
     for (let k = 0; k < chunks.length; k++) {
       const data = chunks[k];
       series.push({
-        id: `CHAN_PEN_PROV_${p.start_idx_orig}_${
-          p.end_idx_orig
-        }_${k}_${seqCounter++}`,
+        id: `CHAN_PEN_PROV_${p.start_idx_orig}_${p.end_idx_orig}_${k}_${seqCounter++}`,
         name: "CHAN_PENS_PROVISIONAL",
         type: "line",
         yAxisIndex: 0,

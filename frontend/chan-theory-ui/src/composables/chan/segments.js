@@ -7,46 +7,17 @@
 //   - 不存 ts/pri/y 等衍生字段（单一真相源：candles）；
 //   - 不跨 seq_id（岛内独立推进）；
 //
-// ✅ 结构说明（按最新需求校核后实现）：
-//   1) 先生成元线段序列 metaSegs（保留不变，内部使用，不对外导出）
-//   2) 再基于 metaSegs 做连接/确认，生成最终线段序列 finalSegs（用于渲染）
-//      finalSegs 字段 = 元线段工程字段 + internal_gap_bool + confirmed_bool
+// ✅ 结构说明：
+//   1) 生成元线段序列 metaSegs
+//   2) 基于 metaSegs 做连接/确认，生成最终线段 finalSegs（internal_gap_bool/confirmed_bool）
 //
-// ✅ 两条“剔骨刀”硬规则（显式实现）：
-//   A) “完成连接”事件点（只发生在一对线段之间）：
-//      - 一旦 AB 变为 A.end_idx_orig === B.start_idx_orig（天然或后处理），立刻对前段A做内部缺口判断
-//      - 若 A 无内部缺口：且 AB 必为反向连接 => A 立即 confirmed
-//      - 若 A 有内部缺口：A 暂不 confirmed，挂到 pendingA（长度恒为1），等待“下一次 BC 反向连接成功”
-//   B) 当存在 pendingA 时：只要发生一次 “BC 反向连接成功” 事件点，第一时间立即确认 pendingA 成立，
-//      然后再对 B 做内部缺口判断（该判断由“完成连接事件点”统一触发）
-//
-// 注：为让上述规则只在一个地方发生，本文件将“连接完成处理”封装为 onOppositeConnected(...) 事件函数。
+// 本轮改动（第三阶段）：
+//   - 将 reducedBars 端点价域回溯（原 rbHighByRedIdx/rbLowByRedIdx/penHigh/penLow）迁移到 chan/accessors.js
+//   - 进一步消除 segments.js 内部价格回溯细节，使其聚焦“线段识别规则”
 // ==============================
 
-import { candleH, candleL, toNonNegIntIdx } from "./common";
-
-/**
- * 将一条笔的端点，映射为对应的“端点价”（从 candles 回溯）
- */
-function penEndpointY(candles, pen, which) {
-  const dir = String(pen?.dir_enum || "").toUpperCase();
-  const x =
-    which === "start"
-      ? toNonNegIntIdx(pen?.start_idx_orig)
-      : toNonNegIntIdx(pen?.end_idx_orig);
-  if (x == null) return NaN;
-
-  if (dir === "UP") return which === "start" ? candleL(candles, x) : candleH(candles, x);
-  if (dir === "DOWN") return which === "start" ? candleH(candles, x) : candleL(candles, x);
-  return NaN;
-}
-
-function penPriceRange(candles, pen) {
-  const a = penEndpointY(candles, pen, "start");
-  const b = penEndpointY(candles, pen, "end");
-  if (![a, b].every((v) => Number.isFinite(v))) return null;
-  return { lo: Math.min(a, b), hi: Math.max(a, b) };
-}
+import { toNonNegIntIdx } from "./common";
+import { createChanAccessors } from "./accessors";
 
 function isStrictDisjoint(a, b) {
   return a.hi < b.lo || b.hi < a.lo;
@@ -69,12 +40,20 @@ function isUpSeg(seg) {
   return String(seg?.dir_enum || "").toUpperCase() === "UP";
 }
 
-function hasInternalGapByFeatureSeq({ candles, arrEntries, sIdx, eIdx, segDirUp }) {
+function hasInternalGapByFeatureSeq({
+  candles,
+  acc,
+  arrEntries,
+  sIdx,
+  eIdx,
+  segDirUp,
+}) {
   const start = Number(sIdx);
   const end = Number(eIdx);
 
   if (!Array.isArray(arrEntries) || !arrEntries.length) return false;
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return false;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start)
+    return false;
 
   const nextPenEntry = arrEntries[end + 1] || null;
   if (!nextPenEntry?.p) return false;
@@ -83,12 +62,12 @@ function hasInternalGapByFeatureSeq({ candles, arrEntries, sIdx, eIdx, segDirUp 
 
   for (let i = start + 1; i <= end - 1; i += 2) {
     const pen = arrEntries[i]?.p;
-    const r = pen ? penPriceRange(candles, pen) : null;
+    const r = pen ? acc.penRange(pen) : null;
     if (r) featureRanges.push(r);
   }
 
   {
-    const r = penPriceRange(candles, nextPenEntry.p);
+    const r = acc.penRange(nextPenEntry.p);
     if (r) featureRanges.push(r);
   }
 
@@ -122,23 +101,10 @@ function isExternallyConnected(A, B) {
   return Number(A?.end_idx_orig) === Number(B?.start_idx_orig);
 }
 
-function endpointPriceOfSegment(candles, seg, which) {
-  const dir = String(seg?.dir_enum || "").toUpperCase();
-  const idx =
-    which === "start"
-      ? toNonNegIntIdx(seg?.start_idx_orig)
-      : toNonNegIntIdx(seg?.end_idx_orig);
-  if (idx == null) return NaN;
-
-  if (dir === "UP") return which === "start" ? candleL(candles, idx) : candleH(candles, idx);
-  if (dir === "DOWN") return which === "start" ? candleH(candles, idx) : candleL(candles, idx);
-  return NaN;
-}
-
-function isEndCreatesNewExtreme(candles, A, B) {
+function isEndCreatesNewExtreme(acc, A, B) {
   const dirUp = isUpSeg(A);
-  const aEnd = endpointPriceOfSegment(candles, A, "end");
-  const bEnd = endpointPriceOfSegment(candles, B, "end");
+  const aEnd = acc.segmentEndpointY(A, "end");
+  const bEnd = acc.segmentEndpointY(B, "end");
   if (!Number.isFinite(aEnd) || !Number.isFinite(bEnd)) return false;
   return dirUp ? bEnd > aEnd : bEnd < aEnd;
 }
@@ -155,12 +121,19 @@ function resolvePenEntryRange(seg, penIndexToLocalEntryIdx) {
   return { sIdx, eIdx };
 }
 
-function computeInternalGapBool({ candles, arrEntries, seg, penIndexToLocalEntryIdx }) {
+function computeInternalGapBool({
+  candles,
+  acc,
+  arrEntries,
+  seg,
+  penIndexToLocalEntryIdx,
+}) {
   const rng = resolvePenEntryRange(seg, penIndexToLocalEntryIdx);
   if (!rng) return false;
 
   return hasInternalGapByFeatureSeq({
     candles,
+    acc,
     arrEntries,
     sIdx: rng.sIdx,
     eIdx: rng.eIdx,
@@ -168,38 +141,7 @@ function computeInternalGapBool({ candles, arrEntries, seg, penIndexToLocalEntry
   });
 }
 
-function findExtremeIdxInClosedRange(candles, leftIdxOrig, rightIdxOrig, dirUp) {
-  const a = toNonNegIntIdx(leftIdxOrig);
-  const b = toNonNegIntIdx(rightIdxOrig);
-  if (a == null || b == null) return null;
-
-  const s = Math.min(a, b);
-  const e = Math.max(a, b);
-
-  let bestIdx = null;
-  let bestVal = dirUp ? -Infinity : Infinity;
-
-  for (let i = s; i <= e; i++) {
-    const v = dirUp ? candleH(candles, i) : candleL(candles, i);
-    if (!Number.isFinite(v)) continue;
-
-    if (dirUp) {
-      if (v > bestVal) {
-        bestVal = v;
-        bestIdx = i;
-      }
-    } else {
-      if (v < bestVal) {
-        bestVal = v;
-        bestIdx = i;
-      }
-    }
-  }
-
-  return bestIdx;
-}
-
-function alignOppositeSegmentsByExtreme(candles, A, B) {
+function alignOppositeSegmentsByExtreme(acc, A, B) {
   const A2 = { ...A };
   const B2 = { ...B };
 
@@ -214,15 +156,17 @@ function alignOppositeSegmentsByExtreme(candles, A, B) {
 
   const dirUp = isUpSeg(A2);
 
-  // NEW: 反向且存在外部缺口时，连接点应取闭区间 [A.end, B.start] 内的极值点
-  //      - UP 段取最高点（high）
-  //      - DOWN 段取最低点（low）
-  const pivotIdx = findExtremeIdxInClosedRange(candles, aEndIdx, bStartIdx, dirUp);
+  // 反向且存在外部缺口时，连接点取闭区间 [A.end, B.start] 内的极值点
+  const pivotIdx = acc.findExtremeIdxInClosedRange({
+    leftIdxOrig: aEndIdx,
+    rightIdxOrig: bStartIdx,
+    dirUp,
+  });
 
   if (pivotIdx == null) {
     // 兜底：无法找到极值点，退回到原先“端点二选一”逻辑
-    const aEnd = endpointPriceOfSegment(candles, A2, "end");
-    const bStart = endpointPriceOfSegment(candles, B2, "start");
+    const aEnd = acc.segmentEndpointY(A2, "end");
+    const bStart = acc.segmentEndpointY(B2, "start");
 
     if (!Number.isFinite(aEnd) || !Number.isFinite(bStart)) {
       B2.start_idx_orig = A2.end_idx_orig;
@@ -244,7 +188,13 @@ function alignOppositeSegmentsByExtreme(candles, A, B) {
 }
 
 // ===== 最终线段生成（事件驱动剔骨刀规则版）=====
-function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToLocalEntryIdx }) {
+function buildFinalSegmentsInOneSeq({
+  candles,
+  acc,
+  arrEntries,
+  metaSegs,
+  penIndexToLocalEntryIdx,
+}) {
   const finalSegs = [];
   const segs = Array.isArray(metaSegs) ? metaSegs : [];
   if (!segs.length) return finalSegs;
@@ -254,6 +204,7 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
       ...seg,
       internal_gap_bool: computeInternalGapBool({
         candles,
+        acc,
         arrEntries,
         seg,
         penIndexToLocalEntryIdx,
@@ -280,6 +231,7 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
     if (xEndChanged) {
       X.internal_gap_bool = computeInternalGapBool({
         candles,
+        acc,
         arrEntries,
         seg: X,
         penIndexToLocalEntryIdx,
@@ -303,7 +255,7 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
 
     if (opposite) {
       if (!isExternallyConnected(A, B)) {
-        const aligned = alignOppositeSegmentsByExtreme(candles, A, B);
+        const aligned = alignOppositeSegmentsByExtreme(acc, A, B);
         const A2 = makeFinal(aligned.A2);
         const B2 = makeFinal(aligned.B2);
 
@@ -329,7 +281,7 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
       continue;
     }
 
-    if (isEndCreatesNewExtreme(candles, A, B)) {
+    if (isEndCreatesNewExtreme(acc, A, B)) {
       const oldEnd = Number(A.end_idx_orig);
       A.end_idx_orig = B.end_idx_orig;
       A.end_idx_red = B.end_idx_red;
@@ -339,6 +291,7 @@ function buildFinalSegmentsInOneSeq({ candles, arrEntries, metaSegs, penIndexToL
       if (endChanged) {
         A.internal_gap_bool = computeInternalGapBool({
           candles,
+          acc,
           arrEntries,
           seg: A,
           penIndexToLocalEntryIdx,
@@ -379,6 +332,8 @@ export function computeSegments(candles, reducedBars, pensConfirmed) {
     return { metaSegments, finalSegments };
   }
 
+  const acc = createChanAccessors(candles);
+
   // ===== 分岛 =====
   const bySeq = new Map(); // seq_id -> Array<{ p, pi }>
   for (let pi = 0; pi < pens.length; pi++) {
@@ -392,37 +347,29 @@ export function computeSegments(candles, reducedBars, pensConfirmed) {
     return String(p?.dir_enum || "").toUpperCase() === "UP";
   }
 
-  function rbHighByRedIdx(redIdx) {
-    const ri = toNonNegIntIdx(redIdx);
-    if (ri == null || ri >= rbs.length) return NaN;
-    const gi = toNonNegIntIdx(rbs[ri]?.g_idx_orig);
-    if (gi == null) return NaN;
-    const v = candleH(candles, gi);
-    return Number.isFinite(v) ? v : NaN;
-  }
-  function rbLowByRedIdx(redIdx) {
-    const ri = toNonNegIntIdx(redIdx);
-    if (ri == null || ri >= rbs.length) return NaN;
-    const di = toNonNegIntIdx(rbs[ri]?.d_idx_orig);
-    if (di == null) return NaN;
-    const v = candleL(candles, di);
-    return Number.isFinite(v) ? v : NaN;
-  }
-  function penLow(p) {
-    const a = rbLowByRedIdx(p?.start_idx_red);
-    const b = rbLowByRedIdx(p?.end_idx_red);
-    return Math.min(a, b);
-  }
-  function penHigh(p) {
-    const a = rbHighByRedIdx(p?.start_idx_red);
-    const b = rbHighByRedIdx(p?.end_idx_red);
-    return Math.max(a, b);
+  // 使用 accessors 统一“单笔价域”计算：按笔的 start/end_idx_red -> reducedBar 的极值价域组合
+  function penRangeByReducedExtremes(p) {
+    const s = toNonNegIntIdx(p?.start_idx_red);
+    const e = toNonNegIntIdx(p?.end_idx_red);
+    if (s == null || e == null || s < 0 || e < 0 || s >= rbs.length || e >= rbs.length) return null;
+
+    const rs = acc.reducedBarRangeByExtreme(rbs[s]);
+    const re = acc.reducedBarRangeByExtreme(rbs[e]);
+    if (!rs || !re) return null;
+
+    return {
+      lo: Math.min(rs.lo, re.lo),
+      hi: Math.max(rs.hi, re.hi),
+    };
   }
 
   function checkPair(pCur, pNext) {
-    const l1 = penLow(pCur), h1 = penHigh(pCur);
-    const l2 = penLow(pNext), h2 = penHigh(pNext);
-    if (![l1, h1, l2, h2].every((x) => Number.isFinite(x))) return { ok: false };
+    const r1 = penRangeByReducedExtremes(pCur);
+    const r2 = penRangeByReducedExtremes(pNext);
+    if (!r1 || !r2) return { ok: false };
+
+    const l1 = r1.lo, h1 = r1.hi;
+    const l2 = r2.lo, h2 = r2.hi;
 
     const overlapLow = Math.max(l1, l2);
     const overlapHigh = Math.min(h1, h2);
@@ -528,6 +475,7 @@ export function computeSegments(candles, reducedBars, pensConfirmed) {
 
     const finals = buildFinalSegmentsInOneSeq({
       candles,
+      acc,
       arrEntries: arr,
       metaSegs,
       penIndexToLocalEntryIdx,
