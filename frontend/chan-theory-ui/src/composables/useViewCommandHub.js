@@ -2,19 +2,11 @@
 // ==============================
 // V5.6 - 清理 markerWidthPx/hostWidthPx 旧宽度体系（去冗余）
 //
-// 背景：
-//   - 主图/量窗的 marker 宽度已统一迁移到 ECharts 实例侧 WidthController + widthState：
-//       * 宽度估算在实例侧完成（基于 dataZoom + chartWidth + barPercent + markerPercent）
-//       * series.symbolSize 动态读取 widthState
-//       * 宽度刷新通过空 patch 触发 ECharts 重算 symbolSize
-//   - 因此 ViewCommandHub 内的 markerWidthPx/hostWidthPx/_recalcMarkerWidth 体系已无任何真实消费，
-//     且属于“旧链路残留”，应彻底删除以减少维护成本与潜在隐性开销。
-//
-// 本轮改动（零冗余）：
-//   1) 删除 markerWidthPx、hostWidthPx、_recalcMarkerWidth
-//   2) 删除 setHostWidth 与 execute('ResizeHost') 分支
-//   3) 删除 getState 中的 markerWidthPx/hostWidthPx 输出字段
-//   4) 删除所有分支中对 _recalcMarkerWidth 的调用
+// 本轮修复（tooltip 基点持久化）：
+//   - 新增 tipTs：最后一次“显示 tooltip”的 bar.ts（独立于 rightTs 窗口锚点）
+//   - 唯一写入语义：由图表 showTip 事件触发 SyncTipTs（立即持久化）
+//   - 键盘左右移动只读取 tipTs 作为基点（映射到 idx），并通过 showTip 推进，
+//     持久化仍由 showTip 监听完成，保证单入口。
 // ==============================
 
 import { ref, computed } from "vue";
@@ -34,6 +26,10 @@ export function useViewCommandHub() {
 
   const barsCount = ref(1);
   const rightTs = ref(null);
+
+  // NEW: 最后一次显示 tooltip 的 bar.ts（键盘移动基点）
+  const tipTs = ref(null);
+
   const allRows = ref(0);
   const currentFreq = ref(settings.preferences.freq || "1d");
   const currentSymbol = ref(settings.preferences.lastSymbol || "");
@@ -95,21 +91,18 @@ export function useViewCommandHub() {
 
   let _persistTimer = null;
 
-  /**
-   * 立即持久化当前视图状态（使用 useUserSettings.viewState + saveAll）
-   * - 仅由 _persistImmediate / _persistDebounced 调用
-   * - 避免在高频 dataZoom 处理函数中直接触发
-   */
   function _doRealPersist() {
     try {
       const symbol = String(currentSymbol.value || "").trim();
       const freq = String(currentFreq.value || "").trim() || "1d";
 
-      // 使用 viewState 子模块的 API 写入配置
+      // 窗口锚点（原语义）
       settings.setViewBars(symbol, freq, barsCount.value);
       settings.setRightTs(symbol, freq, rightTs.value);
 
-      // 统一调用 saveAll，将所有域（preferences/viewState/chartDisplay/chanTheory）一并落盘
+      // tooltip 基点（新语义，独立于窗口锚点）
+      settings.setTipTs(symbol, freq, tipTs.value);
+
       settings.saveAll();
     } catch (e) {
       console.error("[CommandHub] persist failed:", e);
@@ -171,8 +164,11 @@ export function useViewCommandHub() {
     );
     const savedTs = settings.getRightTs(currentSymbol.value, currentFreq.value);
 
+    const savedTipTs = settings.getTipTs(currentSymbol.value, currentFreq.value);
+
     barsCount.value = Math.max(1, Number(savedBars || 1));
     rightTs.value = Number.isFinite(+savedTs) ? +savedTs : null;
+    tipTs.value = Number.isFinite(+savedTipTs) ? +savedTipTs : null;
 
     _scheduleNotify();
   }
@@ -195,7 +191,12 @@ export function useViewCommandHub() {
       }
     }
 
-    // 数据集边界变化通常是低频事件（换标的/换频率），立即持久化
+    // tipTs 只做边界钳制（不主动改语义）
+    if (tipTs.value != null) {
+      if (minTsRef.value != null && tipTs.value < +minTsRef.value) tipTs.value = +minTsRef.value;
+      if (maxTsRef.value != null && tipTs.value > +maxTsRef.value) tipTs.value = +maxTsRef.value;
+    }
+
     _persistImmediate();
     _scheduleNotify();
   }
@@ -208,6 +209,7 @@ export function useViewCommandHub() {
     return {
       barsCount: Math.max(1, Number(barsCount.value || 1)),
       rightTs: rightTs.value != null ? Number(rightTs.value) : null,
+      tipTs: tipTs.value != null ? Number(tipTs.value) : null,
       leftTs: leftTs.value,
       atRightEdge: atRightEdge.value,
       allRows: Math.max(0, Number(allRows.value || 0)),
@@ -249,7 +251,28 @@ export function useViewCommandHub() {
         break;
       }
 
-      // ===== 系统2：区间套逻辑（独立实现，不依赖预设）=====
+      // NEW: tooltip 基点同步（唯一语义入口：由 chart 的 showTip 事件驱动）
+      case "SyncTipTs": {
+        const next = Number.isFinite(+p.tipTs) ? +p.tipTs : null;
+        if (next == null) break;
+
+        let v = next;
+        if (minTsRef.value != null && v < +minTsRef.value) v = +minTsRef.value;
+        if (maxTsRef.value != null && v > +maxTsRef.value) v = +maxTsRef.value;
+
+        if (tipTs.value != null && Number(tipTs.value) === Number(v)) break;
+
+        tipTs.value = v;
+
+        // 你要求：只要显示了 tooltip 的 bar，就立即持久化
+        _persistImmediate();
+
+        if (!p.silent) {
+          _scheduleNotify();
+        }
+        break;
+      }
+
       case "ChangeFreq": {
         const freqOld = String(currentFreq.value || "1d");
         const freqNew = String(p.freq || freqOld);
@@ -259,7 +282,6 @@ export function useViewCommandHub() {
           break;
         }
 
-        // ===== 核心：直接计算时间跨度（不依赖预设）=====
         const barsOld = Math.max(1, Number(barsCount.value || 1));
 
         // 每日柱数表（交易时段：4小时 = 240分钟）
@@ -304,12 +326,6 @@ export function useViewCommandHub() {
         } else {
           barsNew =
             total > 0 ? Math.min(barsTheoretical, total) : barsTheoretical;
-
-          const shortage = Math.max(0, barsTheoretical - total);
-
-          if (shortage > 0) {
-            // 数据不足时的内部提示已移除，仅通过行为体现
-          }
         }
 
         barsCount.value = Math.max(1, barsNew);
@@ -319,6 +335,12 @@ export function useViewCommandHub() {
             rightTs.value = +p.minTs;
           if (Number.isFinite(+p.maxTs) && rightTs.value > +p.maxTs)
             rightTs.value = +p.maxTs;
+        }
+
+        // tipTs 不改变语义，仅钳制
+        if (tipTs.value != null) {
+          if (minTsRef.value != null && tipTs.value < +minTsRef.value) tipTs.value = +minTsRef.value;
+          if (maxTsRef.value != null && tipTs.value > +maxTsRef.value) tipTs.value = +maxTsRef.value;
         }
 
         _persistImmediate();
@@ -383,6 +405,7 @@ export function useViewCommandHub() {
     execute,
     barsCount,
     rightTs,
+    tipTs,
     leftTs,
     atRightEdge,
     currentPresetKey,

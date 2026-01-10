@@ -1,17 +1,21 @@
-// src/composables/viewRenderHub/chartRuntime/chartRegistry.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\viewRenderHub\chartRuntime\chartRegistry.js
 // ==============================
 // 图表实例注册表 + activePanel 管理 + 主图 focus sync
-// 迁移自原 useViewRenderHub：registerChart/unregisterChart/getChart/getActiveChart/setActivePanel/_attachMainFocusSync 等。
 // ==============================
+
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 export function createChartRegistry({ state }) {
   function attachMainFocusSync(chartInstance) {
     if (!chartInstance) return;
 
-    try {
-      chartInstance.off("updateAxisPointer");
-    } catch {}
+    const hub = useViewCommandHub();
 
+    // 清理旧监听，避免重复注册（单一链路）
+    try { chartInstance.off("updateAxisPointer"); } catch {}
+    try { chartInstance.off("showTip"); } catch {}
+
+    // 1) updateAxisPointer：仅用于维护渲染侧 currentFocusIdx（不做持久化）
     try {
       chartInstance.on("updateAxisPointer", (e) => {
         try {
@@ -30,6 +34,28 @@ export function createChartRegistry({ state }) {
         } catch {}
       });
     } catch {}
+
+    // 2) showTip：唯一“持久化 tooltip 基点”的入口
+    // 语义严格按你定义：只要系统显示了某根 bar 的 tooltip，就立刻持久化该 bar.ts。
+    try {
+      chartInstance.on("showTip", (e) => {
+        try {
+          const vm = state.vmRef.vm;
+          const arr = vm?.candles?.value || [];
+          const len = Array.isArray(arr) ? arr.length : 0;
+          if (!len) return;
+
+          const idx0 = Number(e?.dataIndex);
+          if (!Number.isFinite(idx0)) return;
+
+          const idx = Math.max(0, Math.min(len - 1, Math.floor(idx0)));
+          const ts = Number(arr[idx]?.ts);
+          if (!Number.isFinite(ts)) return;
+
+          hub.execute("SyncTipTs", { tipTs: ts, silent: false });
+        } catch {}
+      });
+    } catch {}
   }
 
   function registerChart(panelKey, chartInstance) {
@@ -37,8 +63,6 @@ export function createChartRegistry({ state }) {
 
     state.charts.set(key, chartInstance);
 
-    // hover 模式是否显示 axisPointer 由 hoverMode 模块接管；
-    // registry 只负责存储与主图 focus 绑定。
     if (key === "main") {
       attachMainFocusSync(chartInstance);
     }
@@ -50,9 +74,8 @@ export function createChartRegistry({ state }) {
     try {
       const c = state.charts.get(key);
       if (c && key === "main") {
-        try {
-          c.off("updateAxisPointer");
-        } catch {}
+        try { c.off("updateAxisPointer"); } catch {}
+        try { c.off("showTip"); } catch {}
       }
     } catch {}
 

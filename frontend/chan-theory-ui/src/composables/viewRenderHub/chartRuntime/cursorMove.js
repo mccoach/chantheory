@@ -1,10 +1,13 @@
-// src/composables/viewRenderHub/chartRuntime/cursorMove.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\viewRenderHub\chartRuntime\cursorMove.js
 // ==============================
 // 键盘游标移动（ArrowLeft/ArrowRight）
-// 迁移自原 useViewRenderHub：moveCursorByStep + _getZoomRangeOf + syncFocusPosition 的协同。
 // ==============================
 
+import { useViewCommandHub } from "@/composables/useViewCommandHub";
+
 export function createCursorMove({ state, registry }) {
+  const hub = useViewCommandHub();
+
   function getZoomRangeOf(chartInstance) {
     try {
       const c = chartInstance;
@@ -23,6 +26,24 @@ export function createCursorMove({ state, registry }) {
     return null;
   }
 
+  function resolveIdxByTipTs(ts) {
+    const vm = state.vmRef.vm;
+    if (!vm) return -1;
+
+    const arr = vm.candles.value || [];
+    const len = arr.length;
+    if (!len) return -1;
+
+    const t = Number(ts);
+    if (!Number.isFinite(t)) return -1;
+
+    for (let i = len - 1; i >= 0; i--) {
+      const barTs = Number(arr[i]?.ts);
+      if (Number.isFinite(barTs) && barTs <= t) return i;
+    }
+    return 0;
+  }
+
   function moveCursorByStep(dir) {
     const vm = state.vmRef.vm;
     if (!vm) return;
@@ -36,10 +57,25 @@ export function createCursorMove({ state, registry }) {
     const sIdxNow = zoomRange?.sIdx ?? 0;
     const eIdxNow = zoomRange?.eIdx ?? len - 1;
 
-    let startIdx = state.currentFocusIdx.value;
-    if (startIdx < 0 || startIdx >= len) startIdx = eIdxNow;
+    const st = hub.getState();
+
+    // 基点：最后一次显示 tooltip 的 bar.ts
+    let startIdx = resolveIdxByTipTs(st.tipTs);
+
+    // 若历史没有 tipTs：以当前视窗右端为起点，先 showTip 一次，让 showTip 监听自动持久化 tipTs
+    if (startIdx < 0 || startIdx >= len) {
+      startIdx = Math.max(0, Math.min(len - 1, eIdxNow));
+      registry.syncFocusPosition(startIdx);
+      activeChart?.dispatchAction({
+        type: "showTip",
+        seriesIndex: 0,
+        dataIndex: startIdx,
+      });
+      return;
+    }
 
     const nextIdx = Math.max(0, Math.min(len - 1, startIdx + (dir < 0 ? -1 : 1)));
+
     registry.syncFocusPosition(nextIdx);
 
     activeChart?.dispatchAction({

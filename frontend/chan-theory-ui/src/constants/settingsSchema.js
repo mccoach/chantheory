@@ -62,8 +62,7 @@ export const SETTINGS_SCHEMA = {
   viewState: [
     'viewRightTs',      // 各标的|频率的右端锚点时间戳
     'viewBars',         // 各标的|频率的可见柱数
-    'viewAtRightEdge',  // 各标的|频率的触底状态
-    'viewLastFocusTs',  // 各标的|频率的最后聚焦时间戳
+    'viewTipTs',        // 最后一次显示 tooltip 的 bar.ts
   ],
 };
 

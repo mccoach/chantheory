@@ -111,7 +111,6 @@ const {
   onMouseEnter,
   onMouseLeave,
   scheduleWidthUpdate,
-  scheduleMarkerUpdate,
 } = useChartPanel({
   panelKey,
   vm,
@@ -144,7 +143,6 @@ const {
             // PERF: 仅量窗（VOL/AMOUNT）需要宽度系统刷新
             if (kind === "VOL" || kind === "AMOUNT") {
               scheduleWidthUpdate?.();
-              scheduleMarkerUpdate?.();
             }
           }
         } catch (e) {
