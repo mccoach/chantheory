@@ -2,9 +2,8 @@
 <!-- ==============================
 说明：量窗设置面板（UI-only）
 本轮改动：
-  1) 在“放量标记”行新增“标记宽%”（volDraft.markerPercent），占用后面的第一个空列；
-  2) 放/缩量标记共用该标记宽%；
-  3) reset 路径统一改为 resetter（volResetter.resetPath），删除原“直接赋默认对象”的重置逻辑，保证零冗余。
+  - select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
+  - 控件 getProps 样板代码用工厂函数标准化复用
 ============================== -->
 <template>
   <SettingsGrid
@@ -30,14 +29,16 @@ import {
   LINE_STYLES,
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
-import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
+import {
+  useSettingsRenderer,
+  makeNativeSelect,
+  makeColorInput,
+  makeNumberSpinner,
+} from "@/settings/common/useSettingsRenderer";
 
-// 通过 inject 获取共享的草稿状态
 const volDraft = inject("volDraft");
-// 注入 resetter（来自 IndicatorSettingsShell）
 const volResetter = inject("volResetter");
 
-// MAVOL总控 (三态切换逻辑)
 const mavolTri = useTriMasterToggle({
   items: Object.keys(volDraft.mavolStyles || {}).map((mk) => ({
     get: () => !!volDraft.mavolStyles?.[mk]?.enabled,
@@ -48,7 +49,6 @@ const mavolTri = useTriMasterToggle({
   })),
 });
 
-// 构建行定义
 const rows = computed(() => {
   const vd = volDraft;
   const out = [];
@@ -92,7 +92,6 @@ const rows = computed(() => {
     });
   });
 
-  // 放量标记（新增：标记宽%）
   out.push({
     key: "marker-pump",
     name: "放量标记",
@@ -100,14 +99,12 @@ const rows = computed(() => {
       { key: "pump-shape", label: "形状" },
       { key: "pump-color", label: "颜色" },
       { key: "pump-threshold", label: "阈值" },
-      // NEW: 占用后面的第一个空列（第4列）
       { key: "markerPercent", label: "标记宽%" },
     ],
     check: { type: "single", checked: !!vd.markerPump.enabled },
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 缩量标记（共用 markerPercent，不单独再展示）
   out.push({
     key: "marker-dump",
     name: "缩量标记",
@@ -123,7 +120,6 @@ const rows = computed(() => {
   return out;
 });
 
-// 行级事件处理器
 function onRowToggle(row) {
   const key = String(row.key || "");
   const vd = volDraft;
@@ -144,7 +140,6 @@ function onRowToggle(row) {
   if (key === "marker-dump") vd.markerDump.enabled = !vd.markerDump.enabled;
 }
 
-// 行级事件：单行恢复默认（统一 resetter；只改草稿，不保存）
 function onRowReset(row) {
   const key = String(row.key || "");
 
@@ -161,7 +156,6 @@ function onRowReset(row) {
   }
 
   if (key === "marker-pump") {
-    // 放量行：既重置 markerPump，也重置 markerPercent（因为该参数放在放量行展示）
     volResetter?.resetPath("markerPump");
     volResetter?.resetPath("markerPercent");
     return;
@@ -172,167 +166,118 @@ function onRowReset(row) {
   }
 }
 
-// 使用通用渲染器
 const { renderControl } = useSettingsRenderer({
-  barPercent: {
+  barPercent: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: volDraft.volBar.barPercent,
-      min: UI_LIMITS.barWidthPercent.min,
-      max: UI_LIMITS.barWidthPercent.max,
-      step: UI_LIMITS.barWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (volDraft.volBar.barPercent = v),
-    }),
-  },
-  upColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: volDraft.volBar.upColor,
-      onInput: (e) => (volDraft.volBar.upColor = e.target.value),
-    }),
-  },
-  downColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: volDraft.volBar.downColor,
-      onInput: (e) => (volDraft.volBar.downColor = e.target.value),
-    }),
-  },
+    get: () => volDraft.volBar.barPercent,
+    set: (_, v) => (volDraft.volBar.barPercent = v),
+    min: UI_LIMITS.barWidthPercent.min,
+    max: UI_LIMITS.barWidthPercent.max,
+    step: UI_LIMITS.barWidthPercent.step,
+    integer: true,
+  }),
 
-  // NEW: 量窗标记宽%
-  markerPercent: {
+  upColor: makeColorInput({
+    get: () => volDraft.volBar.upColor,
+    set: (_, v) => (volDraft.volBar.upColor = v),
+  }),
+
+  downColor: makeColorInput({
+    get: () => volDraft.volBar.downColor,
+    set: (_, v) => (volDraft.volBar.downColor = v),
+  }),
+
+  markerPercent: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: volDraft.markerPercent,
-      min: UI_LIMITS.markerWidthPercent.min,
-      max: UI_LIMITS.markerWidthPercent.max,
-      step: UI_LIMITS.markerWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (volDraft.markerPercent = v),
-    }),
-  },
+    get: () => volDraft.markerPercent,
+    set: (_, v) => (volDraft.markerPercent = v),
+    min: UI_LIMITS.markerWidthPercent.min,
+    max: UI_LIMITS.markerWidthPercent.max,
+    step: UI_LIMITS.markerWidthPercent.step,
+    integer: true,
+  }),
 
   ...Object.fromEntries(
     Object.keys(DEFAULT_VOL_SETTINGS.mavolStyles).flatMap((mk) => [
       [
         `mavol-width-${mk}`,
-        {
+        makeNumberSpinner({
           component: NumberSpinner,
-          getProps: () => ({
-            modelValue: volDraft.mavolStyles[mk].width,
-            min: UI_LIMITS.lineWidth.min,
-            max: UI_LIMITS.lineWidth.max,
-            step: UI_LIMITS.lineWidth.step,
-            "frac-digits": 1,
-            "onUpdate:modelValue": (v) => (volDraft.mavolStyles[mk].width = v),
-          }),
-        },
+          get: () => volDraft.mavolStyles[mk].width,
+          set: (_, v) => (volDraft.mavolStyles[mk].width = v),
+          min: UI_LIMITS.lineWidth.min,
+          max: UI_LIMITS.lineWidth.max,
+          step: UI_LIMITS.lineWidth.step,
+          fracDigits: 1,
+        }),
       ],
       [
         `mavol-color-${mk}`,
-        {
-          component: "input",
-          getProps: () => ({
-            class: "input color",
-            type: "color",
-            value: volDraft.mavolStyles[mk].color,
-            onInput: (e) => (volDraft.mavolStyles[mk].color = e.target.value),
-          }),
-        },
+        makeColorInput({
+          get: () => volDraft.mavolStyles[mk].color,
+          set: (_, v) => (volDraft.mavolStyles[mk].color = v),
+        }),
       ],
       [
         `mavol-style-${mk}`,
-        {
-          component: "select",
-          getProps: () => ({
-            class: "input",
-            value: volDraft.mavolStyles[mk].style,
-            onChange: (e) => (volDraft.mavolStyles[mk].style = e.target.value),
-            innerHTML: LINE_STYLES.map(
-              (o) => `<option value="${o.v}">${o.label}</option>`
-            ).join(""),
-          }),
-        },
+        makeNativeSelect({
+          options: LINE_STYLES,
+          get: () => volDraft.mavolStyles[mk].style,
+          set: (_, v) => (volDraft.mavolStyles[mk].style = v),
+        }),
       ],
       [
         `mavol-period-${mk}`,
-        {
+        makeNumberSpinner({
           component: NumberSpinner,
-          getProps: () => ({
-            modelValue: volDraft.mavolStyles[mk].period,
-            min: UI_LIMITS.positiveInteger.min,
-            step: UI_LIMITS.positiveInteger.step,
-            integer: true,
-            "onUpdate:modelValue": (v) => (volDraft.mavolStyles[mk].period = v),
-          }),
-        },
+          get: () => volDraft.mavolStyles[mk].period,
+          set: (_, v) => (volDraft.mavolStyles[mk].period = v),
+          min: UI_LIMITS.positiveInteger.min,
+          step: UI_LIMITS.positiveInteger.step,
+          integer: true,
+        }),
       ],
     ])
   ),
-  "pump-shape": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: volDraft.markerPump.shape,
-      onChange: (e) => (volDraft.markerPump.shape = e.target.value),
-      innerHTML: MARKER_SHAPE_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "pump-color": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: volDraft.markerPump.color,
-      onInput: (e) => (volDraft.markerPump.color = e.target.value),
-    }),
-  },
-  "pump-threshold": {
+
+  "pump-shape": makeNativeSelect({
+    options: MARKER_SHAPE_OPTIONS,
+    get: () => volDraft.markerPump.shape,
+    set: (_, v) => (volDraft.markerPump.shape = v),
+  }),
+
+  "pump-color": makeColorInput({
+    get: () => volDraft.markerPump.color,
+    set: (_, v) => (volDraft.markerPump.color = v),
+  }),
+
+  "pump-threshold": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: volDraft.markerPump.threshold,
-      min: UI_LIMITS.nonNegativeFloat.min,
-      step: UI_LIMITS.nonNegativeFloat.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (volDraft.markerPump.threshold = v),
-    }),
-  },
-  "dump-shape": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: volDraft.markerDump.shape,
-      onChange: (e) => (volDraft.markerDump.shape = e.target.value),
-      innerHTML: MARKER_SHAPE_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "dump-color": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: volDraft.markerDump.color,
-      onInput: (e) => (volDraft.markerDump.color = e.target.value),
-    }),
-  },
-  "dump-threshold": {
+    get: () => volDraft.markerPump.threshold,
+    set: (_, v) => (volDraft.markerPump.threshold = v),
+    min: UI_LIMITS.nonNegativeFloat.min,
+    step: UI_LIMITS.nonNegativeFloat.step,
+    fracDigits: 1,
+  }),
+
+  "dump-shape": makeNativeSelect({
+    options: MARKER_SHAPE_OPTIONS,
+    get: () => volDraft.markerDump.shape,
+    set: (_, v) => (volDraft.markerDump.shape = v),
+  }),
+
+  "dump-color": makeColorInput({
+    get: () => volDraft.markerDump.color,
+    set: (_, v) => (volDraft.markerDump.color = v),
+  }),
+
+  "dump-threshold": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: volDraft.markerDump.threshold,
-      min: UI_LIMITS.nonNegativeFloat.min,
-      step: UI_LIMITS.nonNegativeFloat.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (volDraft.markerDump.threshold = v),
-    }),
-  },
+    get: () => volDraft.markerDump.threshold,
+    set: (_, v) => (volDraft.markerDump.threshold = v),
+    min: UI_LIMITS.nonNegativeFloat.min,
+    step: UI_LIMITS.nonNegativeFloat.step,
+    fracDigits: 1,
+  }),
 });
 </script>

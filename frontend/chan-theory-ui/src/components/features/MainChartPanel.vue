@@ -1,13 +1,19 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartPanel.vue -->
 <!-- ============================== -->
-<!-- 本轮改动：主图分型+涨跌 markerWidth 由通用 WidthController 管理
-     - 每次 renderHub 下发主图 option 并 setOption(notMerge:true) 后，显式调用 scheduleWidthUpdate()
-       作为“option 已落地”的强时序信号，消除竞态。 -->
+<!-- 本轮改动：
+     - 移除主图顶栏 ATR 三输入框（已迁移到 MainChartControls 第二行，Bars 左侧）
+-->
 <template>
   <MainChartControls />
 
-  <div ref="wrap" class="chart" tabindex="0" @mouseenter="onMouseEnter" @mouseleave="onMouseLeave"
-    @dblclick="openSettingsDialog">
+  <div
+    ref="wrap"
+    class="chart"
+    tabindex="0"
+    @mouseenter="onMouseEnter"
+    @mouseleave="onMouseLeave"
+    @dblclick="openSettingsDialog"
+  >
     <div class="top-info">
       <div class="title">{{ displayTitle }}</div>
       <div class="right-box">
@@ -17,13 +23,17 @@
           <transition name="hintfade">
             <span
               v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'"
-              class="badge done">
+              class="badge done"
+            >
               已刷新 {{ refreshStatus.refreshedAtHHMMSS.value }}
             </span>
           </transition>
 
-          <span v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'" class="badge warn"
-            title="近端数据更新失败，当前为历史缓存">
+          <span
+            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'"
+            class="badge warn"
+            title="近端数据更新失败，当前为历史缓存"
+          >
             数据不完整 {{ refreshStatus.refreshedAtHHMMSS.value }}
           </span>
         </div>
@@ -33,15 +43,20 @@
             前
           </button>
           <button class="adj-btn" :class="{ active: isAdjust('none') }" @click="setAdjust('none')">
-            无
+            不
           </button>
           <button class="adj-btn" :class="{ active: isAdjust('hfq') }" @click="setAdjust('hfq')">
             后
           </button>
         </div>
 
-        <button class="btn-settings" @click="openSettingsDialog" title="主图设置" aria-label="主图设置"
-          v-html="SETTINGS_ICON_SVG"></button>
+        <button
+          class="btn-settings"
+          @click="openSettingsDialog"
+          title="主图设置"
+          aria-label="主图设置"
+          v-html="SETTINGS_ICON_SVG"
+        ></button>
       </div>
     </div>
 
@@ -57,7 +72,7 @@
 </template>
 
 <script setup>
-import { inject, ref, onBeforeUnmount, computed } from "vue";
+import { inject, ref, onBeforeUnmount, computed, watch } from "vue";
 import { openMainChartSettings } from "@/settings/mainShell";
 import { useChartPanel } from "@/composables/useChartPanel";
 import { useRefreshStatus } from "@/composables/useRefreshStatus";
@@ -259,7 +274,7 @@ onBeforeUnmount(() => {
   height: 24px;
 }
 
-.adj-btn+.adj-btn {
+.adj-btn + .adj-btn {
   border-left: 1px solid #444;
 }
 

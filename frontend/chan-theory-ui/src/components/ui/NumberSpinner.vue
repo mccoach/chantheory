@@ -1,20 +1,33 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\ui\NumberSpinner.vue -->
-<!-- FIX: Re-added scoped styles to make the component's width configurable from the parent. -->
+<!--
+V3.4 - NEW: nullCommitFill（清空提交后立即回填显示值）
+解决问题：
+  - 编辑态下组件不会用外部 modelValue 覆盖 editText（避免抢输入），
+    导致“清空回车后业务写回了对齐值，但输入框仍显示空并闪烁”。
+  - 本版本在 allowNullCommit=true 的前提下，支持 nullCommitFill：
+      * 当用户清空并提交（Enter/blur）时，控件自身将 editText 立即回填为 fill 值（字符串），
+        无需失焦即可看到对齐数值。
+兼容性：
+  - allowNullCommit 默认 false，nullCommitFill 默认 null，其他使用点行为完全不变。
+-->
 <template>
   <div
     class="numspin"
     :class="{ compact, disabled }"
     @wheel.prevent="onWheel"
+    data-ct-numspin="1"
+    :data-editing="isEditing ? '1' : '0'"
   >
     <input
       ref="inp"
       type="text"
       class="numspin-input"
-      :value="displayValue"
+      :value="displayText"
       :disabled="disabled"
       inputmode="numeric"
       :pattern="integer ? '^-?\\d*$' : '^-?\\d*(?:\\.\\d*)?$'"
       v-select-all
+      @focus="onFocus"
       @input="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
@@ -27,7 +40,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch, nextTick } from "vue";
 import { clampNumber } from "@/utils/numberUtils";
 
 const props = defineProps({
@@ -38,54 +51,45 @@ const props = defineProps({
   disabled: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
   integer: { type: Boolean, default: false },
-  fracDigits: { type: Number, default: -1 }, // -1=不控制；>=0 固定位数
-  padDigits: { type: Number, default: 0 },   // 0=不控制；>0 整数位左补零
+  fracDigits: { type: Number, default: -1 }, // -1=不控制；>=0 固定位数（提交时生效）
+  padDigits: { type: Number, default: 0 },   // 0=不控制；>0 整数位左补零（展示态生效）
+
+  // NEW: 是否允许把“清空”作为一次有效提交（提交 null）
+  // 默认 false，保证其它使用点行为完全不变。
+  allowNullCommit: { type: Boolean, default: false },
+
+  // NEW: 清空提交后回填（返回 number|string|null）
+  // - 仅在 allowNullCommit=true 且用户清空提交时使用
+  // - 既可以传一个固定值，也可以传函数（建议函数以读取最新对齐值）
+  nullCommitFill: { type: [Function, Number, String, null], default: null },
 });
 
-const emit = defineEmits(["update:modelValue", "blur"]);
+// NEW: 增加 commit 事件
+const emit = defineEmits(["update:modelValue", "blur", "commit"]);
 const inp = ref(null);
 
-// NEW: 稳定舍入，避免 0.30000000000000004
+// ===== 编辑态：输入过程中不进行“纠错式提交” =====
+const isEditing = ref(false);
+const editText = ref("");
+const focusSnapshot = ref(null);
+
 function roundTo(n, d) {
   if (!Number.isFinite(n)) return n;
   if (!Number.isFinite(d) || d < 0) return n;
   const f = Math.pow(10, d);
-  // 使用 Number.EPSILON 提升稳定性
   return Math.round((n + Number.EPSILON) * f) / f;
 }
 
-// NEW: 将任意输入字符串解析为数值并按规则裁剪
-function normalizeNumber(str) {
-  const t = String(str ?? "").trim();
-  if (t === "" || t === "-" || t === "." || t === "-.") return null; // 编辑中间态
-  const n = Number(t);
-  if (!Number.isFinite(n)) return null;
-  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
-  const rounded = dEff >= 0 ? roundTo(n, dEff) : n;
-  const clamped = clampNumber(rounded, {
-    min: props.min,
-    max: props.max,
-    integer: props.integer,
-  });
-  return dEff >= 0 ? roundTo(clamped, dEff) : clamped;
-}
-
-// NEW: 显示层格式化（整数补零 + 小数固定位数）
-function formatWithPadAndFrac(val) {
-  // 先转为字符串（保持外部数值）
-  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+// 展示态格式化（非编辑态）
+function formatDisplay(val) {
   let n = Number(val);
-  if (!Number.isFinite(n)) {
-    const raw = String(val ?? "");
-    return raw;
-  }
-  if (dEff >= 0) n = roundTo(n, dEff);
-  let s =
-    dEff >= 0
-      ? n.toFixed(dEff)             // 固定小数位展示
-      : String(n);
+  if (!Number.isFinite(n)) return String(val ?? "");
 
-  // 前导零：仅作用整数部分
+  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+  if (dEff >= 0) n = roundTo(n, dEff);
+
+  let s = dEff >= 0 ? n.toFixed(dEff) : String(n);
+
   const digits = Number.isFinite(props.padDigits) ? Math.max(0, Math.floor(props.padDigits)) : 0;
   if (digits <= 0) return s;
 
@@ -94,6 +98,7 @@ function formatWithPadAndFrac(val) {
     sign = "-";
     s = s.slice(1);
   }
+
   let intPart = s;
   let fracPart = "";
   const dotIdx = s.indexOf(".");
@@ -102,59 +107,201 @@ function formatWithPadAndFrac(val) {
     fracPart = s.slice(dotIdx + 1);
   }
 
-  // 仅在整数/小数部分都是数字时进行填充，避免用户输入阶段被干扰
   if (!/^\d*$/.test(intPart) || (fracPart && !/^\d*$/.test(fracPart))) {
-    return (sign + s); // 异常时原样返回
+    return sign + s;
   }
+
   const padded = intPart.length >= digits ? intPart : "0".repeat(digits - intPart.length) + intPart;
-  return sign + (fracPart ? `${padded}.${fracPart}` : padded);
+  return sign + (dotIdx >= 0 ? `${padded}.${fracPart}` : padded);
 }
 
-const displayValue = computed(() => formatWithPadAndFrac(props.modelValue));
+// 提交态解析：一次性 normalize + clamp + round
+function normalizeAndClampFromText(text) {
+  const t = String(text ?? "").trim();
+
+  // 中间态不提交（默认行为）
+  if (t === "" || t === "-" || t === "." || t === "-.") return null;
+
+  const n0 = Number(t);
+  if (!Number.isFinite(n0)) return null;
+
+  const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
+
+  let n = dEff >= 0 ? roundTo(n0, dEff) : n0;
+  n = clampNumber(n, { min: props.min, max: props.max, integer: props.integer });
+  n = dEff >= 0 ? roundTo(n, dEff) : n;
+
+  return n;
+}
+
+// 外部 modelValue 变化：不抢编辑输入
+watch(
+  () => props.modelValue,
+  (v) => {
+    // 外部变更不抢编辑输入
+    if (isEditing.value) return;
+    editText.value = formatDisplay(v);
+  },
+  { immediate: true }
+);
+
+const displayText = computed(() => {
+  return isEditing.value ? editText.value : formatDisplay(props.modelValue);
+});
+
+function onFocus() {
+  if (props.disabled) return;
+
+  isEditing.value = true;
+  focusSnapshot.value = props.modelValue;
+  // 进入编辑态：用当前展示值作为初始文本（避免补零干扰）
+  editText.value = formatDisplay(props.modelValue);
+}
 
 function onInput(e) {
   if (props.disabled) return;
-  const t = String(e.target.value ?? "");
-  // 编辑中间态不触发修改，避免抖动
-  if (t === "" || t === "-" || t === "." || t === "-.") return;
-  const n = normalizeNumber(t);
-  if (n == null) return;
-  emit("update:modelValue", n);
+  isEditing.value = true;
+  editText.value = String(e?.target?.value ?? "");
 }
+
+function emitCommit(value, source) {
+  emit("commit", { value, source: String(source || "unknown") });
+}
+
+function resolveNullFillValue() {
+  try {
+    if (typeof props.nullCommitFill === "function") {
+      return props.nullCommitFill();
+    }
+    return props.nullCommitFill;
+  } catch {
+    return null;
+  }
+}
+
+function commitIfPossible(source) {
+  const raw = String(editText.value ?? "");
+  const t = raw.trim();
+
+  if (props.allowNullCommit === true && t === "") {
+    emit("update:modelValue", null);
+    emitCommit(null, source);
+
+    // NEW: 立即回填显示（仍保持编辑态与焦点）
+    const fill = resolveNullFillValue();
+    if (fill != null && fill !== "") {
+      editText.value = formatDisplay(fill);
+      // 让外部也尽快收敛到同一个值（业务可能会在 confirmEdit 里再 set 一次）
+      const nFill = Number(fill);
+      if (Number.isFinite(nFill)) {
+        emit("update:modelValue", nFill);
+        // 注意：这里不 emit commit(nFill)，避免一次 Enter 产生两次“提交语义”
+      } else {
+        // 非数字则只回填文本（不改 modelValue）
+      }
+    } else {
+      editText.value = "";
+    }
+
+    // 确保光标状态稳定
+    try {
+      nextTick(() => inp.value?.focus?.());
+    } catch {}
+
+    return true;
+  }
+
+  const n = normalizeAndClampFromText(editText.value);
+  if (n == null) return false;
+
+  emit("update:modelValue", n);
+  editText.value = formatDisplay(n);
+  emitCommit(n, source);
+
+  return true;
+}
+
+function cancelToSnapshot() {
+  emit("update:modelValue", focusSnapshot.value);
+  editText.value = formatDisplay(focusSnapshot.value);
+}
+
 function onKeydown(e) {
   if (props.disabled) return;
+
   if (e.key === "ArrowUp") {
     e.preventDefault();
     stepBy(+props.step);
-  } else if (e.key === "ArrowDown") {
+    return;
+  }
+  if (e.key === "ArrowDown") {
     e.preventDefault();
     stepBy(-props.step);
+    return;
+  }
+
+  // 编辑态优先：Esc 回滚，Enter 提交
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelToSnapshot();
+    // 保持焦点，方便继续输入
+    try { inp.value?.focus?.(); } catch {}
+    return;
+  }
+
+  if (e.key === "Enter") {
+    e.preventDefault();
+    e.stopPropagation();
+    commitIfPossible("enter");
+    return;
   }
 }
+
 function onWheel(e) {
   if (props.disabled) return;
   const delta = e.deltaY < 0 ? +props.step : -props.step;
   stepBy(delta);
 }
+
 function stepBy(delta) {
   if (props.disabled) return;
-  const base = normalizeNumber(props.modelValue);
-  const curr = base == null ? 0 : base;
+
+  const baseFromText = normalizeAndClampFromText(editText.value);
+  const baseFromModel = Number(props.modelValue);
+  const curr =
+    baseFromText != null
+      ? baseFromText
+      : (Number.isFinite(baseFromModel) ? baseFromModel : 0);
+
   const dEff = props.integer ? 0 : (props.fracDigits >= 0 ? props.fracDigits : -1);
-  let next = curr + delta;
+
+  let next = curr + Number(delta || 0);
   if (dEff >= 0) next = roundTo(next, dEff);
-  next = clampNumber(next, {
-    min: props.min,
-    max: props.max,
-    integer: props.integer,
-  });
+
+  next = clampNumber(next, { min: props.min, max: props.max, integer: props.integer });
   if (dEff >= 0) next = roundTo(next, dEff);
-  if (next !== curr) emit("update:modelValue", next);
+
+  emit("update:modelValue", next);
+
+  // 步进/滚轮不视为“提交完成”，不 emit commit
+  if (isEditing.value) {
+    editText.value = formatDisplay(next);
+  }
 }
+
 function onBlur() {
   if (props.disabled) return;
-  const n = normalizeNumber(props.modelValue);
-  if (n != null) emit("update:modelValue", n);
+
+  const ok = commitIfPossible("blur");
+  if (!ok) {
+    // 默认行为：非法/中间态回退到当前 modelValue 的展示值
+    editText.value = formatDisplay(props.modelValue);
+  }
+
+  isEditing.value = false;
+  focusSnapshot.value = null;
+
   emit("blur");
 }
 </script>
@@ -163,7 +310,7 @@ function onBlur() {
 .numspin {
   display: inline-flex;
   align-items: center;
-  width: 100%; /* 组件宽度占满其容器 */
+  width: 100%;
   height: 28px;
   background: #0f0f0f;
   color: #ddd;
@@ -176,8 +323,8 @@ function onBlur() {
   cursor: not-allowed;
 }
 .numspin-input {
-  flex-grow: 1; /* 占据所有剩余空间 */
-  width: 100%; /* 关键：输入框宽度占满 .numspin */
+  flex-grow: 1;
+  width: 100%;
   height: 100%;
   background: transparent;
   color: #ddd;

@@ -1,6 +1,11 @@
 // frontend/src/charts/options/tooltips/index.js
 // ==============================
-// V3.1 - Volume tooltip 放/缩状态改为按 idx 实时计算（不依赖 marker 点集是否命中）
+// V4.1 - 主图 Tooltip：TR/MATR/ATR_stop 显式注入版（职责清晰、无隐式依赖）
+//
+// 变更要点：
+//   1) makeMainTooltipFormatter 显式接收 indicators（由主图 builder 注入）
+//   2) TR/MATR 永不出图：tooltip 通过 indicators 只读展示（不重复计算）
+//   3) tooltip 顺序：价格(GD OHL C) -> MA 均线族 -> TR -> 各 MATR/ATR_stop 对
 // ==============================
 
 import { formatNumberScaled } from "@/utils/numberUtils";
@@ -29,45 +34,18 @@ function renderRow({ color, label, value }) {
   return `<div>${dot}${label}: ${value}</div>`;
 }
 
-/**
- * 从 params 数组中查找第一个匹配条件的项
- */
-function findFirst(params, pred) {
-  return Array.isArray(params) ? params.find(pred) : null;
-}
-
-// ==============================
-// 核心：统一时间提取逻辑
-// ==============================
-
-/**
- * 智能提取 Tooltip 的时间标签
- *
- * 职责：
- *   - 从 ECharts params 中提取 axisValue
- *   - 智能识别类型（对象/字符串/数字/时间戳）
- *   - 格式化为可读时间字符串
- *
- * 支持的数据源：
- *   - xAxis.data = [{ts, o, h, l, c, v}, ...]  → axisValue 是对象
- *   - xAxis.data = ["2003-10-09", ...]         → axisValue 是字符串
- *   - xAxis.data = [1065682800000, ...]        → axisValue 是时间戳
- *
- * @param {Array} params - ECharts tooltip params
- * @param {string} freq - 频率（用于判断格式）
- * @returns {string} 格式化后的时间字符串
- */
-function extractTimeLabel(params, freq) {
+function extractTimeLabel(params, _freq) {
   if (!Array.isArray(params) || !params.length) return "";
-
   const rawLabel = params[0].axisValue || params[0].axisValueLabel || "";
-
-  // 这里直接返回字符串，不再进行频率格式化
   return String(rawLabel);
 }
 
+function asIndicators(x) {
+  return x && typeof x === "object" ? x : {};
+}
+
 // ==============================
-// 主图 Tooltip Formatter
+// 主图 Tooltip Formatter（显式注入 indicators）
 // ==============================
 
 export function makeMainTooltipFormatter({
@@ -75,20 +53,67 @@ export function makeMainTooltipFormatter({
   chartType,
   freq,
   candles,
+  indicators, // NEW: 显式注入（唯一来源）
   maConfigs,
   adjust,
   klineStyle,
   reducedBars,
   mapOrigToReduced,
+  mergedGDByOrigIdx,
+  atrStopSettings,
 }) {
   const list = Array.isArray(candles) ? candles : [];
+  const inds = asIndicators(indicators);
+
   const KS = klineStyle || DEFAULT_KLINE_STYLE || {};
   const MK = KS.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
+  const gdArr = Array.isArray(mergedGDByOrigIdx) ? mergedGDByOrigIdx : null;
+
+  // TR 永远显示（只读）
+  const TR_KEY = "ATR_TR";
+
+  // MATR keys（TR 的移动平均）：与 ATR_stop 成对
+  const MATR_KEYS = {
+    fixedLong: "MATR_FIXED_LONG",
+    fixedShort: "MATR_FIXED_SHORT",
+    chanLong: "MATR_CHAN_LONG",
+    chanShort: "MATR_CHAN_SHORT",
+  };
+
+  // ATR_stop keys（最终止损价）
+  const STOP_KEYS = {
+    fixedLong: "ATR_FIXED_LONG",
+    fixedShort: "ATR_FIXED_SHORT",
+    chanLong: "ATR_CHAN_LONG",
+    chanShort: "ATR_CHAN_SHORT",
+  };
+
+  // NEW: 统一从 atrStopSettings 取对应线颜色（与出图线一致）
+  function getAtrLineColor(pairKey) {
+    const s = atrStopSettings && typeof atrStopSettings === "object" ? atrStopSettings : null;
+    if (!s) return null;
+
+    if (pairKey === "fixedLong") return s.fixed?.long?.color || null;
+    if (pairKey === "fixedShort") return s.fixed?.short?.color || null;
+    if (pairKey === "chanLong") return s.chandelier?.long?.color || null;
+    if (pairKey === "chanShort") return s.chandelier?.short?.color || null;
+
+    return null;
+  }
+
+  function enabledFlags() {
+    const s = atrStopSettings && typeof atrStopSettings === "object" ? atrStopSettings : null;
+    return {
+      fixedLong: s?.fixed?.long?.enabled === true,
+      fixedShort: s?.fixed?.short?.enabled === true,
+      chanLong: s?.chandelier?.long?.enabled === true,
+      chanShort: s?.chandelier?.short?.enabled === true,
+    };
+  }
 
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
 
-    // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
     const adjLabel = { qfq: "前复权", hfq: "后复权" }[adjust] || "";
 
@@ -96,7 +121,7 @@ export function makeMainTooltipFormatter({
     const idx = params[0].dataIndex ?? 0;
     const k = list[idx] || {};
 
-    // 合并K方向色
+    // ===== 价格组（G/D/O/H/L/C）=====
     let mergedDotColor = null;
     try {
       const entry = mapOrigToReduced && mapOrigToReduced[idx];
@@ -112,26 +137,17 @@ export function makeMainTooltipFormatter({
       if (dir !== 0) {
         mergedDotColor = dir > 0 ? MK.upColor : MK.downColor;
       }
-    } catch {}
+    } catch { }
 
-    // G/D（来自合并K极值；若无映射退到原始K的 h/l）
-    let G = k.h,
-      D = k.l;
+    let G = null;
+    let D = null;
     try {
-      const entry = mapOrigToReduced && mapOrigToReduced[idx];
-      const reducedIdx =
-        entry && typeof entry.reduced_idx === "number"
-          ? entry.reduced_idx
-          : null;
-      const rb =
-        reducedIdx != null && reducedBars && reducedBars[reducedIdx]
-          ? reducedBars[reducedIdx]
-          : null;
-      if (rb && Number.isFinite(rb.g_pri) && Number.isFinite(rb.d_pri)) {
-        G = rb.g_pri;
-        D = rb.d_pri;
-      }
-    } catch {}
+      const gd = gdArr && gdArr[idx] ? gdArr[idx] : null;
+      const g0 = gd ? Number(gd.G) : NaN;
+      const d0 = gd ? Number(gd.D) : NaN;
+      G = Number.isFinite(g0) ? g0 : null;
+      D = Number.isFinite(d0) ? d0 : null;
+    } catch { }
 
     rows.push(
       renderRow({
@@ -153,6 +169,7 @@ export function makeMainTooltipFormatter({
       const origDotColor = origUp
         ? KS.upColor || DEFAULT_KLINE_STYLE.upColor
         : KS.downColor || DEFAULT_KLINE_STYLE.downColor;
+
       rows.push(
         renderRow({
           color: origDotColor,
@@ -183,8 +200,7 @@ export function makeMainTooltipFormatter({
       );
     } else {
       const closeLineColor =
-        (STYLE_PALETTE.lines[5] && STYLE_PALETTE.lines[5].color) ||
-        STYLE_PALETTE.lines[0].color;
+        (STYLE_PALETTE.lines[5] && STYLE_PALETTE.lines[5].color) || STYLE_PALETTE.lines[0].color;
       rows.push(
         renderRow({
           color: closeLineColor,
@@ -194,12 +210,16 @@ export function makeMainTooltipFormatter({
       );
     }
 
-    // MA 行
+    // ===== MA 均线族：从 params 读取（保持原有显示逻辑）=====
+    // 说明：ATR_stop 线也属于 line，但必须移到后面与 MATR 配对显示，因此这里跳过四条 ATR_stop 的 seriesId。
+    const stopIdSet = new Set(Object.values(STOP_KEYS));
+
     for (const p of params) {
       if (p.seriesType === "line" && p.seriesName !== "Close") {
-        const val = Array.isArray(p.value)
-          ? p.value[p.value.length - 1]
-          : p.value;
+        const sid = String(p?.seriesId || "");
+        if (stopIdSet.has(sid)) continue;
+
+        const val = Array.isArray(p.value) ? p.value[p.value.length - 1] : p.value;
         rows.push(
           renderRow({
             color: p.color,
@@ -210,6 +230,59 @@ export function makeMainTooltipFormatter({
       }
     }
 
+    // ===== TR（永远显示；只读 indicators）=====
+    {
+      const trArr = Array.isArray(inds[TR_KEY]) ? inds[TR_KEY] : null;
+      const trVal = trArr ? trArr[idx] : null;
+      rows.push(
+        renderRow({
+          color: null,
+          label: "TR",
+          value: formatNumberScaled(trVal, { digits: 3, allowEmpty: true }),
+        })
+      );
+    }
+
+    // ===== MATR / ATR_stop 对（仅对启用的 stop 显示）=====
+    const enabled = enabledFlags();
+    const pairs = [
+      { k: "fixedLong", matrLabel: "MATR(倍-多)", stopLabel: "ATR止损价(倍-多)" },
+      { k: "fixedShort", matrLabel: "MATR(倍-空)", stopLabel: "ATR止损价(倍-空)" },
+      { k: "chanLong", matrLabel: "MATR(波-多)", stopLabel: "ATR止损价(波-多)" },
+      { k: "chanShort", matrLabel: "MATR(波-空)", stopLabel: "ATR止损价(波-空)" },
+    ];
+
+    for (const it of pairs) {
+      if (!enabled[it.k]) continue;
+
+      const matrKey = MATR_KEYS[it.k];
+      const stopKey = STOP_KEYS[it.k];
+
+      const matrArr = Array.isArray(inds[matrKey]) ? inds[matrKey] : null;
+      const matrVal = matrArr ? matrArr[idx] : null;
+
+      const stopArr = Array.isArray(inds[stopKey]) ? inds[stopKey] : null;
+      const stopVal = stopArr ? stopArr[idx] : null;
+
+      // NEW: MATR 与 ATR_stop 行都使用对应止损线颜色（范式与 MA/价格一致）
+      const pairColor = getAtrLineColor(it.k);
+
+      rows.push(
+        renderRow({
+          color: pairColor,
+          label: it.matrLabel,
+          value: formatNumberScaled(matrVal, { digits: 3, allowEmpty: true }),
+        })
+      );
+      rows.push(
+        renderRow({
+          color: pairColor,
+          label: it.stopLabel,
+          value: formatNumberScaled(stopVal, { digits: 3, allowEmpty: true }),
+        })
+      );
+    }
+
     return [renderHeader(timeLabel, adjLabel), ...rows].join("");
   };
 }
@@ -218,17 +291,14 @@ export function makeMainTooltipFormatter({
 // 量窗 Tooltip Formatter
 // ==============================
 
-export function makeVolumeTooltipFormatter({
-  candles,
-  freq,
-  baseName,
-  mavolMap,
-  volCfg,
-}) {
+function findFirst(params, pred) {
+  return Array.isArray(params) ? params.find(pred) : null;
+}
+
+export function makeVolumeTooltipFormatter({ candles, freq, baseName, mavolMap, volCfg }) {
   const list = Array.isArray(candles) ? candles : [];
   const isVolMode = (baseName || "").toUpperCase() === "VOL";
 
-  // 选择用于标记判定的 prim MA 周期（与 marker 逻辑一致：取启用的最小 period）
   const allPeriods = Object.values(volCfg?.mavolStyles || {})
     .filter((s) => s && s.enabled && Number.isFinite(+s.period) && +s.period > 0)
     .map((s) => +s.period)
@@ -248,7 +318,6 @@ export function makeVolumeTooltipFormatter({
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
 
-    // ===== 使用统一提取函数 =====
     const timeLabel = extractTimeLabel(params, freq);
 
     const p0 = params[0];
@@ -256,24 +325,13 @@ export function makeVolumeTooltipFormatter({
     const k = list[idx] || {};
     const isUp = Number(k.c) >= Number(k.o);
 
-    // 仍保留方向逻辑作为兜底
-    const baseDotColor = isUp
-      ? STYLE_PALETTE.bars.volume.up
-      : STYLE_PALETTE.bars.volume.down;
+    const baseDotColor = isUp ? STYLE_PALETTE.bars.volume.up : STYLE_PALETTE.bars.volume.down;
 
-    const bar = findFirst(
-      params,
-      (x) => (x.seriesType || "").toLowerCase() === "bar"
-    );
-    const baseRawVal = Array.isArray(bar?.value)
-      ? bar.value[bar.value.length - 1]
-      : bar?.value;
+    const bar = findFirst(params, (x) => (x.seriesType || "").toLowerCase() === "bar");
+    const baseRawVal = Array.isArray(bar?.value) ? bar.value[bar.value.length - 1] : bar?.value;
 
-    const baseValText = formatNumberScaled(baseRawVal, {
-      minIntDigitsToScale: 5,
-    });
+    const baseValText = formatNumberScaled(baseRawVal, { minIntDigitsToScale: 5 });
 
-    // NEW: 放/缩状态按 idx 实时判断（不依赖 marker 点集是否命中）
     let statusTag = "";
     if (primN && mavolMap && mavolMap[primN]) {
       const mv = mavolMap[primN]?.[idx];
@@ -300,6 +358,7 @@ export function makeVolumeTooltipFormatter({
     for (const n of periods) {
       const mv = mavolMap[n] ? mavolMap[n][idx] : null;
       if (mv == null || !Number.isFinite(+mv)) continue;
+
       const lineParam = findFirst(
         params,
         (pp) =>
@@ -307,8 +366,10 @@ export function makeVolumeTooltipFormatter({
           typeof pp.seriesName === "string" &&
           pp.seriesName.endsWith(String(n))
       );
+
       const dotColor = lineParam?.color || "#ccc";
       const labelPrefix = isVolMode ? "量MA" : "额MA";
+
       rows.push(
         renderRow({
           color: dotColor,
@@ -348,10 +409,7 @@ export function makeVolumeTooltipFormatter({
           renderRow({
             color: null,
             label: "成交量",
-            value: formatNumberScaled(k.v, {
-              minIntDigitsToScale: 5,
-              suffix: "手",
-            }),
+            value: formatNumberScaled(k.v, { minIntDigitsToScale: 5, suffix: "手" }),
           })
         );
       }

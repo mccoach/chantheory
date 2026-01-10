@@ -1,20 +1,22 @@
 // src/charts/options/builders/main.js
 // ==============================
-// V8.0 - 主图柱宽单一参数版（barPercent 统一控制原始K与合并K）
-// 改动：
-//   1) 新增：统一读取 klineStyle.barPercent（10~100, integer）
-//   2) 原始K(candlestick) 与 合并K(bar stack) 统一显式设置 barWidth
-//   3) 删除旧逻辑：仅当 barPercent < 100 才设置 barWidth（避免隐式默认宽度产生第二套规则）
+// V10.1 - Tooltip 显式注入 indicators（TR/MATR/ATR_stop 纯展示）
+// 本次仅做：makeMainTooltipFormatter 增加 indicators 注入，消除 tooltip 隐式依赖风险。
+// 其它逻辑保持不变。
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
 import { hexToRgba } from "@/utils/colorUtils";
 import { formatNumberScaled } from "@/utils/numberUtils";
-import { STYLE_PALETTE, DEFAULT_KLINE_STYLE, ORIGINAL_KLINE_BAR_SHRINK_PERCENT } from "@/constants";
+import {
+  STYLE_PALETTE,
+  DEFAULT_KLINE_STYLE,
+  ORIGINAL_KLINE_BAR_SHRINK_PERCENT,
+  DEFAULT_ATR_STOP_SETTINGS,
+  MAIN_YAXIS_PADDING_RATIO,
+} from "@/constants";
 import { applyLayout } from "../positioning/layout";
 import { makeMainTooltipFormatter } from "../tooltips/index";
-
-// NEW: Idx-Only 合并K渲染需要从 candles 回溯价格，并动态推导 anchor
 import { candleH, candleL, resolveAnchorIdx } from "@/composables/chan/common";
 
 function asArray(x) {
@@ -22,6 +24,12 @@ function asArray(x) {
 }
 function asIndicators(x) {
   return x && typeof x === "object" ? x : {};
+}
+
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
 }
 
 export function buildMainChartOption(
@@ -35,8 +43,10 @@ export function buildMainChartOption(
     adjust,
     reducedBars,
     mapOrigToReduced,
-    // NEW: 由上层传入（来自 chanSettings.anchorPolicy），用于动态推导合并K落点
     anchorPolicy,
+    mergedGDByOrigIdx,
+    atrStopSettings,
+    atrBasePrice,
   },
   ui
 ) {
@@ -49,12 +59,10 @@ export function buildMainChartOption(
   const ks = klineStyle || DEFAULT_KLINE_STYLE || {};
   const MK = ks.mergedK || DEFAULT_KLINE_STYLE.mergedK || {};
 
-  // ===== NEW: 主图柱宽（单一参数）=====
   const barPercent = Number.isFinite(+ks.barPercent)
     ? Math.max(10, Math.min(100, Math.round(+ks.barPercent)))
     : Math.max(10, Math.min(100, Math.round(+DEFAULT_KLINE_STYLE.barPercent || 88)));
 
-  // ===== NEW: 原始K额外收缩（合并K不受影响）=====
   const shrink = Number.isFinite(+ORIGINAL_KLINE_BAR_SHRINK_PERCENT)
     ? Math.max(0, Math.round(+ORIGINAL_KLINE_BAR_SHRINK_PERCENT))
     : 0;
@@ -81,7 +89,7 @@ export function buildMainChartOption(
         downPct === 0 ? "transparent" : hexToRgba(downColor, downPct);
 
       const ohlc = list.map((d) => [d.o, d.c, d.l, d.h]);
-      const klineSeries = {
+      series.push({
         type: "candlestick",
         name: "原始K线",
         data: ohlc,
@@ -93,20 +101,15 @@ export function buildMainChartOption(
           borderWidth:
             ks.originalBorderWidth ?? DEFAULT_KLINE_STYLE.originalBorderWidth,
         },
-        // CHANGED: 原始K柱宽在现有 barPercent 基础上额外减 shrink%
         barWidth: `${originalBarPercent}%`,
         z: originalZ,
-      };
-
-      series.push(klineSeries);
+      });
     }
 
     if (showMerged && Array.isArray(reducedBars) && reducedBars.length) {
       const outlineW = Math.max(0.1, Number(MK.outlineWidth));
-      const fallbackUp = DEFAULT_KLINE_STYLE.mergedK.upColor;
-      const fallbackDn = DEFAULT_KLINE_STYLE.mergedK.downColor;
-      const upC = MK.upColor || fallbackUp;
-      const dnC = MK.downColor || fallbackDn;
+      const upC = MK.upColor || DEFAULT_KLINE_STYLE.mergedK.upColor;
+      const dnC = MK.downColor || DEFAULT_KLINE_STYLE.mergedK.downColor;
 
       const fillAlpha = Math.max(
         0,
@@ -123,8 +126,6 @@ export function buildMainChartOption(
       const hlSpan = new Array(n).fill(null);
       const upIndexSet = new Set();
 
-      // NEW: Idx-Only 方式计算合并K的 hi/lo（通过 g_idx_orig/d_idx_orig 回溯 candles）
-      // NEW: 合并K落点 idx 通过 resolveAnchorIdx 动态推导（不再依赖 rb.anchor_idx_orig）
       const ap =
         anchorPolicy === "left" || anchorPolicy === "right" || anchorPolicy === "extreme"
           ? anchorPolicy
@@ -151,7 +152,6 @@ export function buildMainChartOption(
         stack: "merged_k",
         data: baseLow,
         itemStyle: { color: "transparent" },
-        // 保持不变：合并K仍使用原 barPercent（现有机制）
         barWidth: `${barPercent}%`,
         barGap: "-100%",
         silent: true,
@@ -167,13 +167,12 @@ export function buildMainChartOption(
           v == null
             ? null
             : {
-                value: v,
-                itemStyle: {
-                  borderColor: upIndexSet.has(i) ? upC : dnC,
-                },
-              }
+              value: v,
+              itemStyle: {
+                borderColor: upIndexSet.has(i) ? upC : dnC,
+              },
+            }
         ),
-        // 保持不变：合并K仍使用原 barPercent（现有机制）
         barWidth: `${barPercent}%`,
         barGap: "-100%",
         itemStyle: {
@@ -208,6 +207,99 @@ export function buildMainChartOption(
         z: 3,
       });
     });
+
+    // ===== ATR_stop 最终止损线（仅绘制最终线；TR/MATR 不出图）=====
+    {
+      const s =
+        atrStopSettings && typeof atrStopSettings === "object"
+          ? atrStopSettings
+          : DEFAULT_ATR_STOP_SETTINGS;
+
+      // 删除总开关字段：以各条线 enabled 为准（用户设置页勾选）
+      // fixed 多
+      if (s.fixed?.long?.enabled === true && Array.isArray(inds.ATR_FIXED_LONG)) {
+        series.push({
+          id: "ATR_FIXED_LONG",
+          type: "line",
+          name: "倍数止损-多",
+          data: inds.ATR_FIXED_LONG,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: {
+            width: Number(s.fixed.long.lineWidth ?? DEFAULT_ATR_STOP_SETTINGS.fixed.long.lineWidth),
+            type: String(s.fixed.long.lineStyle ?? DEFAULT_ATR_STOP_SETTINGS.fixed.long.lineStyle),
+            color: String(s.fixed.long.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.long.color),
+          },
+          itemStyle: { color: String(s.fixed.long.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.long.color) },
+          color: String(s.fixed.long.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.long.color),
+          emphasis: { disabled: true },
+          z: 3,
+        });
+      }
+
+      // fixed 空
+      if (s.fixed?.short?.enabled === true && Array.isArray(inds.ATR_FIXED_SHORT)) {
+        series.push({
+          id: "ATR_FIXED_SHORT",
+          type: "line",
+          name: "倍数止损-空",
+          data: inds.ATR_FIXED_SHORT,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: {
+            width: Number(s.fixed.short.lineWidth ?? DEFAULT_ATR_STOP_SETTINGS.fixed.short.lineWidth),
+            type: String(s.fixed.short.lineStyle ?? DEFAULT_ATR_STOP_SETTINGS.fixed.short.lineStyle),
+            color: String(s.fixed.short.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.short.color),
+          },
+          itemStyle: { color: String(s.fixed.short.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.short.color) },
+          color: String(s.fixed.short.color ?? DEFAULT_ATR_STOP_SETTINGS.fixed.short.color),
+          emphasis: { disabled: true },
+          z: 3,
+        });
+      }
+
+      // chandelier 多
+      if (s.chandelier?.long?.enabled === true && Array.isArray(inds.ATR_CHAN_LONG)) {
+        series.push({
+          id: "ATR_CHAN_LONG",
+          type: "line",
+          name: "波动止损-多",
+          data: inds.ATR_CHAN_LONG,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: {
+            width: Number(s.chandelier.long.lineWidth ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.long.lineWidth),
+            type: String(s.chandelier.long.lineStyle ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.long.lineStyle),
+            color: String(s.chandelier.long.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.long.color),
+          },
+          itemStyle: { color: String(s.chandelier.long.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.long.color) },
+          color: String(s.chandelier.long.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.long.color),
+          emphasis: { disabled: true },
+          z: 3,
+        });
+      }
+
+      // chandelier 空
+      if (s.chandelier?.short?.enabled === true && Array.isArray(inds.ATR_CHAN_SHORT)) {
+        series.push({
+          id: "ATR_CHAN_SHORT",
+          type: "line",
+          name: "波动止损-空",
+          data: inds.ATR_CHAN_SHORT,
+          showSymbol: false,
+          smooth: false,
+          lineStyle: {
+            width: Number(s.chandelier.short.lineWidth ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.short.lineWidth),
+            type: String(s.chandelier.short.lineStyle ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.short.lineStyle),
+            color: String(s.chandelier.short.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.short.color),
+          },
+          itemStyle: { color: String(s.chandelier.short.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.short.color) },
+          color: String(s.chandelier.short.color ?? DEFAULT_ATR_STOP_SETTINGS.chandelier.short.color),
+          emphasis: { disabled: true },
+          z: 3,
+        });
+      }
+    }
   } else {
     const closeLineColor =
       (STYLE_PALETTE.lines[5] && STYLE_PALETTE.lines[5].color) ||
@@ -224,8 +316,45 @@ export function buildMainChartOption(
     });
   }
 
+  const padRatio = clamp(MAIN_YAXIS_PADDING_RATIO, 0, 0.3);
+
   const mainYAxis = {
     scale: true,
+    min: (val) => {
+      try {
+        const mn = Number(val?.min);
+        const mx = Number(val?.max);
+        if (!Number.isFinite(mn) || !Number.isFinite(mx)) return mn;
+        const span = mx - mn;
+        const pad = span > 0 ? span * padRatio : Math.max(Math.abs(mx) || 1, 1) * padRatio;
+        return mn - pad;
+      } catch {
+        return val?.min;
+      }
+    },
+    max: (val) => {
+      try {
+        const mn = Number(val?.min);
+        const mx = Number(val?.max);
+        if (!Number.isFinite(mn) || !Number.isFinite(mx)) return mx;
+        const span = mx - mn;
+        const pad = span > 0 ? span * padRatio : Math.max(Math.abs(mx) || 1, 1) * padRatio;
+        return mx + pad;
+      } catch {
+        return val?.max;
+      }
+    },
+
+    // ===== NEW: 限制主图Y轴标签有效小数位（示范修复）=====
+    axisLabel: {
+      formatter: (v) =>
+        formatNumberScaled(v, {
+          digits: 2,              // 你后续想改 3 位，就改这里
+          allowEmpty: true,
+          minIntDigitsToScale: 9, // 避免价格被缩放成“万/亿”
+        }),
+    },
+
     axisPointer: {
       show: true,
       triggerOn: 'mousemove|click',
@@ -284,11 +413,14 @@ export function buildMainChartOption(
         chartType,
         freq,
         candles: list,
+        indicators: inds, // NEW: 显式注入（唯一来源）
         maConfigs,
         adjust,
         klineStyle: ks,
         reducedBars,
         mapOrigToReduced,
+        mergedGDByOrigIdx,
+        atrStopSettings,
       }),
       className: "ct-fixed-tooltip",
       borderWidth: 0,

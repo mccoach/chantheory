@@ -1,10 +1,11 @@
 // src/charts/options/builders/volume.js
 // ==============================
-// V15.0 - 放/缩量点集迁移到实例侧 MarkerPointsController（去掉 builder 全量扫描 O(N)）
-// 改动：
-//   - 删除 pumpPts/dumpPts 的全量扫描逻辑（O(N)）
-//   - marker series 仍保留（用于渲染），data 初始为空；点集由实例侧最小 patch 更新
-//   - marker symbolSize 仍读取 widthState（宽度由 WidthController 管理）
+// V17.0 - 量窗放/缩量标记回归：一次性全量落地 + 超限保右端完整
+// 说明：
+//   - 点集在 builder 阶段一次性全量计算并落地到 series.data；
+//   - dataZoom 平移不触发任何业务 patch；
+//   - 超限上限归入 DEFAULT_VOL_SETTINGS.markerLimit.maxPoints；
+//   - 超限策略：保右端（最新）完整，截断左侧（更早期）。
 // ==============================
 
 import { getChartTheme } from "@/charts/theme";
@@ -24,6 +25,42 @@ function asArray(x) {
 }
 function asIndicators(x) {
   return x && typeof x === "object" ? x : {};
+}
+
+function buildPrefixSum(arr) {
+  const out = new Array(arr.length);
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number(arr[i]);
+    if (Number.isFinite(v)) sum += v;
+    out[i] = sum;
+  }
+  return out;
+}
+
+function smaAt(i, n, prefixSum) {
+  if (i < n - 1) return null;
+  const a = prefixSum[i] - (i - n >= 0 ? prefixSum[i - n] : 0);
+  return a / n;
+}
+
+function pickMinEnabledPeriod(mavolStyles) {
+  let minP = null;
+  const obj = mavolStyles && typeof mavolStyles === "object" ? mavolStyles : {};
+  for (const v of Object.values(obj)) {
+    if (!v || v.enabled !== true) continue;
+    const p = Number(v.period);
+    if (!Number.isFinite(p) || p <= 0) continue;
+    if (minP == null || p < minP) minP = p;
+  }
+  return minP;
+}
+
+function capPointsKeepRight(arr, maxN) {
+  const a = Array.isArray(arr) ? arr : [];
+  const cap = Math.max(1, Math.floor(Number(maxN || 1)));
+  if (a.length <= cap) return a;
+  return a.slice(a.length - cap);
 }
 
 export function buildVolumeOption(
@@ -124,7 +161,7 @@ export function buildVolumeOption(
     });
   }
 
-  // ===== marker series：仅保留形状/颜色/offset/宽度读取；点集由实例侧 patch =====
+  // ===== marker series：点集在 builder 阶段一次性全量落地 =====
   const markerH = DEFAULT_VOL_MARKER_SIZE.markerHeightPx;
   const markerYOffset = DEFAULT_VOL_MARKER_SIZE.markerYOffsetPx;
   const offsetDownPx = Math.round(markerH + markerYOffset);
@@ -138,13 +175,56 @@ export function buildVolumeOption(
   const pumpEnabled = (volCfg?.markerPump?.enabled ?? true) === true;
   const dumpEnabled = (volCfg?.markerDump?.enabled ?? true) === true;
 
+  const maxPts = Number(
+    volCfg?.markerLimit?.maxPoints ??
+    DEFAULT_VOL_SETTINGS.markerLimit?.maxPoints ??
+    20000
+  );
+
+  let pumpPtsRaw = [];
+  let dumpPtsRaw = [];
+
+  if ((pumpEnabled || dumpEnabled) && list.length) {
+    const primN = pickMinEnabledPeriod(volCfg?.mavolStyles);
+    const pumpK = Number.isFinite(+volCfg?.markerPump?.threshold)
+      ? +volCfg.markerPump.threshold
+      : DEFAULT_VOL_SETTINGS.markerPump.threshold;
+    const dumpK = Number.isFinite(+volCfg?.markerDump?.threshold)
+      ? +volCfg.markerDump.threshold
+      : DEFAULT_VOL_SETTINGS.markerDump.threshold;
+
+    if (primN && primN > 0) {
+      const prefix = buildPrefixSum(baseScaled);
+
+      const pArr = [];
+      const dArr = [];
+
+      for (let i = 0; i < baseScaled.length; i++) {
+        const v = Number(baseScaled[i]);
+        if (!Number.isFinite(v)) continue;
+
+        const m = smaAt(i, primN, prefix);
+        if (!Number.isFinite(m) || m <= 0) continue;
+
+        if (pumpEnabled && pumpK > 0 && v >= pumpK * m) pArr.push([i, 0]);
+        if (dumpEnabled && dumpK > 0 && v <= dumpK * m) dArr.push([i, 0]);
+      }
+
+      pumpPtsRaw = pArr;
+      dumpPtsRaw = dArr;
+    }
+  }
+
+  const pumpPts = capPointsKeepRight(pumpPtsRaw, maxPts);
+  const dumpPts = capPointsKeepRight(dumpPtsRaw, maxPts);
+
   if (pumpEnabled) {
     series.push({
       id: "VOL_PUMP_MARK",
       type: "scatter",
       name: "放量标记",
       yAxisIndex: 1,
-      data: [], // 点集由实例侧 MarkerPointsController patch
+      data: pumpPts,
       symbol:
         volCfg?.markerPump?.shape || DEFAULT_VOL_SETTINGS.markerPump.shape,
       symbolSize: () => [markerW(), markerH],
@@ -164,7 +244,7 @@ export function buildVolumeOption(
       type: "scatter",
       name: "缩量标记",
       yAxisIndex: 1,
-      data: [], // 点集由实例侧 MarkerPointsController patch
+      data: dumpPts,
       symbol:
         volCfg?.markerDump?.shape || DEFAULT_VOL_SETTINGS.markerDump.shape,
       symbolRotate: 180,
@@ -188,7 +268,7 @@ export function buildVolumeOption(
         freq,
         baseName,
         mavolMap,
-        volCfg, // NEW: tooltip 内按 idx 计算放/缩状态
+        volCfg,
       }),
     },
     ui,

@@ -1,10 +1,13 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\interaction\hotkeys\registry.js
 // ==============================
-// V2.2 - 删除无效 UI 链路（openHotkeySettings/openHotkeyHelp 的 showSettings）
-// 说明：
-//   - 当前项目中“打开快捷键设置/帮助”的唯一生效链路是 App.vue 注册的 handlers → dialogManager.open。
-//   - HotkeyService 内置的 this.ui.showSettings 在现有代码里没有任何消费方，属于无效冗余，且会造成一事二主隐患。
-//   - 本轮删除该 UI 状态与对应内置分支，保证所有热键行为只通过 handlers 执行。
+// V2.3 - NEW: 输入框优先（NumberSpinner 编辑态时放行 Esc/Enter 等键，不被全局快捷键系统抢占）
+// 背景：
+//   - 本项目存在全局 HotkeyService（capture 阶段）会拦截 Esc/Ctrl+Enter 等命令；
+//   - 用户要求：当数字框（NumberSpinner）处于编辑态时，Esc=回滚本框，Enter=提交本框，
+//              且 modal 的 Esc 关闭弹窗、Ctrl+Enter 保存等不触发。
+// 实现：
+//   - NumberSpinner 根节点暴露 data-ct-numspin="1" 且 data-editing="1|0"；
+//   - HotkeyService 在 capture 阶段检测：若事件来自编辑态 NumberSpinner，则直接 return 放行。
 // ==============================
 
 import { ref } from "vue";
@@ -142,10 +145,33 @@ export class HotkeyService {
     if (next && typeof next.focus === "function") next.focus(); // 聚焦
   } // 结束 focusNextPrev
 
+  _isEditingNumberSpinnerTarget(e) {
+    try {
+      const t = e?.target;
+      if (!t || typeof t.closest !== "function") return false;
+
+      const root = t.closest('[data-ct-numspin="1"]');
+      if (!root) return false;
+
+      return String(root.getAttribute("data-editing") || "0") === "1";
+    } catch {
+      return false;
+    }
+  }
+
   _onKeydown(e) {
     // 全局 keydown 处理
     const combo = toCombo(e); // 组合规范化
     if (!combo) return; // 无组合 → 忽略
+
+    // ===== NEW: 输入框优先（编辑态 NumberSpinner 放行）=====
+    // 说明：
+    //   - 必须在 capture 阶段尽早 return，避免后续 preventDefault/命令执行；
+    //   - 放行范围：编辑态下所有按键都应交给输入控件自行处理（包括 Esc/Enter/方向键等）。
+    //     这里采取最严格的“完全放行”，以兑现“输入过程不被打断”的要求。
+    if (this._isEditingNumberSpinnerTarget(e)) {
+      return;
+    }
 
     if (isReservedBrowserCombo(e)) return; // 浏览器保留 → 放行
 

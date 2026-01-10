@@ -1,12 +1,12 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\settings\preferences.js
 // ==============================
 // 设置子模块：应用偏好与历史记录
-// V3.0 改动：
-//   - 删除 windowPreset 相关逻辑（改为计算属性）
+// V3.1 改动：
+//   - 修复 setAtrBasePrice 对 null/空串 的处理（避免 Number(null)===0 导致误判）
 // ==============================
 
 import { reactive } from "vue";
-import { DEFAULT_APP_PREFERENCES } from "@/constants";
+import { DEFAULT_APP_PREFERENCES, SYMBOL_HISTORY_MAX, ATR_BASE_PRICE_HISTORY_MAX } from "@/constants";
 
 export function createPreferencesState(localData = {}) {
   const state = reactive({
@@ -45,15 +45,22 @@ export function createPreferencesState(localData = {}) {
         )
       : [],
 
-    // NEW: 各窗体高度持久化（按 panelKey 存 px）
-    // 结构：{ [panelKey: string]: number }
     panelHeights:
       localData.panelHeights && typeof localData.panelHeights === "object"
         ? localData.panelHeights
         : {},
+
+    atrBasePrice:
+      localData.atrBasePrice != null && Number.isFinite(+localData.atrBasePrice)
+        ? +localData.atrBasePrice
+        : null,
+    atrBasePriceHistory: Array.isArray(localData.atrBasePriceHistory)
+      ? localData.atrBasePriceHistory
+          .map((x) => Number(x))
+          .filter((n) => Number.isFinite(n))
+      : [],
   });
 
-  // Setters
   const setters = {
     setLastSymbol: (s) => (state.lastSymbol = String(s || "")),
     setLastStart: (s) => (state.lastStart = String(s || "")),
@@ -99,8 +106,7 @@ export function createPreferencesState(localData = {}) {
       const idx = list.findIndex((x) => String(x.symbol || "") === sym);
       if (idx >= 0) list.splice(idx, 1);
       list.unshift({ symbol: sym, ts: nowTs });
-      const MAX_STORE = 200;
-      state.symbolHistory = list.slice(0, MAX_STORE);
+      state.symbolHistory = list.slice(0, Math.max(1, Number(SYMBOL_HISTORY_MAX || 200)));
     },
     getSymbolHistoryList: () => {
       const list = Array.isArray(state.symbolHistory)
@@ -109,7 +115,6 @@ export function createPreferencesState(localData = {}) {
       return list.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
     },
 
-    // NEW: 窗体高度读写（panelKey -> px）
     setPanelHeight: (panelKey, px) => {
       const k = String(panelKey || "").trim();
       const n = Number(px);
@@ -128,9 +133,44 @@ export function createPreferencesState(localData = {}) {
       const v = state.panelHeights?.[k];
       return Number.isFinite(+v) ? Math.round(+v) : null;
     },
+
+    // ===== FIX: 对 null/空串 特判，避免 Number(null)===0 =====
+    setAtrBasePrice: (v) => {
+      if (v == null || v === "") {
+        state.atrBasePrice = null;
+      } else {
+        const n = Number(v);
+        state.atrBasePrice = Number.isFinite(n) ? n : null;
+      }
+    },
+
+    // ===== NEW: ATR 基准价历史（类似标的历史）=====
+    addAtrBasePriceHistoryEntry: (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return;
+
+      const list = Array.isArray(state.atrBasePriceHistory)
+        ? state.atrBasePriceHistory.slice()
+        : [];
+
+      const i = list.findIndex((x) => Number(x) === n);
+      if (i >= 0) list.splice(i, 1);
+      list.unshift(n);
+
+      state.atrBasePriceHistory = list.slice(
+        0,
+        Math.max(1, Number(ATR_BASE_PRICE_HISTORY_MAX || 50))
+      );
+    },
+
+    getAtrBasePriceHistoryList: () => {
+      const list = Array.isArray(state.atrBasePriceHistory)
+        ? state.atrBasePriceHistory.slice()
+        : [];
+      return list.slice(0);
+    },
   };
 
-  // Storage sync handler
   const onStorage = (newLocal) => {
     Object.keys(state).forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(newLocal, key)) {

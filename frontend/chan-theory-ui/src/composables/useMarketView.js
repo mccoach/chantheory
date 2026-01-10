@@ -1,24 +1,12 @@
 // src/composables/useMarketView.js
 // ==============================
-// V17.1 - Task/Job 一致版（K+因子+档案）
+// V17.5 - force_refresh 指令触发“仅一次”FULL（在数据落地后触发，避免重复 full）
 //
-// 核心职责：
-//   - 根据 code/freq/adjust 驱动 K 线、因子、指标与档案(profile)的加载；
-//   - 统一通过 ensure-data 声明 Task：current_kline/current_factors/current_profile；
-//   - 通过 waitTasksDone 等待完成后，调用各自的快照接口：
-//       * /api/candles         ← current_kline
-//       * /api/factors         ← current_factors
-//       * /api/profile/current ← current_profile
-//
-// 本次主要改动：
-//   1. reload(opts) 支持 with_profile 标志：
-//       - true  时：声明 current_kline + current_factors + current_profile，
-//                  等 k/factors 完成后拉 K+因子，再等 profile 完成后拉档案快照；
-//       - false 时：只声明/等待 current_kline + current_factors。
-//   2. watch(adjust) 由“纯本地复权重算”改为调用 reload({with_profile:false})，
-//      即改复权也会重新走 K+因子快照（stock 继续本地推算复权价，fund 直接用 K 线，不改原算法）。
-//   3. 新增 profile ref（单 symbol 档案快照），由 reload(with_profile=true) 时更新。
-//   4. code 变化时的 watch 不再受 autoStart 影响，任何标的切换都会触发一次 reload({with_profile:true})。
+// 变更说明（按你的最新条文）：
+//   - 仅当实际动作指令为 reload(force_refresh=true) 时触发 FULL；
+//   - FULL 仅触发一次：在 candles/indicators/meta（及可选 profile）落地后触发；
+//   - 不绑定按钮/快捷键等用户行为；不影响 symbol_index 强制刷新；
+//   - 若请求被取消/过期（seq 不匹配）则不触发 FULL。
 // ==============================
 
 import { ref, watch, computed, toRef } from "vue";
@@ -34,8 +22,7 @@ import { computeIndicators } from "@/composables/engines/indicators";
 import { applyAdjustment } from "@/composables/engines/adjustment";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
-import { useEventStream } from "@/composables/useEventStream";
-import { useViewRenderHub } from "@/composables/useViewRenderHub";
+import { useViewRenderHub } from "@/composables/viewRenderHub";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { fetchProfile } from "@/services/profileService";
 
@@ -43,7 +30,6 @@ let _abortCtl = null;
 let _lastReqSeq = 0;
 
 const hub = useViewCommandHub();
-const eventStream = useEventStream();
 
 function ts() {
   return new Date().toISOString();
@@ -66,7 +52,7 @@ export function useMarketView(options = {}) {
   const rawCandles = ref([]);
   const factors = ref([]);
   const indicators = ref({});
-  const profile = ref(null);           // 当前标的档案快照
+  const profile = ref(null);
 
   const chartType = ref(settings.preferences.chartType || "kline");
   const visibleRange = ref({ startStr: "", endStr: "" });
@@ -87,6 +73,8 @@ export function useMarketView(options = {}) {
     useRSI: settings.preferences.useRSI,
     useBOLL: settings.preferences.useBOLL,
     macdSettings: settings.chartDisplay.macdSettings,
+    atrStopSettings: settings.chartDisplay.atrStopSettings,
+    atrBasePrice: settings.preferences.atrBasePrice,
   }));
 
   /**
@@ -107,7 +95,7 @@ export function useMarketView(options = {}) {
 
     try {
       if (_abortCtl) _abortCtl.abort();
-    } catch {}
+    } catch { }
     const ctl = new AbortController();
     _abortCtl = ctl;
     const mySeq = ++_lastReqSeq;
@@ -122,7 +110,7 @@ export function useMarketView(options = {}) {
 
       await renderHub._executeBatch(async () => {
         // ===== Step 1: 声明 Task =====
-        const majorTaskIds = []; // current_kline + current_factors
+        const majorTaskIds = [];
         let profileTaskId = null;
 
         try {
@@ -163,8 +151,10 @@ export function useMarketView(options = {}) {
               profileTaskId = String(pTask.task_id);
             }
           } catch (e) {
-            console.error(`${ts()} [MarketView] declare-current_profile-failed`, e);
-            // 档案任务失败不影响 K+因子主流程
+            console.error(
+              `${ts()} [MarketView] declare-current_profile-failed`,
+              e
+            );
           }
         }
 
@@ -185,10 +175,16 @@ export function useMarketView(options = {}) {
         }
 
         // ===== Step 3: 拉取业务数据（/api/candles + /api/factors）=====
+        const entry = findBySymbol(currentSymbol);
+        const cls = String(entry?.class || "").toLowerCase();
+        const isStock = cls === "stock";
+
+        const requestAdjust = isStock ? "none" : String(currentAdjust || "none");
+
         const [candlesRes, factorsRes] = await Promise.all([
           fetchCandles(currentSymbol, currentFreq, {
             signal: ctl.signal,
-            adjust: currentAdjust,
+            adjust: requestAdjust,
           }),
           fetchFactors(currentSymbol),
         ]);
@@ -211,27 +207,18 @@ export function useMarketView(options = {}) {
         factors.value = factorsRes || [];
 
         if (candlesRes.meta.all_rows > 0) {
-          // 标的类型判定：通过 symbol_index 的 class 字段（stock/fund/...）
-          const entry = findBySymbol(currentSymbol);
-          const cls = String(entry?.class || "").toLowerCase();
-          const isStock = cls === "stock";
-
           const wantAdjust = String(currentAdjust || "none");
 
           let finalCandles = [];
 
           if (isStock) {
-            // === 股票：前端负责复权计算（沿用原逻辑）===
             if (wantAdjust === "none") {
-              // 不复权：直接使用原始 K 线
               finalCandles = rawCandles.value;
             } else {
-              // 需要前/后复权：必须有因子
               const hasFactors =
                 Array.isArray(factors.value) && factors.value.length > 0;
 
               if (!hasFactors) {
-                // 无因子却要求复权 → 视为无法计算，清空数据并标红提示
                 candles.value = [];
                 indicators.value = {};
                 error.value = "复权因子缺失，无法计算复权价格";
@@ -249,15 +236,12 @@ export function useMarketView(options = {}) {
               );
             }
           } else {
-            // === 非股票（如基金）：前端不再做复权运算，直接使用后端返回的价格 ===
             finalCandles = rawCandles.value;
           }
 
           candles.value = finalCandles;
-          indicators.value = computeIndicators(
-            finalCandles,
-            indicatorConfig.value
-          );
+
+          indicators.value = computeIndicators(finalCandles, indicatorConfig.value);
 
           const allRows = finalCandles.length;
           const minTs = finalCandles[0]?.ts;
@@ -301,10 +285,17 @@ export function useMarketView(options = {}) {
             profile.value = pf || null;
           } catch (e) {
             console.error(`${ts()} [MarketView] load-profile-failed`, e);
-            // 档案读取失败不阻断 K 线展示
           }
         }
       });
+
+      // ===== NEW: force_refresh 指令在数据落地后触发一次 FULL =====
+      if (forceRefresh && mySeq === _lastReqSeq && !ctl.signal.aborted) {
+        try {
+          // 仅一次：此时 vm.candles/indicators 已经是最终状态（或已结束），full 计算不会重复。
+          renderHub.requestRender({ intent: "force_full" });
+        } catch {}
+      }
     } catch (e) {
       const msg = String(e?.message || "");
       const isCanceled =
@@ -335,14 +326,11 @@ export function useMarketView(options = {}) {
     }
   }
 
-  // ===== 复权方式变化 → 重新请求 K+因子，再按原逻辑本地复权/不复权 =====
   watch(adjust, () => {
     if (!code.value) return;
-    // 改复权视为一次“主动刷新视图数据”，但不需要档案任务
     reload({ force_refresh: false, with_profile: false });
   });
 
-  // ===== 指标开关变化（MACD/KDJ/RSI/BOLL） → 仅重算指标，不重拉数据 =====
   watch(
     indicatorConfig,
     () => {
@@ -355,22 +343,21 @@ export function useMarketView(options = {}) {
     { deep: true }
   );
 
-  // ===== 标的变化 → 自动加载（K+因子+档案），不再受 autoStart 控制 =====
   watch(code, (newCode) => {
     settings.setLastSymbol(newCode || "");
+
+    settings.setAtrBasePrice(null);
+
     hub.execute("ChangeSymbol", { symbol: String(newCode || "") });
-    // 任何一次 code 变化都视为“主动改标的动作”，必须触发一组完整任务
     reload({ force_refresh: false, with_profile: true });
   });
 
-  // ===== 视图状态变化 → 更新 displayBars =====
   hub.onChange((st) => {
     displayBars.value = Math.max(1, Number(st.barsCount || 1));
   });
 
   hub.initFromPersist(code.value, freq.value);
   if (autoStart) {
-    // 若上层未显式调用 reload，这里可以作为兜底。
     reload({ force_refresh: false, with_profile: true });
   }
 
@@ -385,7 +372,6 @@ export function useMarketView(options = {}) {
       allRows: candles.value.length,
     });
 
-    // 改频率：仅需要 K+因子，不需要档案任务
     reload({ force_refresh: false, with_profile: false });
   }
 

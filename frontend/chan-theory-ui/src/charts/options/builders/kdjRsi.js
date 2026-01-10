@@ -1,9 +1,8 @@
 // src/charts/options/builders/kdjRsi.js
 // ==============================
-// V2.0 - 清理冗余导入
+// V2.1 - 删除未使用导入（getChartTheme）与未使用变量（theme）
 // ==============================
 
-import { getChartTheme } from "@/charts/theme";
 import { STYLE_PALETTE } from "@/constants";
 import { formatNumberScaled } from "@/utils/numberUtils";
 import { makeKdjRsiTooltipFormatter } from "../tooltips/index";
@@ -20,7 +19,6 @@ export function buildKdjOrRsiOption(
   { candles, indicators, freq, useKDJ = false, useRSI = false },
   ui
 ) {
-  const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
   const series = [];

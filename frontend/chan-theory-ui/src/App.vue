@@ -51,7 +51,7 @@
 import { ref, computed, provide, onMounted, inject, onBeforeUnmount, watch } from "vue";
 import { useMarketView } from "./composables/useMarketView";
 import { useViewCommandHub } from "./composables/useViewCommandHub";
-import { useViewRenderHub } from "./composables/useViewRenderHub";
+import { useViewRenderHub } from "./composables/viewRenderHub";
 import { useDialogManager } from "./composables/useDialogManager";
 import { useExportController } from "./composables/useExportController";
 import { useEventStream } from "@/composables/useEventStream";

@@ -186,6 +186,32 @@ export const DEFAULT_EXPORT_SETTINGS = {
   includeDataDefault: false,
 };
 
+// ===== NEW: 历史列表容量常量（统一真相源）=====
+// 说明：
+//   - Symbol 历史最大条数原来写死在 preferences 内（200）；迁移到 constants 统一管理
+export const SYMBOL_HISTORY_MAX = 200;
+
+// ===== NEW: ATR 基准价输入历史最大条数 =====
+export const ATR_BASE_PRICE_HISTORY_MAX = 50;
+
+// ===== NEW: ATR 顶栏/主控输入框（基准价/倍数）限值与步长 =====
+export const ATR_INPUT_LIMITS = {
+  basePrice: {
+    min: 0,
+    max: null,     // null 表示不设上限
+    step: 0.001,
+  },
+  multiple: {
+    min: 0.1,
+    max: 10,
+    step: 0.1,
+  },
+};
+
+// ===== NEW: 主图 Y轴自适应留白比例（按价格范围的比例留边距）=====
+// 默认 0.05 = 上下各留 5% 的价格空间（可随时调整）
+export const MAIN_YAXIS_PADDING_RATIO = 0.05;
+
 // ===== 预设转换工具函数 =====
 
 /**

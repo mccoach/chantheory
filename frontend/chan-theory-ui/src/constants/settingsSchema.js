@@ -1,4 +1,4 @@
-// src/constants/settingsSchema.js
+// E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\constants\settingsSchema.js
 // ==============================
 // 说明：设置配置的领域映射Schema（单一真相源）
 // 职责：定义所有配置项的归属域，供 useSettingsManager 查询
@@ -26,6 +26,10 @@ export const SETTINGS_SCHEMA = {
     'maConfigs',     // MA均线配置（MA5/MA10/.../MA250）
     'volSettings',   // 量窗设置（成交量/成交额/MAVOL/放缩量标记）
     'macdSettings',  // MACD 指标设置
+    "atrStopSettings", // ATR止损线设置
+
+    // NEW: ATR止损刺破标记（主图 overlay）
+    "atrBreachSettings",
   ],
   
   // ===== 缠论参数领域 =====
@@ -49,6 +53,9 @@ export const SETTINGS_SCHEMA = {
     'styleOverrides',   // 样式覆盖配置
     'indicatorPanes',   // 副图窗口配置
     'symbolHistory',    // 标的浏览历史
+
+    // NEW（注意：preferences 里 atrBasePrice/atrBasePriceHistory 目前不通过 settingsSchema/useSettingsManager 管理，
+    // 但仍会被 useUserSettings 聚合并持久化；此处不强制列入 schema，以免引入无使用链路。）
   ],
   
   // ===== 视图状态领域 =====

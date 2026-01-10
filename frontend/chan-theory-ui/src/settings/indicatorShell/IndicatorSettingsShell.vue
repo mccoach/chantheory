@@ -1,19 +1,12 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\indicatorShell\IndicatorSettingsShell.vue -->
 <!-- ==============================
-说明：指标设置壳（数据驱动）
-- 职责：
-  * 作为所有指标设置的统一内容根组件。
-  * 使用 useSettingsManager 为 `volSettings` 创建状态管理器。
-  * 通过 `provide` 将 `volDraft` 草稿对象提供给子面板。
-  * 根据 activeTab 动态渲染 `VolumeSettingsPanel` 或其他指标的占位面板。
-  * 通过 `defineExpose` 暴露 `save` 和 `resetAll` 方法供 App.vue 调用。
-本轮变更：
-  - 删除 save() 中显式 settings.saveAll()：因为 useUserSettings 已对 setter 自动持久化，
-    这里再次 saveAll 属于重复写 localStorage（冗余 I/O）。
+V2.0 - 阶段2：副图设置保存归口 RenderHub（快照比对 + FULL/PATCH 决策）
+说明：
+  - 当前阶段：副图设置项（volSettings/macdSettings）暂不做细粒度 patch，统一视为 FULL（最稳）
+  - 仍实现 baseline/diff/classify 的框架，后续扩展 patch 只需补规则与 RenderHub 执行器
 ============================== -->
 <template>
   <div class="shell-wrap">
-    <!-- 根据当前激活的 tab 动态渲染对应的设置面板 -->
     <div v-if="currentTabKey === 'VOL'">
       <VolumeSettingsPanel />
     </div>
@@ -29,7 +22,6 @@
     <div v-else-if="currentTabKey === 'BOLL'">
       <BollSettingsPanel />
     </div>
-    <!-- 默认或未知 tab 的降级处理 -->
     <div v-else>
       <IndicatorPlaceholderPanel :label="currentTabKey" />
     </div>
@@ -37,7 +29,7 @@
 </template>
 
 <script setup>
-import { inject, ref, watch, provide, } from "vue";
+import { inject, ref, watch, provide, onMounted } from "vue";
 import VolumeSettingsPanel from "@/settings/panels/VolumeSettingsPanel.vue";
 import MacdSettingsPanel from "@/settings/panels/MacdSettingsPanel.vue";
 import KdjSettingsPanel from "@/settings/panels/KdjSettingsPanel.vue";
@@ -45,54 +37,101 @@ import RsiSettingsPanel from "@/settings/panels/RsiSettingsPanel.vue";
 import BollSettingsPanel from "@/settings/panels/BollSettingsPanel.vue";
 import IndicatorPlaceholderPanel from "@/settings/panels/IndicatorPlaceholderPanel.vue";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
+import { useViewRenderHub } from "@/composables/viewRenderHub";
 import { useSettingsManager } from "@/composables/useSettingsManager";
 import { DEFAULT_VOL_SETTINGS, DEFAULT_MACD_SETTINGS } from "@/constants";
 import { createSettingsResetter } from "@/settings/common/useSettingsResetter";
+import {
+  createBaselineKeeper,
+  diffPaths,
+  classifyPaths,
+  buildPatchPlan,
+} from "@/settings/common/settingsChangeClassifier";
 
 const props = defineProps({
   initialKind: { type: String, default: "VOL" },
 });
 
 const hub = useViewCommandHub();
+const renderHub = useViewRenderHub();
 const dialogManager = inject("dialogManager", null);
 
-// 如果初始 kind 是 AMOUNT，映射到 VOL tab
 const getInitialTab = (kind) => (String(kind).toUpperCase() === 'AMOUNT' ? 'VOL' : String(kind).toUpperCase());
 const currentTabKey = ref(getInitialTab(props.initialKind));
 
-// 为成交量/成交额设置创建通用管理器
+// managers
 const volManager = useSettingsManager({
   settingsKey: "volSettings",
   defaultConfig: DEFAULT_VOL_SETTINGS,
 });
 provide("volDraft", volManager.draft);
 
-// 创建并提供重置器（只改草稿）
 const volResetter = createSettingsResetter({
   draft: volManager.draft,
   defaults: DEFAULT_VOL_SETTINGS,
 });
 provide("volResetter", volResetter);
 
-// ===== MACD 设置管理器 =====
 const macdManager = useSettingsManager({
   settingsKey: "macdSettings",
   defaultConfig: DEFAULT_MACD_SETTINGS,
 });
 provide("macdDraft", macdManager.draft);
+
 const macdResetter = createSettingsResetter({
   draft: macdManager.draft,
   defaults: DEFAULT_MACD_SETTINGS,
 });
 provide("macdResetter", macdResetter);
 
-// 暴露 save 和 resetAll 方法（resetAll 仅重置草稿，不保存、不刷新）
+// baseline
+const baseVol = createBaselineKeeper(volManager.draft);
+const baseMacd = createBaselineKeeper(macdManager.draft);
+
+onMounted(() => {
+  baseVol.setBaseline(volManager.draft);
+  baseMacd.setBaseline(macdManager.draft);
+
+  document.addEventListener("click", handleClickOutside);
+});
+
+function handleClickOutside(_e) {
+  // 保持原有行为（此处不处理菜单，TechPanels 内处理）
+}
+
+// 规则：阶段2副图设置统一 FULL（最稳，符合你的 FULL-8/结构性风险规避）
+// 未来若要 pane级 patch，可将这里规则改为 PATCH 并在 RenderHub 中实现对应执行器
+const RULES = [
+  { prefix: "volSettings", mode: "FULL" },
+  { prefix: "macdSettings", mode: "FULL" },
+];
+
 const save = () => {
-  // 保存（useUserSettings 的 setter 已自动持久化，无需重复 settings.saveAll）
+  const changed = [];
+  changed.push(...diffPaths(baseVol.getBaseline(), volManager.draft, "volSettings"));
+  changed.push(...diffPaths(baseMacd.getBaseline(), macdManager.draft, "macdSettings"));
+
+  const changedPaths = Array.from(new Set(changed.map((x) => String(x || "").trim()).filter(Boolean)));
+
+  const cls = classifyPaths(changedPaths, RULES);
+  const mustFull = cls.hasFull || cls.hasUnknown;
+
+  // 保存
   volManager.save();
   macdManager.save();
 
-  // 保存后触发重新渲染（量窗 / MACD）
+  // baseline 更新
+  baseVol.setBaseline(volManager.draft);
+  baseMacd.setBaseline(macdManager.draft);
+
+  // 触发渲染
+  if (mustFull) {
+    renderHub.requestRender({ intent: "settings_apply", mode: "full" });
+  } else {
+    const patchPlan = buildPatchPlan(cls.items);
+    renderHub.requestRender({ intent: "settings_apply", mode: "patch", patchPlan });
+  }
+
   hub.execute("Refresh", {});
 };
 
@@ -103,7 +142,6 @@ const resetAll = () => {
 
 defineExpose({ save, resetAll });
 
-// 监听外壳（ModalDialog）的 tab 切换
 watch(
   () => dialogManager?.activeDialog?.value?.activeTab,
   (k) => {

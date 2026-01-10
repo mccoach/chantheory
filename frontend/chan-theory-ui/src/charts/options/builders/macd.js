@@ -4,9 +4,10 @@
 // - 周期：由 engines/indicators.js 按 macdSettings.period 计算好 DIF/DEA/HIST
 // - 本文件只负责：用 macdSettings.lines / macdSettings.hist 渲染样式
 // - 本轮改动：柱宽仅由 hist.barPercent 决定，不再进行 BAR_USABLE_RATIO 缩放
+//
+// V2.1 - 删除未使用导入（getChartTheme）与未使用变量（theme）
 // ==============================
 
-import { getChartTheme } from "@/charts/theme";
 import { DEFAULT_MACD_SETTINGS } from "@/constants";
 import { makeMacdTooltipFormatter } from "../tooltips/index";
 import { createTechSkeleton } from "../skeleton/tech";
@@ -20,7 +21,6 @@ function asIndicators(x) {
 }
 
 export function buildMacdOption({ candles, indicators, freq, macdCfg }, ui) {
-  const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
   const series = [];

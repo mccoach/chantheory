@@ -1,9 +1,8 @@
 // src/charts/options/builders/boll.js
 // ==============================
-// V2.0 - 清理冗余导入
+// V2.1 - 删除未使用导入（getChartTheme）与未使用变量（theme）
 // ==============================
 
-import { getChartTheme } from "@/charts/theme";
 import { STYLE_PALETTE } from "@/constants";
 import { makeBollTooltipFormatter } from "../tooltips/index";
 import { createTechSkeleton } from "../skeleton/tech";  // ← 唯一导入
@@ -16,7 +15,6 @@ function asIndicators(x) {
 }
 
 export function buildBollOption({ candles, indicators, freq }, ui) {
-  const theme = getChartTheme();
   const list = asArray(candles);
   const inds = asIndicators(indicators);
   const series = [];

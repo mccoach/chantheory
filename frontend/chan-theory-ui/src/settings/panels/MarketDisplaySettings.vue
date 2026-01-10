@@ -2,8 +2,8 @@
 <!-- ==============================
 说明：行情设置面板（新版：UI-only, 数据驱动渲染）
 本轮改动：
-  1) 删除设置窗内“复权(adjust)”通道：复权仅保留页面按钮三联。
-  2) 原位新增“柱宽%(barPercent)”：绑定 klineDraft.barPercent，约束完全参照量窗柱宽%（UI_LIMITS.barWidthPercent）。
+  1) select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
+  2) 控件 getProps 样板代码用工厂函数标准化复用
 ============================== -->
 <template>
   <SettingsGrid
@@ -30,13 +30,16 @@ import {
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
 import NumberSpinner from "@/components/ui/NumberSpinner.vue";
-import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
+import {
+  useSettingsRenderer,
+  makeNativeSelect,
+  makeColorInput,
+  makeNumberSpinner,
+} from "@/settings/common/useSettingsRenderer";
 
-// 通过 inject 获取共享的草稿状态
 const klineDraft = inject("klineDraft");
 const maDraft = inject("maDraft");
 
-// NEW: 注入统一重置器
 const klineResetter = inject("klineResetter");
 const maResetter = inject("maResetter");
 
@@ -44,7 +47,6 @@ function getMAKeys() {
   return Object.keys(maDraft || {});
 }
 
-// MA 总控：动态两态/三态
 const maTri = useTriMasterToggle({
   items: getMAKeys().map((mk) => ({
     get: () => !!maDraft?.[mk]?.enabled,
@@ -55,18 +57,16 @@ const maTri = useTriMasterToggle({
   })),
 });
 
-// 构建行
 const rows = computed(() => {
   const k = klineDraft || DEFAULT_KLINE_STYLE;
   const maMap = maDraft || {};
   const out = [];
 
-  // 原始K线
   out.push({
     key: "k-original",
     name: "原始K线",
     items: [
-      { key: "barPercent", label: "柱宽%" }, // ← 原位替换“复权”
+      { key: "barPercent", label: "柱宽%" },
       { key: "upColor", label: "阳线颜色" },
       { key: "upFade", label: "阳线淡显" },
       { key: "downColor", label: "阴线颜色" },
@@ -76,7 +76,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 合并K线
   out.push({
     key: "k-merged",
     name: "合并K线",
@@ -91,7 +90,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // MA 总控（三态）
   out.push({
     key: "ma-global",
     name: "均线总控",
@@ -104,7 +102,6 @@ const rows = computed(() => {
     reset: { visible: false },
   });
 
-  // 各 MA 行（按 DEFAULT_MA_CONFIGS 键序构建）
   Object.keys(DEFAULT_MA_CONFIGS).forEach((mk) => {
     const conf = maMap[mk] || DEFAULT_MA_CONFIGS[mk];
     out.push({
@@ -124,7 +121,6 @@ const rows = computed(() => {
   return out;
 });
 
-// 行级切换
 function onRowToggle(row) {
   const key = String(row.key || "");
   if (key === "ma-global") {
@@ -149,11 +145,9 @@ function onRowToggle(row) {
   }
 }
 
-// 单行恢复默认（只改草稿，不保存）
 function onRowReset(row) {
   const key = String(row.key || "");
   if (key === "k-original") {
-    // 原始K线：重置相关字段到默认（包含新增 barPercent）
     klineResetter?.resetPath("barPercent");
     klineResetter?.resetPath("upColor");
     klineResetter?.resetPath("downColor");
@@ -163,163 +157,122 @@ function onRowReset(row) {
     return;
   }
   if (key === "k-merged") {
-    // 合并K线：整体对象与开关
     klineResetter?.resetPath("mergedK");
     klineResetter?.resetPath("mergedEnabled");
     return;
   }
   if (key.startsWith("ma-")) {
-    const mk = key.slice(3); // 如 "MA5"
-    // 重置该条 MA 至默认
+    const mk = key.slice(3);
     maResetter?.resetPath(mk);
     maTri.updateSnapshot();
   }
 }
 
-// 使用新的通用渲染器
 const { renderControl } = useSettingsRenderer({
-  barPercent: {
+  barPercent: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: klineDraft.barPercent,
-      min: UI_LIMITS.barWidthPercent.min,
-      max: UI_LIMITS.barWidthPercent.max,
-      step: UI_LIMITS.barWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (klineDraft.barPercent = v),
-    }),
-  },
-  upColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: klineDraft.upColor,
-      onInput: (e) => (klineDraft.upColor = e.target.value),
-    }),
-  },
-  downColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: klineDraft.downColor,
-      onInput: (e) => (klineDraft.downColor = e.target.value),
-    }),
-  },
-  upFade: {
+    get: () => klineDraft.barPercent,
+    set: (_, v) => (klineDraft.barPercent = v),
+    min: UI_LIMITS.barWidthPercent.min,
+    max: UI_LIMITS.barWidthPercent.max,
+    step: UI_LIMITS.barWidthPercent.step,
+    integer: true,
+  }),
+
+  upColor: makeColorInput({
+    get: () => klineDraft.upColor,
+    set: (_, v) => (klineDraft.upColor = v),
+  }),
+
+  downColor: makeColorInput({
+    get: () => klineDraft.downColor,
+    set: (_, v) => (klineDraft.downColor = v),
+  }),
+
+  upFade: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: klineDraft.originalFadeUpPercent,
-      min: UI_LIMITS.percentage.min,
-      max: UI_LIMITS.percentage.max,
-      step: UI_LIMITS.percentage.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (klineDraft.originalFadeUpPercent = v),
-    }),
-  },
-  downFade: {
+    get: () => klineDraft.originalFadeUpPercent,
+    set: (_, v) => (klineDraft.originalFadeUpPercent = v),
+    min: UI_LIMITS.percentage.min,
+    max: UI_LIMITS.percentage.max,
+    step: UI_LIMITS.percentage.step,
+    integer: true,
+  }),
+
+  downFade: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: klineDraft.originalFadeDownPercent,
-      min: UI_LIMITS.percentage.min,
-      max: UI_LIMITS.percentage.max,
-      step: UI_LIMITS.percentage.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (klineDraft.originalFadeDownPercent = v),
-    }),
-  },
-  outlineWidth: {
+    get: () => klineDraft.originalFadeDownPercent,
+    set: (_, v) => (klineDraft.originalFadeDownPercent = v),
+    min: UI_LIMITS.percentage.min,
+    max: UI_LIMITS.percentage.max,
+    step: UI_LIMITS.percentage.step,
+    integer: true,
+  }),
+
+  outlineWidth: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: klineDraft.mergedK.outlineWidth,
-      min: UI_LIMITS.outlineWidth.min,
-      max: UI_LIMITS.outlineWidth.max,
-      step: UI_LIMITS.outlineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (klineDraft.mergedK.outlineWidth = v),
-    }),
-  },
-  mUpColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: klineDraft.mergedK.upColor,
-      onInput: (e) => (klineDraft.mergedK.upColor = e.target.value),
-    }),
-  },
-  mDownColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: klineDraft.mergedK.downColor,
-      onInput: (e) => (klineDraft.mergedK.downColor = e.target.value),
-    }),
-  },
-  fillFade: {
+    get: () => klineDraft.mergedK.outlineWidth,
+    set: (_, v) => (klineDraft.mergedK.outlineWidth = v),
+    min: UI_LIMITS.outlineWidth.min,
+    max: UI_LIMITS.outlineWidth.max,
+    step: UI_LIMITS.outlineWidth.step,
+    fracDigits: 1,
+  }),
+
+  mUpColor: makeColorInput({
+    get: () => klineDraft.mergedK.upColor,
+    set: (_, v) => (klineDraft.mergedK.upColor = v),
+  }),
+
+  mDownColor: makeColorInput({
+    get: () => klineDraft.mergedK.downColor,
+    set: (_, v) => (klineDraft.mergedK.downColor = v),
+  }),
+
+  fillFade: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: klineDraft.mergedK.fillFadePercent,
-      min: UI_LIMITS.percentage.min,
-      max: UI_LIMITS.percentage.max,
-      step: UI_LIMITS.percentage.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (klineDraft.mergedK.fillFadePercent = v),
-    }),
-  },
-  displayOrder: {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: klineDraft.mergedK.displayOrder,
-      onChange: (e) => (klineDraft.mergedK.displayOrder = e.target.value),
-      innerHTML: DISPLAY_ORDER_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "ma-width": {
+    get: () => klineDraft.mergedK.fillFadePercent,
+    set: (_, v) => (klineDraft.mergedK.fillFadePercent = v),
+    min: UI_LIMITS.percentage.min,
+    max: UI_LIMITS.percentage.max,
+    step: UI_LIMITS.percentage.step,
+    integer: true,
+  }),
+
+  displayOrder: makeNativeSelect({
+    options: DISPLAY_ORDER_OPTIONS,
+    get: () => klineDraft.mergedK.displayOrder,
+    set: (_, v) => (klineDraft.mergedK.displayOrder = v),
+  }),
+
+  "ma-width": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: (item) => ({
-      modelValue: maDraft[item.maKey].width,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (maDraft[item.maKey].width = v),
-    }),
-  },
-  "ma-color": {
-    component: "input",
-    getProps: (item) => ({
-      class: "input color",
-      type: "color",
-      value: maDraft[item.maKey].color,
-      onInput: (e) => (maDraft[item.maKey].color = e.target.value),
-    }),
-  },
-  "ma-style": {
-    component: "select",
-    getProps: (item) => ({
-      class: "input",
-      value: maDraft[item.maKey].style,
-      onChange: (e) => (maDraft[item.maKey].style = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "ma-period": {
+    get: (item) => maDraft[item.maKey].width,
+    set: (item, v) => (maDraft[item.maKey].width = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  "ma-color": makeColorInput({
+    get: (item) => maDraft[item.maKey].color,
+    set: (item, v) => (maDraft[item.maKey].color = v),
+  }),
+
+  "ma-style": makeNativeSelect({
+    options: LINE_STYLES,
+    get: (item) => maDraft[item.maKey].style,
+    set: (item, v) => (maDraft[item.maKey].style = v),
+  }),
+
+  "ma-period": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: (item) => ({
-      modelValue: maDraft[item.maKey].period,
-      min: UI_LIMITS.positiveInteger.min,
-      step: UI_LIMITS.positiveInteger.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (maDraft[item.maKey].period = v),
-    }),
-  },
+    get: (item) => maDraft[item.maKey].period,
+    set: (item, v) => (maDraft[item.maKey].period = v),
+    min: UI_LIMITS.positiveInteger.min,
+    step: UI_LIMITS.positiveInteger.step,
+    integer: true,
+  }),
 });
 </script>

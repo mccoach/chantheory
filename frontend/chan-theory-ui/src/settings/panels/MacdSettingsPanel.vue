@@ -1,9 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\MacdSettingsPanel.vue -->
 <!-- ==============================
 说明：MACD 设置面板（UI-only）
-- 第1行：指标周期（快线/慢线/DEA）
-- 第2行：折线（线宽 + DIF颜色 + DIF线型 + DEA颜色 + DEA线型）
-- 第3行：柱体（柱宽% + 多方颜色 + 空方颜色）
+本轮改动：
+  - select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
+  - 控件 getProps 样板代码用工厂函数标准化复用
 ============================== -->
 <template>
   <SettingsGrid
@@ -22,22 +22,21 @@
 import { computed, inject } from "vue";
 import SettingsGrid from "@/components/ui/SettingsGrid.vue";
 import NumberSpinner from "@/components/ui/NumberSpinner.vue";
+import { DEFAULT_MACD_SETTINGS, UI_LIMITS, LINE_STYLES } from "@/constants";
 import {
-  DEFAULT_MACD_SETTINGS,
-  UI_LIMITS,
-  LINE_STYLES,
-} from "@/constants";
-import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
+  useSettingsRenderer,
+  makeNativeSelect,
+  makeColorInput,
+  makeNumberSpinner,
+} from "@/settings/common/useSettingsRenderer";
 
 const macdDraft = inject("macdDraft");
 const macdResetter = inject("macdResetter");
 
-// 行定义
 const rows = computed(() => {
   const cfg = macdDraft || DEFAULT_MACD_SETTINGS;
   const out = [];
 
-  // 第1行：指标周期（快线/慢线/DEA），无勾选
   out.push({
     key: "macd-period",
     name: "指标周期",
@@ -50,7 +49,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 第2行：折线（线宽 + DIF颜色 + DIF线型 + DEA颜色 + DEA线型），有勾选
   out.push({
     key: "macd-lines",
     name: "折线",
@@ -61,14 +59,10 @@ const rows = computed(() => {
       { key: "deaColor", label: "DEA颜色" },
       { key: "deaStyle", label: "DEA线型" },
     ],
-    check: {
-      type: "single",
-      checked: !!cfg.lines?.enabled,
-    },
+    check: { type: "single", checked: !!cfg.lines?.enabled },
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 第3行：柱体（柱宽% + 多方颜色 + 空方颜色），有勾选
   out.push({
     key: "macd-hist",
     name: "柱体",
@@ -77,17 +71,13 @@ const rows = computed(() => {
       { key: "histUpColor", label: "多方颜色" },
       { key: "histDownColor", label: "空方颜色" },
     ],
-    check: {
-      type: "single",
-      checked: !!cfg.hist?.enabled,
-    },
+    check: { type: "single", checked: !!cfg.hist?.enabled },
     reset: { visible: true, title: "恢复默认" },
   });
 
   return out;
 });
 
-// 行级勾选切换
 function onRowToggle(row) {
   const key = String(row.key || "");
   const cfg = macdDraft;
@@ -107,7 +97,6 @@ function onRowToggle(row) {
   }
 }
 
-// 行级事件：单行恢复默认（只改草稿，不保存）
 function onRowReset(row) {
   const key = String(row.key || "");
   if (key === "macd-period") {
@@ -123,123 +112,85 @@ function onRowReset(row) {
   }
 }
 
-// 通用渲染器
 const { renderControl } = useSettingsRenderer({
-  // 第1行：周期
-  fastPeriod: {
+  fastPeriod: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: macdDraft.period.fast,
-      min: UI_LIMITS.positiveInteger.min,
-      step: UI_LIMITS.positiveInteger.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (macdDraft.period.fast = v),
-    }),
-  },
-  slowPeriod: {
-    component: NumberSpinner,
-    getProps: () => ({
-      modelValue: macdDraft.period.slow,
-      min: UI_LIMITS.positiveInteger.min,
-      step: UI_LIMITS.positiveInteger.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (macdDraft.period.slow = v),
-    }),
-  },
-  signalPeriod: {
-    component: NumberSpinner,
-    getProps: () => ({
-      modelValue: macdDraft.period.signal,
-      min: UI_LIMITS.positiveInteger.min,
-      step: UI_LIMITS.positiveInteger.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (macdDraft.period.signal = v),
-    }),
-  },
+    get: () => macdDraft.period.fast,
+    set: (_, v) => (macdDraft.period.fast = v),
+    min: UI_LIMITS.positiveInteger.min,
+    step: UI_LIMITS.positiveInteger.step,
+    integer: true,
+  }),
 
-  // 第2行：折线
-  linesWidth: {
+  slowPeriod: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: macdDraft.lines.width,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (macdDraft.lines.width = v),
-    }),
-  },
-  difColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: macdDraft.lines.difColor,
-      onInput: (e) => (macdDraft.lines.difColor = e.target.value),
-    }),
-  },
-  difStyle: {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: macdDraft.lines.difStyle,
-      onChange: (e) => (macdDraft.lines.difStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  deaColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: macdDraft.lines.deaColor,
-      onInput: (e) => (macdDraft.lines.deaColor = e.target.value),
-    }),
-  },
-  deaStyle: {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: macdDraft.lines.deaStyle,
-      onChange: (e) => (macdDraft.lines.deaStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
+    get: () => macdDraft.period.slow,
+    set: (_, v) => (macdDraft.period.slow = v),
+    min: UI_LIMITS.positiveInteger.min,
+    step: UI_LIMITS.positiveInteger.step,
+    integer: true,
+  }),
 
-  // 第3行：柱体
-  histBarPercent: {
+  signalPeriod: makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: macdDraft.hist.barPercent,
-      min: UI_LIMITS.barWidthPercent.min,
-      max: UI_LIMITS.barWidthPercent.max,
-      step: UI_LIMITS.barWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (macdDraft.hist.barPercent = v),
-    }),
-  },
-  histUpColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: macdDraft.hist.upColor,
-      onInput: (e) => (macdDraft.hist.upColor = e.target.value),
-    }),
-  },
-  histDownColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: macdDraft.hist.downColor,
-      onInput: (e) => (macdDraft.hist.downColor = e.target.value),
-    }),
-  },
+    get: () => macdDraft.period.signal,
+    set: (_, v) => (macdDraft.period.signal = v),
+    min: UI_LIMITS.positiveInteger.min,
+    step: UI_LIMITS.positiveInteger.step,
+    integer: true,
+  }),
+
+  linesWidth: makeNumberSpinner({
+    component: NumberSpinner,
+    get: () => macdDraft.lines.width,
+    set: (_, v) => (macdDraft.lines.width = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  difColor: makeColorInput({
+    get: () => macdDraft.lines.difColor,
+    set: (_, v) => (macdDraft.lines.difColor = v),
+  }),
+
+  difStyle: makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => macdDraft.lines.difStyle,
+    set: (_, v) => (macdDraft.lines.difStyle = v),
+  }),
+
+  deaColor: makeColorInput({
+    get: () => macdDraft.lines.deaColor,
+    set: (_, v) => (macdDraft.lines.deaColor = v),
+  }),
+
+  deaStyle: makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => macdDraft.lines.deaStyle,
+    set: (_, v) => (macdDraft.lines.deaStyle = v),
+  }),
+
+  histBarPercent: makeNumberSpinner({
+    component: NumberSpinner,
+    get: () => macdDraft.hist.barPercent,
+    set: (_, v) => (macdDraft.hist.barPercent = v),
+    min: UI_LIMITS.barWidthPercent.min,
+    max: UI_LIMITS.barWidthPercent.max,
+    step: UI_LIMITS.barWidthPercent.step,
+    integer: true,
+  }),
+
+  histUpColor: makeColorInput({
+    get: () => macdDraft.hist.upColor,
+    set: (_, v) => (macdDraft.hist.upColor = v),
+  }),
+
+  histDownColor: makeColorInput({
+    get: () => macdDraft.hist.downColor,
+    set: (_, v) => (macdDraft.hist.downColor = v),
+  }),
 });
 </script>
 

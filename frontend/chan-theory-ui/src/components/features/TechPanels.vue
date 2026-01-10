@@ -80,7 +80,7 @@
 import { reactive, watch, onMounted, onBeforeUnmount, ref } from "vue";
 import IndicatorPanel from "./tech/IndicatorPanel.vue";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { useViewRenderHub } from "@/composables/useViewRenderHub";
+import { useViewRenderHub } from "@/composables/viewRenderHub";
 
 const panes = reactive([]);
 

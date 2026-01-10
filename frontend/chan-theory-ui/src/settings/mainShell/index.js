@@ -21,6 +21,7 @@ export async function openMainChartSettings(dialogManager, { activeTab = "chan" 
     tabs: [
       { key: "display", label: "行情显示" },
       { key: "chan", label: "缠论标记" },
+      { key: "atr", label: "ATR止损" }, // NEW
     ],
     activeTab,
     // 保存与重置逻辑已移至 App.vue，通过 ref 直接调用子组件方法

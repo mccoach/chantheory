@@ -1,12 +1,8 @@
 // src/charts/chan/layers/upDownMarkers.js
 // ==============================
 // 缠论图层：涨跌标记 (Up/Down Markers)
-//
-// 本轮改动：
-//   - 涨跌标记宽度迁移到通用 WidthController + widthState：
-//       * 两个 scatter series（CHAN_UP / CHAN_DOWN）共用 widthState key: "main:updown"
-//       * symbolSize 读取 widthState，避免 notMerge 覆盖造成的竞态
-//   - 不再消费 env.symbolWidthPx（不再依赖 renderHub stepPx 推导）
+// - 点集上限归入 CHAN_DEFAULTS.pointLimit.maxPoints（按业务归置）
+// - 超限策略：保右端（最新）完整，截断左侧（更早期）
 // ==============================
 
 import { CHAN_DEFAULTS } from "@/constants";
@@ -16,6 +12,13 @@ import { resolveAnchorIdx } from "@/composables/chan/common";
 import { getWidthPx } from "@/charts/width/widthState";
 
 const WIDTH_KEY = "main:updown";
+
+function capPointsKeepRight(arr, maxN) {
+  const a = Array.isArray(arr) ? arr : [];
+  const cap = Math.max(1, Math.floor(Number(maxN || 1)));
+  if (a.length <= cap) return a;
+  return a.slice(a.length - cap);
+}
 
 export function buildUpDownMarkers(reducedBars, env = {}) {
   const settings = useUserSettings();
@@ -39,8 +42,8 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
 
   const markerW = () => getWidthPx(WIDTH_KEY, fallbackW);
 
-  const upPoints = [];
-  const downPoints = [];
+  const upPointsRaw = [];
+  const downPointsRaw = [];
 
   const policy = CHAN_DEFAULTS.anchorPolicy;
 
@@ -54,22 +57,14 @@ export function buildUpDownMarkers(reducedBars, env = {}) {
 
     const point = [x, 0];
 
-    if (d > 0) upPoints.push(point);
-    else downPoints.push(point);
+    if (d > 0) upPointsRaw.push(point);
+    else downPointsRaw.push(point);
   }
 
-  function downSample(arr, maxN) {
-    const n = arr.length;
-    if (n <= maxN) return arr;
-    const step = Math.ceil(n / maxN);
-    const out = [];
-    for (let i = 0; i < n; i += step) out.push(arr[i]);
-    return out;
-  }
+  const maxPts = Number(CHAN_DEFAULTS?.pointLimit?.maxPoints ?? 20000);
 
-  const maxMarkers = CHAN_DEFAULTS.maxVisibleMarkers;
-  const upArr = downSample(upPoints, maxMarkers);
-  const dnArr = downSample(downPoints, maxMarkers);
+  const upArr = capPointsKeepRight(upPointsRaw, maxPts);
+  const dnArr = capPointsKeepRight(downPointsRaw, maxPts);
 
   const upShape = chan.upShape;
   const downShape = chan.downShape;

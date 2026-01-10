@@ -1,7 +1,8 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useChartPanel.js
 // ==============================
-// V7.4 - PERF: 拖拽改高 resize 合并到 rAF（每帧最多一次），提升丝滑度与降低开销
-// V7.5 - NEW: 窗高拖拽结束/双击恢复后立即持久化（panelKey -> preferences.panelHeights）
+// V8.1 - NEW: ATR breach marker 宽度随缩放变化
+//   - 主图 width targets 增加 key=main:atrBreach（percent 来自 chartDisplay.atrBreachSettings.markerPercent）
+//   - 主图 refreshSeriesIds 增加 ATR_BREACH_* 四个 series id（受 atrBreachSettings.enabled 控制）
 // ==============================
 
 import {
@@ -17,11 +18,11 @@ import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useUserSettings } from "@/composables/useUserSettings";
 
 import { createWidthController } from "@/charts/width/widthController";
-import { createVolumeMarkerPointsController } from "@/charts/markers/markerPointsController";
 import {
   FRACTAL_MARKER_WIDTH_PX_LIMITS,
   UPDOWN_MARKER_WIDTH_PX_LIMITS,
   VOL_MARKER_WIDTH_PX_LIMITS,
+  ATR_BREACH_MARKER_WIDTH_PX_LIMITS, // NEW
 } from "@/constants";
 import { COMMON_CHART_LAYOUT } from "@/constants/chartLayout";
 
@@ -42,7 +43,6 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
   let ro = null;
 
   let _widthCtl = null;
-  let _markerPtsCtl = null;
 
   function safeResize() {
     if (!chart.value || !hostRef.value) return;
@@ -62,26 +62,12 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     } catch { }
   }
 
-  function scheduleMarkerUpdate() {
-    try {
-      _markerPtsCtl?.scheduleUpdate();
-    } catch { }
-  }
-
   function disposeWidthController() {
     if (!_widthCtl) return;
     try {
       _widthCtl.dispose();
     } catch { }
     _widthCtl = null;
-  }
-
-  function disposeMarkerPointsController() {
-    if (!_markerPtsCtl) return;
-    try {
-      _markerPtsCtl.dispose();
-    } catch { }
-    _markerPtsCtl = null;
   }
 
   function buildMainRefreshIdsGetter() {
@@ -102,6 +88,18 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
 
         const cs = fr.confirmStyle || {};
         if ((cs.enabled ?? true) === true) out.push("FR_TOP_CONFIRM", "FR_BOT_CONFIRM");
+      }
+
+      // NEW: ATR breach marker series（受 atrBreachSettings.enabled 控制）
+      const ab = settings?.chartDisplay?.atrBreachSettings || {};
+      const abEnabled = (ab.enabled ?? true) === true;
+      if (abEnabled) {
+        out.push(
+          "ATR_BREACH_FIXED_LONG",
+          "ATR_BREACH_FIXED_SHORT",
+          "ATR_BREACH_CHAN_LONG",
+          "ATR_BREACH_CHAN_SHORT"
+        );
       }
 
       return out;
@@ -246,8 +244,14 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     });
   }
 
+  // NEW: dataZoom 交互判定缓存（用于区分平移 vs 缩放）
+  // 规则：visCount = eIdx - sIdx + 1
+  //   - 若 visCount 未变化 => 平移：不触发任何业务侧 patch（宽度不变）
+  //   - 若 visCount 变化   => 缩放：仅触发宽度系统更新（marker 宽度随缩放变化）
+  let _lastZoomVisCount = null;
+
   onMounted(() => {
-    // NEW: 启动时应用持久化窗高（若存在）
+    // 启动时应用持久化窗高（若存在）
     try {
       const key = getPanelKeyString();
       const saved = settings.getPanelHeight(key);
@@ -307,6 +311,14 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
             maxPx: UPDOWN_MARKER_WIDTH_PX_LIMITS.maxPx,
             capToBar: true,
           },
+          // NEW: ATR breach marker（主图 overlay）
+          {
+            key: "main:atrBreach",
+            percent: () => settings?.chartDisplay?.atrBreachSettings?.markerPercent,
+            minPx: ATR_BREACH_MARKER_WIDTH_PX_LIMITS.minPx,
+            maxPx: ATR_BREACH_MARKER_WIDTH_PX_LIMITS.maxPx,
+            capToBar: true,
+          },
         ],
         refreshSeriesIds: buildMainRefreshIdsGetter(),
       });
@@ -335,63 +347,9 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
         return k === "VOL" || k === "AMOUNT";
       }
 
-      const baseSeriesCache = {
-        candlesRef: null,
-        kind: "",
-        len: 0,
-        series: null,
-      };
-
-      function getKindUpper() {
-        return typeof getPanelKind === "function"
-          ? String(getPanelKind() || "").toUpperCase()
-          : "";
-      }
-
-      function getBaseSeriesCached() {
-        const arr = vm?.candles?.value || [];
-        if (!Array.isArray(arr) || !arr.length) {
-          baseSeriesCache.candlesRef = null;
-          baseSeriesCache.kind = "";
-          baseSeriesCache.len = 0;
-          baseSeriesCache.series = null;
-          return null;
-        }
-
-        const kind = getKindUpper();
-        const len = arr.length;
-
-        if (
-          baseSeriesCache.candlesRef === arr &&
-          baseSeriesCache.kind === kind &&
-          baseSeriesCache.len === len &&
-          Array.isArray(baseSeriesCache.series) &&
-          baseSeriesCache.series.length === len
-        ) {
-          return baseSeriesCache.series;
-        }
-
-        const baseMode = kind === "AMOUNT" ? "amount" : "vol";
-        const series =
-          baseMode === "amount"
-            ? arr.map((d) => (typeof d?.a === "number" ? d.a : null))
-            : arr.map((d) => (typeof d?.v === "number" ? d.v : null));
-
-        baseSeriesCache.candlesRef = arr;
-        baseSeriesCache.kind = kind;
-        baseSeriesCache.len = len;
-        baseSeriesCache.series = series;
-        return series;
-      }
-
-      function ensureIndicatorControllers() {
+      function ensureIndicatorWidthController() {
         if (!isVolKindNow()) {
-          disposeMarkerPointsController();
           disposeWidthController();
-          baseSeriesCache.candlesRef = null;
-          baseSeriesCache.kind = "";
-          baseSeriesCache.len = 0;
-          baseSeriesCache.series = null;
           return;
         }
 
@@ -415,24 +373,15 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
             refreshSeriesIds: buildVolRefreshIdsGetter(),
           });
         }
-
-        if (!_markerPtsCtl) {
-          _markerPtsCtl = createVolumeMarkerPointsController({
-            chart: instance,
-            getCandles: () => (vm?.candles?.value || []),
-            getVolCfg: () => settings?.chartDisplay?.volSettings || {},
-            getBaseSeries: getBaseSeriesCached,
-          });
-        }
       }
 
-      ensureIndicatorControllers();
+      ensureIndicatorWidthController();
 
       if (typeof getPanelKind === "function") {
         watch(
           () => String(getPanelKind() || "").toUpperCase(),
           () => {
-            ensureIndicatorControllers();
+            ensureIndicatorWidthController();
           }
         );
       }
@@ -441,6 +390,7 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     try {
       ro = new ResizeObserver(() => {
         safeResize();
+        // 容器尺寸变化会影响“每根柱体的像素宽度”，因此需要触发宽度系统刷新（这是缩放以外的必要场景）
         scheduleWidthUpdate();
       });
       ro.observe(hostRef.value);
@@ -448,8 +398,8 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
 
     requestAnimationFrame(() => {
       safeResize();
+      // 首次落地后计算一次宽度（数据加载后 symbolSize 需有初始值）
       scheduleWidthUpdate();
-      scheduleMarkerUpdate();
     });
 
     if (typeof onChartReady === "function") {
@@ -464,7 +414,6 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     }
     _pendingHeightPx = null;
 
-    disposeMarkerPointsController();
     disposeWidthController();
 
     if (ro) {
@@ -507,23 +456,29 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
       sIdx = Math.max(0, sIdx);
       eIdx = Math.min(arr.length - 1, eIdx);
 
+      const visCount = Math.max(1, eIdx - sIdx + 1);
+      const isZoom = _lastZoomVisCount != null && visCount !== _lastZoomVisCount;
+      _lastZoomVisCount = visCount;
+
       try {
         _widthCtl?.setZoomRange?.({ sIdx, eIdx });
       } catch { }
-      try {
-        _markerPtsCtl?.setZoomRange?.({ sIdx, eIdx });
-      } catch { }
 
-      scheduleWidthUpdate();
-      scheduleMarkerUpdate();
+      // ===== 核心策略（按需求）=====
+      // 平移（visCount不变）：不触发任何业务侧 patch（宽度不变）
+      // 缩放（visCount变化）：仅触发宽度系统更新（marker宽度随缩放变化）
+      if (isZoom) {
+        scheduleWidthUpdate();
+      }
 
-      const bars_new = Math.max(1, eIdx - sIdx + 1);
+      const bars_new = visCount;
       const anchorTs = arr[eIdx]?.ts;
 
       if (!Number.isFinite(anchorTs)) return;
 
+      // 视图状态仍记录与持久化（用于 UI 与恢复历史视图）
       hub.execute("SyncViewState", {
-        barsCount: bars_new,
+        barsCount: visCount,
         rightTs: anchorTs,
       });
     } catch { }
@@ -576,6 +531,5 @@ export function useChartPanel({ panelKey, vm, hub, renderHub, onChartReady, getP
     onMouseEnter,
     onMouseLeave,
     scheduleWidthUpdate,
-    scheduleMarkerUpdate,
   };
 }

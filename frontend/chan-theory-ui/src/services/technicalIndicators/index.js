@@ -7,6 +7,7 @@
 //   - calculateKDJ
 //   - calculateRSI
 //   - calculateBOLL
+//   - calculateATR
 // ==============================
 
 export { calculateMA } from "./ma";
@@ -14,3 +15,4 @@ export { calculateMACD } from "./macd";
 export { calculateKDJ } from "./kdj";
 export { calculateRSI } from "./rsi";
 export { calculateBOLL } from "./boll";
+export { calculateAtrStops } from "./atr";

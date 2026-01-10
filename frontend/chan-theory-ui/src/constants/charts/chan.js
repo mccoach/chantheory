@@ -3,6 +3,12 @@
 // 说明：缠论相关的所有配置常量
 // 职责：提供缠论标记/分型/笔/线段/中枢的默认配置
 // 设计：按功能模块分组，每个常量都有详细注释
+//
+// 本轮整理（按业务逻辑归置）：
+//   - 将“颗粒状标记点上限”归入对应配置对象中：
+//       * 涨跌标记 -> CHAN_DEFAULTS.pointLimit.maxPoints
+//       * 分型标记 -> FRACTAL_DEFAULTS.pointLimit.maxPoints
+//   - 上限语义：超限保右端完整（最新），截断左侧（更早期）
 // ==============================
 
 import { STYLE_PALETTE } from "../common";
@@ -38,8 +44,12 @@ export const CHAN_DEFAULTS = {
   downShape: "arrow",       // 下跌标记形状（✅ 设置窗可改）
   downColor: "#00ff00",     // 下跌标记颜色（✅ 设置窗可改）
 
-  // --- 性能优化（设置窗未暴露）---
-  maxVisibleMarkers: 10000, // 最大可见标记数（降采样阈值）（❌ 设置窗未暴露，直接用常量）
+  // --- NEW: 颗粒点容量约束（不进设置窗）---
+  // 语义：涨跌标记点集（CHAN_UP/CHAN_DOWN）的最大点数。
+  // 超限处理：保留右端（最新）maxPoints 个点，截断左侧（更早期）。
+  pointLimit: {
+    maxPoints: 20000,
+  },
 };
 
 // ===== 分型标记宽度（像素）限制：用于 markerWidthPx 落地前 clamp =====
@@ -112,7 +122,7 @@ export const FRACTAL_DEFAULTS = {
       topShape: "triangle",     // 顶分型形状
       topColor: "#FF0000",      // 顶分型颜色
       fill: "solid",            // 填充方式："solid"=实心 | "hollow"=空心
-      enabled: true,            // 是否启用
+      enabled: false,            // 是否启用
     },
     standard: {              // 标准分型样式（✅ 设置窗可改）
       bottomShape: "triangle",
@@ -139,7 +149,14 @@ export const FRACTAL_DEFAULTS = {
     topShape: "circle",      // 顶部形状
     topColor: "#00ff00",     // 顶部颜色
     fill: "solid",           // 填充方式
-    enabled: true,           // 是否启用
+    enabled: false,           // 是否启用
+  },
+
+  // --- NEW: 颗粒点容量约束（不进设置窗）---
+  // 语义：分型 scatter 点集（强/标/弱 + confirm）的每个 series 的最大点数。
+  // 超限处理：保留右端（最新）maxPoints 个点，截断左侧（更早期）。
+  pointLimit: {
+    maxPoints: 20000,
   },
 };
 
@@ -161,7 +178,7 @@ export const META_SEGMENT_DEFAULTS = {
   enabled: false,            // 是否绘制元线段（✅ 设置窗可改）
 
   // --- 线条样式（设置窗已暴露）---
-  color: "rgba(16, 238, 208, 0.93)", // 元线段颜色（✅ 设置窗可改）
+  color: "#10eed0", // 元线段颜色（✅ 设置窗可改）
   lineWidth: 6,           // 元线段宽度（✅ 设置窗可改）
   lineStyle: "dotted",      // 元线段样式（✅ 设置窗可改）
 };

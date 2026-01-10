@@ -3,6 +3,10 @@
 // 说明：量窗相关的所有配置常量
 // 职责：提供成交量/成交额的显示配置
 // 设计：按功能模块分组，每个常量都有详细注释
+//
+// 本轮整理（按业务逻辑归置）：
+//   - 将“放/缩量标记点集上限”归入 DEFAULT_VOL_SETTINGS.markerLimit.maxPoints
+//   - 上限语义：超限保右端完整（最新），截断左侧（更早期）
 // ==============================
 
 import { STYLE_PALETTE } from "../common";
@@ -74,6 +78,13 @@ export const DEFAULT_VOL_SETTINGS = {
     shape: "arrow",         // 标记形状（✅ 设置窗可改）
     color: "#00ff00",       // 标记颜色（✅ 设置窗可改）
     threshold: 0.7,         // 缩量阈值（VOL ≤ threshold * MAVOL 时触发）（✅ 设置窗可改）
+  },
+
+  // NEW: 放/缩量标记点集容量约束（不进设置窗）
+  // 语义：VOL_PUMP_MARK / VOL_DUMP_MARK 的最大点数。
+  // 超限处理：保留右端（最新）maxPoints 个点，截断左侧（更早期）。
+  markerLimit: {
+    maxPoints: 20000,
   },
 };
 

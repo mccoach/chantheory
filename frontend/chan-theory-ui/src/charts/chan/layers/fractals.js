@@ -2,13 +2,9 @@
 // ==============================
 // 缠论图层：分型标记 (Fractals) - Idx-Only Schema + confirmPairs 版
 //
-// 本轮改动：
-//   - 分型宽度彻底迁移到通用 WidthController + widthState：
-//       * 8 个分型 scatter series 共用 widthState key: "main:fractal"
-//       * symbolSize 读取 widthState，避免 notMerge 覆盖造成的竞态
-//   - 不再依赖 env.symbolWidthPx / renderHub 推导宽度
-//
-// V2 - 统一语义回溯：yOfFractal 迁移到 chan/accessors.js（消除重复语义）
+// 本轮整理：
+//   - 点集上限不再“独立常量散落”，而是归入 FRACTAL_DEFAULTS.pointLimit.maxPoints
+//   - 超限策略：保右端（最新）完整，截断左侧（更早期）
 // ==============================
 
 import { FRACTAL_DEFAULTS } from "@/constants";
@@ -19,6 +15,13 @@ import { getWidthPx } from "@/charts/width/widthState";
 import { createChanAccessors } from "@/composables/chan/accessors";
 
 const WIDTH_KEY = "main:fractal";
+
+function capPointsKeepRight(arr, maxN) {
+  const a = Array.isArray(arr) ? arr : [];
+  const cap = Math.max(1, Math.floor(Number(maxN || 1)));
+  if (a.length <= cap) return a;
+  return a.slice(a.length - cap);
+}
 
 export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const settings = useUserSettings();
@@ -53,6 +56,8 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const apexGap = FRACTAL_DEFAULTS.markerYOffsetPx;
   const yOffTop = -(markerH / 2 + apexGap);
   const yOffBottom = +(markerH / 2 + apexGap);
+
+  const maxPts = Number(cfg?.pointLimit?.maxPoints ?? FRACTAL_DEFAULTS.pointLimit?.maxPoints ?? 20000);
 
   function yOfFractal(f) {
     return acc.fractalY(f);
@@ -92,7 +97,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   ];
 
   for (const sp of topSpec) {
-    const data = bins.top[sp.k];
+    const data = capPointsKeepRight(bins.top[sp.k], maxPts);
     if (!data.length) continue;
 
     const st = cfg.styleByStrength?.[sp.k] || {};
@@ -134,7 +139,7 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   ];
 
   for (const sp of botSpec) {
-    const data = bins.bottom[sp.k];
+    const data = capPointsKeepRight(bins.bottom[sp.k], maxPts);
     if (!data.length) continue;
 
     const st = cfg.styleByStrength?.[sp.k] || {};
@@ -173,8 +178,8 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
   const confirmEnabled = cs.enabled === true;
 
   if (confirmEnabled && pairedArr && pairedArr.length === (fractals || []).length) {
-    const topConfirmData = [];
-    const botConfirmData = [];
+    const topConfirmDataRaw = [];
+    const botConfirmDataRaw = [];
 
     for (let i = 0; i < (fractals || []).length; i++) {
       if (!pairedArr[i]) continue;
@@ -184,9 +189,12 @@ export function buildFractalMarkers(_reducedBars, fractals, env = {}) {
       const y = yOfFractal(f);
       if (!Number.isFinite(y)) continue;
 
-      if (String(f?.kind_enum || "") === "top") topConfirmData.push({ value: [x, y] });
-      else if (String(f?.kind_enum || "") === "bottom") botConfirmData.push({ value: [x, y] });
+      if (String(f?.kind_enum || "") === "top") topConfirmDataRaw.push({ value: [x, y] });
+      else if (String(f?.kind_enum || "") === "bottom") botConfirmDataRaw.push({ value: [x, y] });
     }
+
+    const topConfirmData = capPointsKeepRight(topConfirmDataRaw, maxPts);
+    const botConfirmData = capPointsKeepRight(botConfirmDataRaw, maxPts);
 
     const extraGap = FRACTAL_DEFAULTS.markerHeightPx + FRACTAL_DEFAULTS.markerYOffsetPx;
 

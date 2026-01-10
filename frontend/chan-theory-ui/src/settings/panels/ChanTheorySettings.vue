@@ -1,13 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\ChanTheorySettings.vue -->
 <!-- ==============================
 说明：缠论设置面板（新版：UI-only）
-- 职责：仅负责渲染缠论相关的设置UI，不再管理状态。
-- 数据流：通过 `inject` 获取来自外壳的响应式草稿对象 (chanDraft, fractalDraft)，并直接绑定。
-- 逻辑：分型总控的三态切换逻辑 (useTriMasterToggle) 依然保留在此，因为它与 UI 渲染紧密相关。
-本轮改动（涨跌标记迁移）：
-  1) “涨跌标记”行移除“承载点”，原位替换为“标记宽%”（chanDraft.upDownMarkerPercent）
-  2) 承载点 anchorPolicy 改为仅 constants 决定（CHAN_DEFAULTS.anchorPolicy），设置窗不再暴露
-  3) 标记宽% 取值与分型 markerPercent 完全一致：50~100 step=1，默认 100
+本轮改动：
+  - select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
+  - 控件 getProps 样板代码用工厂函数标准化复用
 ============================== -->
 <template>
   <SettingsGrid
@@ -40,17 +36,19 @@ import {
   FILL_OPTIONS,
 } from "@/constants";
 import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
-import { useSettingsRenderer } from "@/settings/common/useSettingsRenderer";
+import {
+  useSettingsRenderer,
+  makeNativeSelect,
+  makeColorInput,
+  makeNumberSpinner,
+} from "@/settings/common/useSettingsRenderer";
 
-// 通过 inject 获取共享的草稿状态
 const chanDraft = inject("chanDraft");
 const fractalDraft = inject("fractalDraft");
 
-// 注入 resetter（只改草稿，不保存、不刷新）
 const chanResetter = inject("chanResetter", null);
 const fractalResetter = inject("fractalResetter", null);
 
-// 分型总控（强/标/弱/确认）
 const frTri = useTriMasterToggle({
   items: ["strong", "standard", "weak"]
     .map((lvl) => ({
@@ -75,13 +73,11 @@ const frTri = useTriMasterToggle({
     ]),
 });
 
-// 构建行定义
 const rows = computed(() => {
   const cf = chanDraft || {};
   const ff = fractalDraft || {};
   const out = [];
 
-  // 涨跌标记（承载点 UI 已移除：改为标记宽%）
   out.push({
     key: "chan-updown",
     name: "涨跌标记",
@@ -96,7 +92,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 分型总控（显著度参数 + 总控复选 + 标记宽%）
   out.push({
     key: "fr-global",
     name: "分型总控",
@@ -114,7 +109,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 强/标准/弱/确认
   const kindList = [
     { k: "strong", label: "强分型" },
     { k: "standard", label: "标准分型" },
@@ -142,7 +136,6 @@ const rows = computed(() => {
     });
   });
 
-  // 简笔
   out.push({
     key: "pen",
     name: "简笔",
@@ -152,14 +145,10 @@ const rows = computed(() => {
       { key: "pen-confirmedStyle", label: "确认线型" },
       { key: "pen-provisionalStyle", label: "预备线型" },
     ],
-    check: {
-      type: "single",
-      checked: !!(cf.pen?.enabled ?? PENS_DEFAULTS.enabled),
-    },
+    check: { type: "single", checked: !!(cf.pen?.enabled ?? PENS_DEFAULTS.enabled) },
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 元线段
   out.push({
     key: "metaSegment",
     name: "元线段",
@@ -175,7 +164,6 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 线段（最终线段）
   out.push({
     key: "segment",
     name: "线段",
@@ -184,14 +172,10 @@ const rows = computed(() => {
       { key: "seg-color", label: "颜色" },
       { key: "seg-lineStyle", label: "线型" },
     ],
-    check: {
-      type: "single",
-      checked: !!(cf.segment?.enabled ?? SEGMENT_DEFAULTS.enabled),
-    },
+    check: { type: "single", checked: !!(cf.segment?.enabled ?? SEGMENT_DEFAULTS.enabled) },
     reset: { visible: true, title: "恢复默认" },
   });
 
-  // 笔中枢
   out.push({
     key: "penPivot",
     name: "笔中枢",
@@ -212,7 +196,6 @@ const rows = computed(() => {
   return out;
 });
 
-// 行级切换
 function onRowToggle(row) {
   const key = String(row.key || "");
   const cf = chanDraft;
@@ -244,19 +227,16 @@ function onRowToggle(row) {
     frTri.updateSnapshot();
     return;
   }
+
   if (key === "pen") {
     const pen = cf.pen || {};
     cf.pen = { ...pen, enabled: !(pen.enabled ?? PENS_DEFAULTS.enabled) };
     return;
   }
 
-  // 元线段 toggle
   if (key === "metaSegment") {
     const ms = cf.metaSegment || {};
-    cf.metaSegment = {
-      ...ms,
-      enabled: !(ms.enabled ?? META_SEGMENT_DEFAULTS.enabled),
-    };
+    cf.metaSegment = { ...ms, enabled: !(ms.enabled ?? META_SEGMENT_DEFAULTS.enabled) };
     return;
   }
 
@@ -265,33 +245,27 @@ function onRowToggle(row) {
     cf.segment = { ...sg, enabled: !(sg.enabled ?? SEGMENT_DEFAULTS.enabled) };
     return;
   }
+
   if (key === "penPivot") {
     const pv = cf.penPivot || {};
-    cf.penPivot = {
-      ...pv,
-      enabled: !(pv.enabled ?? CHAN_PEN_PIVOT_DEFAULTS.enabled),
-    };
+    cf.penPivot = { ...pv, enabled: !(pv.enabled ?? CHAN_PEN_PIVOT_DEFAULTS.enabled) };
   }
 }
 
-// 行重置（统一调用 resetter；只改草稿，不保存、不刷新）
 function onRowReset(row) {
   const key = String(row.key || "");
 
   if (key === "chan-updown") {
-    // 重置涨跌标记相关字段（保留 pen/segment/penPivot）
     chanResetter?.resetPath("showUpDownMarkers");
     chanResetter?.resetPath("upShape");
     chanResetter?.resetPath("upColor");
     chanResetter?.resetPath("downShape");
     chanResetter?.resetPath("downColor");
-    // NEW: 标记宽%（涨跌标记）
     chanResetter?.resetPath("upDownMarkerPercent");
     return;
   }
 
   if (key === "fr-global") {
-    // 重置分型总控
     fractalResetter?.resetPath("minTickCount");
     fractalResetter?.resetPath("minPct");
     fractalResetter?.resetPath("minCond");
@@ -310,7 +284,6 @@ function onRowReset(row) {
       return;
     }
     fractalResetter?.resetPath(`styleByStrength.${kind}`);
-    // 同步显隐为默认（强/标/弱默认均为 true）
     const ss = fractalDraft.showStrength || {};
     fractalDraft.showStrength = { ...ss, [kind]: true };
     frTri.updateSnapshot();
@@ -322,7 +295,6 @@ function onRowReset(row) {
     return;
   }
 
-  // NEW: 元线段 reset（完全参照 segment）
   if (key === "metaSegment") {
     chanResetter?.resetPath("metaSegment");
     return;
@@ -339,345 +311,230 @@ function onRowReset(row) {
   }
 }
 
-// 使用通用渲染器
 const { renderControl } = useSettingsRenderer({
-  upShape: {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.upShape,
-      onChange: (e) => (chanDraft.upShape = e.target.value),
-      innerHTML: MARKER_SHAPE_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  upColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.upColor,
-      onInput: (e) => (chanDraft.upColor = e.target.value),
-    }),
-  },
-  downShape: {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.downShape,
-      onChange: (e) => (chanDraft.downShape = e.target.value),
-      innerHTML: MARKER_SHAPE_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  downColor: {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.downColor,
-      onInput: (e) => (chanDraft.downColor = e.target.value),
-    }),
-  },
+  upShape: makeNativeSelect({
+    options: MARKER_SHAPE_OPTIONS,
+    get: () => chanDraft.upShape,
+    set: (_, v) => (chanDraft.upShape = v),
+  }),
 
-  // NEW: 涨跌标记宽%
-  "updown-markerPercent": {
+  upColor: makeColorInput({
+    get: () => chanDraft.upColor,
+    set: (_, v) => (chanDraft.upColor = v),
+  }),
+
+  downShape: makeNativeSelect({
+    options: MARKER_SHAPE_OPTIONS,
+    get: () => chanDraft.downShape,
+    set: (_, v) => (chanDraft.downShape = v),
+  }),
+
+  downColor: makeColorInput({
+    get: () => chanDraft.downColor,
+    set: (_, v) => (chanDraft.downColor = v),
+  }),
+
+  "updown-markerPercent": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.upDownMarkerPercent,
-      min: UI_LIMITS.markerWidthPercent.min,
-      max: UI_LIMITS.markerWidthPercent.max,
-      step: UI_LIMITS.markerWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (chanDraft.upDownMarkerPercent = v),
-    }),
-  },
-  "fr-minTick": {
+    get: () => chanDraft.upDownMarkerPercent,
+    set: (_, v) => (chanDraft.upDownMarkerPercent = v),
+    min: UI_LIMITS.markerWidthPercent.min,
+    max: UI_LIMITS.markerWidthPercent.max,
+    step: UI_LIMITS.markerWidthPercent.step,
+    integer: true,
+  }),
+
+  "fr-minTick": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: fractalDraft.minTickCount,
-      min: UI_LIMITS.nonNegativeInteger.min,
-      step: UI_LIMITS.nonNegativeInteger.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (fractalDraft.minTickCount = v),
-    }),
-  },
-  "fr-minPct": {
+    get: () => fractalDraft.minTickCount,
+    set: (_, v) => (fractalDraft.minTickCount = v),
+    min: UI_LIMITS.nonNegativeInteger.min,
+    step: UI_LIMITS.nonNegativeInteger.step,
+    integer: true,
+  }),
+
+  "fr-minPct": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: fractalDraft.minPct,
-      min: UI_LIMITS.percentage.min,
-      max: UI_LIMITS.percentage.max,
-      step: UI_LIMITS.percentage.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (fractalDraft.minPct = v),
-    }),
-  },
-  "fr-minCond": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: fractalDraft.minCond,
-      onChange: (e) => (fractalDraft.minCond = e.target.value),
-      innerHTML: MIN_COND_OPTIONS.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  // 分型标记宽%
-  "fr-markerPercent": {
+    get: () => fractalDraft.minPct,
+    set: (_, v) => (fractalDraft.minPct = v),
+    min: UI_LIMITS.percentage.min,
+    max: UI_LIMITS.percentage.max,
+    step: UI_LIMITS.percentage.step,
+    integer: true,
+  }),
+
+  "fr-minCond": makeNativeSelect({
+    options: MIN_COND_OPTIONS,
+    get: () => fractalDraft.minCond,
+    set: (_, v) => (fractalDraft.minCond = v),
+  }),
+
+  "fr-markerPercent": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: fractalDraft.markerPercent,
-      min: UI_LIMITS.markerWidthPercent.min,
-      max: UI_LIMITS.markerWidthPercent.max,
-      step: UI_LIMITS.markerWidthPercent.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (fractalDraft.markerPercent = v),
-    }),
-  },
+    get: () => fractalDraft.markerPercent,
+    set: (_, v) => (fractalDraft.markerPercent = v),
+    min: UI_LIMITS.markerWidthPercent.min,
+    max: UI_LIMITS.markerWidthPercent.max,
+    step: UI_LIMITS.markerWidthPercent.step,
+    integer: true,
+  }),
+
   ...Object.fromEntries(
     ["strong", "standard", "weak", "confirm"].flatMap((k) => {
       const readConf = () =>
-        (k === "confirm"
-          ? fractalDraft.confirmStyle
-          : fractalDraft.styleByStrength[k]) || {};
+        (k === "confirm" ? fractalDraft.confirmStyle : fractalDraft.styleByStrength[k]) || {};
       const writeConf = (patch) => {
-        if (k === "confirm")
-          fractalDraft.confirmStyle = {
-            ...fractalDraft.confirmStyle,
-            ...patch,
-          };
+        if (k === "confirm") fractalDraft.confirmStyle = { ...fractalDraft.confirmStyle, ...patch };
         else
           fractalDraft.styleByStrength[k] = {
             ...fractalDraft.styleByStrength[k],
             ...patch,
           };
       };
+
+      const getFill = () => readConf().fill;
+      const setFill = (_, v) => writeConf({ fill: v });
+
+      const getBotShape = () => readConf().bottomShape;
+      const setBotShape = (_, v) => writeConf({ bottomShape: v });
+
+      const getTopShape = () => readConf().topShape;
+      const setTopShape = (_, v) => writeConf({ topShape: v });
+
+      const getBotColor = () => readConf().bottomColor;
+      const setBotColor = (_, v) => writeConf({ bottomColor: v });
+
+      const getTopColor = () => readConf().topColor;
+      const setTopColor = (_, v) => writeConf({ topColor: v });
+
       return [
         [
           `fr-botShape-${k}`,
-          {
-            component: "select",
-            getProps: () => ({
-              class: "input",
-              value: readConf().bottomShape,
-              onChange: (e) => writeConf({ bottomShape: e.target.value }),
-              innerHTML: MARKER_SHAPE_OPTIONS.map(
-                (o) => `<option value="${o.v}">${o.label}</option>`
-              ).join(""),
-            }),
-          },
+          makeNativeSelect({ options: MARKER_SHAPE_OPTIONS, get: getBotShape, set: setBotShape }),
         ],
         [
           `fr-botColor-${k}`,
-          {
-            component: "input",
-            getProps: () => ({
-              class: "input color",
-              type: "color",
-              value: readConf().bottomColor,
-              onInput: (e) => writeConf({ bottomColor: e.target.value }),
-            }),
-          },
+          makeColorInput({ get: getBotColor, set: setBotColor }),
         ],
         [
           `fr-topShape-${k}`,
-          {
-            component: "select",
-            getProps: () => ({
-              class: "input",
-              value: readConf().topShape,
-              onChange: (e) => writeConf({ topShape: e.target.value }),
-              innerHTML: MARKER_SHAPE_OPTIONS.map(
-                (o) => `<option value="${o.v}">${o.label}</option>`
-              ).join(""),
-            }),
-          },
+          makeNativeSelect({ options: MARKER_SHAPE_OPTIONS, get: getTopShape, set: setTopShape }),
         ],
         [
           `fr-topColor-${k}`,
-          {
-            component: "input",
-            getProps: () => ({
-              class: "input color",
-              type: "color",
-              value: readConf().topColor,
-              onInput: (e) => writeConf({ topColor: e.target.value }),
-            }),
-          },
+          makeColorInput({ get: getTopColor, set: setTopColor }),
         ],
         [
           `fr-fill-${k}`,
-          {
-            component: "select",
-            getProps: () => ({
-              class: "input",
-              value: readConf().fill,
-              onChange: (e) => writeConf({ fill: e.target.value }),
-              innerHTML: FILL_OPTIONS.map(
-                (o) => `<option value="${o.v}">${o.label}</option>`
-              ).join(""),
-            }),
-          },
+          makeNativeSelect({ options: FILL_OPTIONS, get: getFill, set: setFill }),
         ],
       ];
     })
   ),
-  "pen-lineWidth": {
-    component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.pen.lineWidth,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (chanDraft.pen.lineWidth = v),
-    }),
-  },
-  "pen-color": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.pen.color,
-      onInput: (e) => (chanDraft.pen.color = e.target.value),
-    }),
-  },
-  "pen-confirmedStyle": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.pen.confirmedStyle,
-      onChange: (e) => (chanDraft.pen.confirmedStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "pen-provisionalStyle": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.pen.provisionalStyle,
-      onChange: (e) => (chanDraft.pen.provisionalStyle = e.target.value),
-      innerHTML: LINE_STYLES.map((o) => `<option value="${o.v}">${o.label}</option>`).join(""),
-    }),
-  },
 
-  // NEW: 元线段控件（完全参照 seg-*）
-  "mseg-lineWidth": {
+  "pen-lineWidth": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.metaSegment.lineWidth,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (chanDraft.metaSegment.lineWidth = v),
-    }),
-  },
-  "mseg-color": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.metaSegment.color,
-      onInput: (e) => (chanDraft.metaSegment.color = e.target.value),
-    }),
-  },
-  "mseg-lineStyle": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.metaSegment.lineStyle,
-      onChange: (e) => (chanDraft.metaSegment.lineStyle = e.target.value),
-      innerHTML: LINE_STYLES.map((o) => `<option value="${o.v}">${o.label}</option>`).join(""),
-    }),
-  },
-  "seg-lineWidth": {
+    get: () => chanDraft.pen.lineWidth,
+    set: (_, v) => (chanDraft.pen.lineWidth = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  "pen-color": makeColorInput({
+    get: () => chanDraft.pen.color,
+    set: (_, v) => (chanDraft.pen.color = v),
+  }),
+
+  "pen-confirmedStyle": makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => chanDraft.pen.confirmedStyle,
+    set: (_, v) => (chanDraft.pen.confirmedStyle = v),
+  }),
+
+  "pen-provisionalStyle": makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => chanDraft.pen.provisionalStyle,
+    set: (_, v) => (chanDraft.pen.provisionalStyle = v),
+  }),
+
+  "mseg-lineWidth": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.segment.lineWidth,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (chanDraft.segment.lineWidth = v),
-    }),
-  },
-  "seg-color": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.segment.color,
-      onInput: (e) => (chanDraft.segment.color = e.target.value),
-    }),
-  },
-  "seg-lineStyle": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.segment.lineStyle,
-      onChange: (e) => (chanDraft.segment.lineStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "pv-lineWidth": {
+    get: () => chanDraft.metaSegment.lineWidth,
+    set: (_, v) => (chanDraft.metaSegment.lineWidth = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  "mseg-color": makeColorInput({
+    get: () => chanDraft.metaSegment.color,
+    set: (_, v) => (chanDraft.metaSegment.color = v),
+  }),
+
+  "mseg-lineStyle": makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => chanDraft.metaSegment.lineStyle,
+    set: (_, v) => (chanDraft.metaSegment.lineStyle = v),
+  }),
+
+  "seg-lineWidth": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.penPivot.lineWidth,
-      min: UI_LIMITS.lineWidth.min,
-      max: UI_LIMITS.lineWidth.max,
-      step: UI_LIMITS.lineWidth.step,
-      "frac-digits": 1,
-      "onUpdate:modelValue": (v) => (chanDraft.penPivot.lineWidth = v),
-    }),
-  },
-  "pv-lineStyle": {
-    component: "select",
-    getProps: () => ({
-      class: "input",
-      value: chanDraft.penPivot.lineStyle,
-      onChange: (e) => (chanDraft.penPivot.lineStyle = e.target.value),
-      innerHTML: LINE_STYLES.map(
-        (o) => `<option value="${o.v}">${o.label}</option>`
-      ).join(""),
-    }),
-  },
-  "pv-upColor": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.penPivot.upColor,
-      onInput: (e) => (chanDraft.penPivot.upColor = e.target.value),
-    }),
-  },
-  "pv-downColor": {
-    component: "input",
-    getProps: () => ({
-      class: "input color",
-      type: "color",
-      value: chanDraft.penPivot.downColor,
-      onInput: (e) => (chanDraft.penPivot.downColor = e.target.value),
-    }),
-  },
-  "pv-alpha": {
+    get: () => chanDraft.segment.lineWidth,
+    set: (_, v) => (chanDraft.segment.lineWidth = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  "seg-color": makeColorInput({
+    get: () => chanDraft.segment.color,
+    set: (_, v) => (chanDraft.segment.color = v),
+  }),
+
+  "seg-lineStyle": makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => chanDraft.segment.lineStyle,
+    set: (_, v) => (chanDraft.segment.lineStyle = v),
+  }),
+
+  "pv-lineWidth": makeNumberSpinner({
     component: NumberSpinner,
-    getProps: () => ({
-      modelValue: chanDraft.penPivot.alphaPercent,
-      min: UI_LIMITS.percentage.min,
-      max: UI_LIMITS.percentage.max,
-      step: UI_LIMITS.percentage.step,
-      integer: true,
-      "onUpdate:modelValue": (v) => (chanDraft.penPivot.alphaPercent = v),
-    }),
-  },
+    get: () => chanDraft.penPivot.lineWidth,
+    set: (_, v) => (chanDraft.penPivot.lineWidth = v),
+    min: UI_LIMITS.lineWidth.min,
+    max: UI_LIMITS.lineWidth.max,
+    step: UI_LIMITS.lineWidth.step,
+    fracDigits: 1,
+  }),
+
+  "pv-lineStyle": makeNativeSelect({
+    options: LINE_STYLES,
+    get: () => chanDraft.penPivot.lineStyle,
+    set: (_, v) => (chanDraft.penPivot.lineStyle = v),
+  }),
+
+  "pv-upColor": makeColorInput({
+    get: () => chanDraft.penPivot.upColor,
+    set: (_, v) => (chanDraft.penPivot.upColor = v),
+  }),
+
+  "pv-downColor": makeColorInput({
+    get: () => chanDraft.penPivot.downColor,
+    set: (_, v) => (chanDraft.penPivot.downColor = v),
+  }),
+
+  "pv-alpha": makeNumberSpinner({
+    component: NumberSpinner,
+    get: () => chanDraft.penPivot.alphaPercent,
+    set: (_, v) => (chanDraft.penPivot.alphaPercent = v),
+    min: UI_LIMITS.percentage.min,
+    max: UI_LIMITS.percentage.max,
+    step: UI_LIMITS.percentage.step,
+    integer: true,
+  }),
 });
 </script>
