@@ -1,12 +1,13 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartControls.vue -->
 <!-- ============================== -->
-<!-- V8.0 - 阶段1：ATR 即时更新“归口 RenderHub”
-说明（严格遵循：ECharts原生优先 + 单写入者 + 杜绝竞态）：
-  - 移除组件侧对 ECharts 实例的 setOption 直接 patch（ATR_stop 与 breach marker 均由 RenderHub 统一 patch）。
-  - ATR 输入框 Enter/blur 仍“立即生效”：通过写 settings（触发 useMarketView 重算 indicators）
-    + renderHub.requestRender({reason:'atr_param'}) 请求 RenderHub 进行“等待 indicators 更新后的最小 patch”。
-  - 组件不再计算 ATR 线数据（computeAtrLineSeries 移除），避免双源/重复计算。
-  - Bars/日期区间/预设等行为保持原样（未改）。
+<!-- V8.2 - REFACTOR: 主图控制区数值输入统一走 @commit（根因整合，去掉 @blur 的重复触发）
+目标：
+  - 充分利用 NumberSpinner 的统一能力：
+      * Enter 提交 + 自动跳转下一格（由全局 hotkeys 处理）
+      * Blur 提交（同样会 emit commit）
+  - 上层只监听一个通道：@commit，用于“确认并生效”
+  - 起止时间：仅最后一格 @commit 触发 apply，其余格不绑定任何 apply（满足“前 N-1 不刷新，最后一格刷新”）
+  - 保持现有功能不减少：分时仍支持时分输入（10格）
 -->
 <template>
   <div class="controls-grid-2x2">
@@ -52,64 +53,178 @@
       <template v-if="!isMinute.value">
         <div class="inline-group">
           <span class="label">起：</span>
-          <NumberSpinner class="date-cell year" :model-value="startFields.Y"
-            @update:modelValue="(v) => (startFields.Y = v)" :min="1900" :max="2100" :integer="true" />
+          <NumberSpinner
+            class="date-cell year"
+            :model-value="startFields.Y"
+            @update:modelValue="(v) => (startFields.Y = v)"
+            :min="1900"
+            :max="2100"
+            :integer="true"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="startFields.M"
-            @update:modelValue="(v) => (startFields.M = v)" :min="1" :max="12" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="startFields.M"
+            @update:modelValue="(v) => (startFields.M = v)"
+            :min="1"
+            :max="12"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="startFields.D"
-            @update:modelValue="(v) => (startFields.D = v)" :min="1" :max="31" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="startFields.D"
+            @update:modelValue="(v) => (startFields.D = v)"
+            :min="1"
+            :max="31"
+            :integer="true"
+            :pad-digits="2"
+          />
         </div>
+
         <div class="inline-group">
           <span class="label">止：</span>
-          <NumberSpinner class="date-cell year" :model-value="endFields.Y" @update:modelValue="(v) => (endFields.Y = v)"
-            :min="1900" :max="2100" :integer="true" />
+          <NumberSpinner
+            class="date-cell year"
+            :model-value="endFields.Y"
+            @update:modelValue="(v) => (endFields.Y = v)"
+            :min="1900"
+            :max="2100"
+            :integer="true"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="endFields.M"
-            @update:modelValue="(v) => (endFields.M = v)" :min="1" :max="12" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="endFields.M"
+            @update:modelValue="(v) => (endFields.M = v)"
+            :min="1"
+            :max="12"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="endFields.D"
-            @update:modelValue="(v) => (endFields.D = v)" :min="1" :max="31" :integer="true" :pad-digits="2"
-            @blur="applyInlineRangeDaily" title="日期失焦立即应用" />
+          <!-- 最后一格：只用 @commit 触发应用（Enter/Tab/失焦都会变成 commit） -->
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="endFields.D"
+            @update:modelValue="(v) => (endFields.D = v)"
+            :min="1"
+            :max="31"
+            :integer="true"
+            :pad-digits="2"
+            @commit="applyInlineRangeDaily"
+            title="最后一格：Enter/Tab/失焦提交后立即应用"
+          />
         </div>
       </template>
 
       <template v-else>
         <div class="inline-group">
           <span class="label">起：</span>
-          <NumberSpinner class="date-cell year" :model-value="startFields.Y"
-            @update:modelValue="(v) => (startFields.Y = v)" :min="1900" :max="2100" :integer="true" />
+          <NumberSpinner
+            class="date-cell year"
+            :model-value="startFields.Y"
+            @update:modelValue="(v) => (startFields.Y = v)"
+            :min="1900"
+            :max="2100"
+            :integer="true"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="startFields.M"
-            @update:modelValue="(v) => (startFields.M = v)" :min="1" :max="12" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="startFields.M"
+            @update:modelValue="(v) => (startFields.M = v)"
+            :min="1"
+            :max="12"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="startFields.D"
-            @update:modelValue="(v) => (startFields.D = v)" :min="1" :max="31" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="startFields.D"
+            @update:modelValue="(v) => (startFields.D = v)"
+            :min="1"
+            :max="31"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep space"></span>
-          <NumberSpinner class="time-cell short" :model-value="startFields.h"
-            @update:modelValue="(v) => (startFields.h = v)" :min="0" :max="23" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="time-cell short"
+            :model-value="startFields.h"
+            @update:modelValue="(v) => (startFields.h = v)"
+            :min="0"
+            :max="23"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">:</span>
-          <NumberSpinner class="time-cell short" :model-value="startFields.m"
-            @update:modelValue="(v) => (startFields.m = v)" :min="0" :max="59" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="time-cell short"
+            :model-value="startFields.m"
+            @update:modelValue="(v) => (startFields.m = v)"
+            :min="0"
+            :max="59"
+            :integer="true"
+            :pad-digits="2"
+          />
         </div>
+
         <div class="inline-group">
           <span class="label">止：</span>
-          <NumberSpinner class="date-cell year" :model-value="endFields.Y" @update:modelValue="(v) => (endFields.Y = v)"
-            :min="1900" :max="2100" :integer="true" />
+          <NumberSpinner
+            class="date-cell year"
+            :model-value="endFields.Y"
+            @update:modelValue="(v) => (endFields.Y = v)"
+            :min="1900"
+            :max="2100"
+            :integer="true"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="endFields.M"
-            @update:modelValue="(v) => (endFields.M = v)" :min="1" :max="12" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="endFields.M"
+            @update:modelValue="(v) => (endFields.M = v)"
+            :min="1"
+            :max="12"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">-</span>
-          <NumberSpinner class="date-cell short" :model-value="endFields.D"
-            @update:modelValue="(v) => (endFields.D = v)" :min="1" :max="31" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="date-cell short"
+            :model-value="endFields.D"
+            @update:modelValue="(v) => (endFields.D = v)"
+            :min="1"
+            :max="31"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep space"></span>
-          <NumberSpinner class="time-cell short" :model-value="endFields.h"
-            @update:modelValue="(v) => (endFields.h = v)" :min="0" :max="23" :integer="true" :pad-digits="2" />
+          <NumberSpinner
+            class="time-cell short"
+            :model-value="endFields.h"
+            @update:modelValue="(v) => (endFields.h = v)"
+            :min="0"
+            :max="23"
+            :integer="true"
+            :pad-digits="2"
+          />
           <span class="sep">:</span>
-          <NumberSpinner class="time-cell short" :model-value="endFields.m"
-            @update:modelValue="(v) => (endFields.m = v)" :min="0" :max="59" :integer="true" :pad-digits="2"
-            @blur="applyInlineRangeMinute" title="分钟失焦立即应用" />
+          <!-- 最后一格：只用 @commit 触发应用 -->
+          <NumberSpinner
+            class="time-cell short"
+            :model-value="endFields.m"
+            @update:modelValue="(v) => (endFields.m = v)"
+            :min="0"
+            :max="59"
+            :integer="true"
+            :pad-digits="2"
+            @commit="applyInlineRangeMinute"
+            title="最后一格：Enter/Tab/失焦提交后立即应用"
+          />
         </div>
       </template>
     </div>
@@ -118,26 +233,55 @@
       <div class="right-inline">
         <div class="atr-inline">
           <span class="label">ATR止损基准价：</span>
-          <NumberSpinner class="atr-spin base" v-model="draftBasePrice" :min="ATR_INPUT_LIMITS.basePrice.min"
-            :step="ATR_INPUT_LIMITS.basePrice.step" :frac-digits="3" :allowNullCommit="true"
-            :nullCommitFill="getLatestCloseAsDefaultBase" @commit="confirmEdit('base')" @blur="confirmEdit('base')"
-            title="Enter确认并立即生效；Esc回滚；清空+Enter回到自动对齐" />
+          <NumberSpinner
+            class="atr-spin base"
+            v-model="draftBasePrice"
+            :min="ATR_INPUT_LIMITS.basePrice.min"
+            :step="ATR_INPUT_LIMITS.basePrice.step"
+            :frac-digits="3"
+            :allowNullCommit="true"
+            :nullCommitFill="getLatestCloseAsDefaultBase"
+            @commit="() => confirmEdit('base')"
+            title="Enter确认并立即生效；Esc回滚；清空+Enter回到自动对齐"
+          />
 
           <span class="label">| 固定止损倍数：</span>
-          <NumberSpinner class="atr-spin mult" v-model="draftFixedN" :min="ATR_INPUT_LIMITS.multiple.min"
-            :max="ATR_INPUT_LIMITS.multiple.max" :step="ATR_INPUT_LIMITS.multiple.step" :frac-digits="1"
-            @commit="confirmEdit('fixedN')" @blur="confirmEdit('fixedN')" title="Enter确认并立即生效；Esc回滚；失焦确认（影响固定止损多/空）" />
+          <NumberSpinner
+            class="atr-spin mult"
+            v-model="draftFixedN"
+            :min="ATR_INPUT_LIMITS.multiple.min"
+            :max="ATR_INPUT_LIMITS.multiple.max"
+            :step="ATR_INPUT_LIMITS.multiple.step"
+            :frac-digits="1"
+            @commit="() => confirmEdit('fixedN')"
+            title="Enter确认并立即生效；Esc回滚；失焦提交同样生效（影响固定止损多/空）"
+          />
 
           <span class="label">| 波动止损倍数：</span>
-          <NumberSpinner class="atr-spin mult" v-model="draftChanN" :min="ATR_INPUT_LIMITS.multiple.min"
-            :max="ATR_INPUT_LIMITS.multiple.max" :step="ATR_INPUT_LIMITS.multiple.step" :frac-digits="1"
-            @commit="confirmEdit('chanN')" @blur="confirmEdit('chanN')" title="Enter确认并立即生效；Esc回滚；失焦确认（影响波动止损多/空）" />
+          <NumberSpinner
+            class="atr-spin mult"
+            v-model="draftChanN"
+            :min="ATR_INPUT_LIMITS.multiple.min"
+            :max="ATR_INPUT_LIMITS.multiple.max"
+            :step="ATR_INPUT_LIMITS.multiple.step"
+            :frac-digits="1"
+            @commit="() => confirmEdit('chanN')"
+            title="Enter确认并立即生效；Esc回滚；失焦提交同样生效（影响波动止损多/空）"
+          />
         </div>
 
         <div class="bars-inline">
           <span class="label">| Bars：</span>
-          <NumberSpinner class="bars-input" v-model="barsStr" :min="1" :max="Math.max(1, vm.meta.value?.all_rows || 1)"
-            :integer="true" @blur="applyBarsInline" :placeholder="String(barsStr)" title="失焦应用，可见根数" />
+          <NumberSpinner
+            class="bars-input"
+            v-model="barsStr"
+            :min="1"
+            :max="Math.max(1, vm.meta.value?.all_rows || 1)"
+            :integer="true"
+            @commit="applyBarsInline"
+            :placeholder="String(barsStr)"
+            title="Enter/Tab/失焦提交后应用，可见根数"
+          />
         </div>
       </div>
     </div>

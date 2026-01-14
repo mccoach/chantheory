@@ -1,14 +1,11 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\ui\NumberSpinner.vue -->
 <!--
-V3.4 - NEW: nullCommitFill（清空提交后立即回填显示值）
-解决问题：
-  - 编辑态下组件不会用外部 modelValue 覆盖 editText（避免抢输入），
-    导致“清空回车后业务写回了对齐值，但输入框仍显示空并闪烁”。
-  - 本版本在 allowNullCommit=true 的前提下，支持 nullCommitFill：
-      * 当用户清空并提交（Enter/blur）时，控件自身将 editText 立即回填为 fill 值（字符串），
-        无需失焦即可看到对齐数值。
-兼容性：
-  - allowNullCommit 默认 false，nullCommitFill 默认 null，其他使用点行为完全不变。
+V3.6 - FIX: allowNullCommit 空值 Enter 提交时避免焦点争抢
+根因：
+  - Enter 提交成功后会触发全局 hotkeys 跳到下一格；
+  - allowNullCommit 分支里原先 nextTick 强制 focus 自身，导致与下一格争抢焦点。
+修复：
+  - 移除 allowNullCommit 分支中的 nextTick focus，自身不再抢回焦点。
 -->
 <template>
   <div
@@ -40,7 +37,7 @@ V3.4 - NEW: nullCommitFill（清空提交后立即回填显示值）
 </template>
 
 <script setup>
-import { computed, ref, watch, nextTick } from "vue";
+import { computed, ref, watch } from "vue";
 import { clampNumber } from "@/utils/numberUtils";
 
 const props = defineProps({
@@ -54,21 +51,16 @@ const props = defineProps({
   fracDigits: { type: Number, default: -1 }, // -1=不控制；>=0 固定位数（提交时生效）
   padDigits: { type: Number, default: 0 },   // 0=不控制；>0 整数位左补零（展示态生效）
 
-  // NEW: 是否允许把“清空”作为一次有效提交（提交 null）
-  // 默认 false，保证其它使用点行为完全不变。
+  // 是否允许把“清空”作为一次有效提交（提交 null）
   allowNullCommit: { type: Boolean, default: false },
 
-  // NEW: 清空提交后回填（返回 number|string|null）
-  // - 仅在 allowNullCommit=true 且用户清空提交时使用
-  // - 既可以传一个固定值，也可以传函数（建议函数以读取最新对齐值）
+  // 清空提交后回填（返回 number|string|null）
   nullCommitFill: { type: [Function, Number, String, null], default: null },
 });
 
-// NEW: 增加 commit 事件
 const emit = defineEmits(["update:modelValue", "blur", "commit"]);
 const inp = ref(null);
 
-// ===== 编辑态：输入过程中不进行“纠错式提交” =====
 const isEditing = ref(false);
 const editText = ref("");
 const focusSnapshot = ref(null);
@@ -80,7 +72,6 @@ function roundTo(n, d) {
   return Math.round((n + Number.EPSILON) * f) / f;
 }
 
-// 展示态格式化（非编辑态）
 function formatDisplay(val) {
   let n = Number(val);
   if (!Number.isFinite(n)) return String(val ?? "");
@@ -115,11 +106,8 @@ function formatDisplay(val) {
   return sign + (dotIdx >= 0 ? `${padded}.${fracPart}` : padded);
 }
 
-// 提交态解析：一次性 normalize + clamp + round
 function normalizeAndClampFromText(text) {
   const t = String(text ?? "").trim();
-
-  // 中间态不提交（默认行为）
   if (t === "" || t === "-" || t === "." || t === "-.") return null;
 
   const n0 = Number(t);
@@ -134,11 +122,9 @@ function normalizeAndClampFromText(text) {
   return n;
 }
 
-// 外部 modelValue 变化：不抢编辑输入
 watch(
   () => props.modelValue,
   (v) => {
-    // 外部变更不抢编辑输入
     if (isEditing.value) return;
     editText.value = formatDisplay(v);
   },
@@ -154,7 +140,6 @@ function onFocus() {
 
   isEditing.value = true;
   focusSnapshot.value = props.modelValue;
-  // 进入编辑态：用当前展示值作为初始文本（避免补零干扰）
   editText.value = formatDisplay(props.modelValue);
 }
 
@@ -179,6 +164,19 @@ function resolveNullFillValue() {
   }
 }
 
+function requestFocusMove(dir) {
+  try {
+    const d = Number(dir);
+    if (!Number.isFinite(d) || d === 0) return;
+
+    window.dispatchEvent(
+      new CustomEvent("chan:numspin-focus-next", {
+        detail: { dir: d },
+      })
+    );
+  } catch {}
+}
+
 function commitIfPossible(source) {
   const raw = String(editText.value ?? "");
   const t = raw.trim();
@@ -187,27 +185,18 @@ function commitIfPossible(source) {
     emit("update:modelValue", null);
     emitCommit(null, source);
 
-    // NEW: 立即回填显示（仍保持编辑态与焦点）
     const fill = resolveNullFillValue();
     if (fill != null && fill !== "") {
       editText.value = formatDisplay(fill);
-      // 让外部也尽快收敛到同一个值（业务可能会在 confirmEdit 里再 set 一次）
       const nFill = Number(fill);
       if (Number.isFinite(nFill)) {
         emit("update:modelValue", nFill);
-        // 注意：这里不 emit commit(nFill)，避免一次 Enter 产生两次“提交语义”
-      } else {
-        // 非数字则只回填文本（不改 modelValue）
       }
     } else {
       editText.value = "";
     }
 
-    // 确保光标状态稳定
-    try {
-      nextTick(() => inp.value?.focus?.());
-    } catch {}
-
+    // FIX: 不再 nextTick 强制 focus 自身，避免与“跳下一格”争抢焦点
     return true;
   }
 
@@ -240,12 +229,10 @@ function onKeydown(e) {
     return;
   }
 
-  // 编辑态优先：Esc 回滚，Enter 提交
   if (e.key === "Escape") {
     e.preventDefault();
     e.stopPropagation();
     cancelToSnapshot();
-    // 保持焦点，方便继续输入
     try { inp.value?.focus?.(); } catch {}
     return;
   }
@@ -253,7 +240,11 @@ function onKeydown(e) {
   if (e.key === "Enter") {
     e.preventDefault();
     e.stopPropagation();
-    commitIfPossible("enter");
+
+    const ok = commitIfPossible("enter");
+    if (ok) {
+      requestFocusMove(e.shiftKey ? -1 : +1);
+    }
     return;
   }
 }
@@ -284,7 +275,6 @@ function stepBy(delta) {
 
   emit("update:modelValue", next);
 
-  // 步进/滚轮不视为“提交完成”，不 emit commit
   if (isEditing.value) {
     editText.value = formatDisplay(next);
   }
@@ -295,7 +285,6 @@ function onBlur() {
 
   const ok = commitIfPossible("blur");
   if (!ok) {
-    // 默认行为：非法/中间态回退到当前 modelValue 的展示值
     editText.value = formatDisplay(props.modelValue);
   }
 
@@ -373,6 +362,7 @@ function onBlur() {
 }
 .arrow.down::before {
   content: "";
+  position: absolute;
   width: 0;
   height: 0;
   border-left: 4px solid transparent;

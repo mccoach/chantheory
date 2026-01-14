@@ -1,12 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V9.2 - 档案由 /api/profile/current 提供 + 第一行补充 symbol_index 元信息
-     
-     本版新增：
-       - 在第1行“名称（代码）”之后，追加展示来自 symbol_index 的：
-         market / board / class / type / listing_date
-       - 这些元信息仅用于补充展示，数据源为 useSymbolIndex.findBySymbol。
-       - 样式上采用类似第二行 info-line-2 的小号灰色文字，与名称/代码区分。
+<!-- V10.0 - 下载弹窗 footerActions 归口
+     - 下载弹窗底部按钮不再由 App.vue 硬编码或 useCustomFooter 控制；
+     - 改为 dialogManager.open 时配置 footerActions；
+     - ModalDialog 统一渲染按钮，业务仅提供动作。
 -->
 <template>
   <div class="symbol-row">
@@ -50,12 +47,10 @@
 
     <!-- 中列：标的信息 -->
     <div class="col-middle">
-      <!-- 第1行：名称、代码 + 元信息（market / board / class / type / listing_date）-->
       <div class="info-line-1" :title="middleTitle">
         <span class="sym-name">{{ middleName }}</span>
         <span class="sym-code">（{{ middleCode }}）</span>
 
-        <!-- NEW: 来自 symbol_index 的元信息（小号灰字） -->
         <span v-if="middleMarket" class="sym-meta-chip">|</span>
         <span v-if="middleMarket" class="sym-meta-chip">
           市场：{{ middleMarket }}
@@ -82,7 +77,6 @@
         </span>
       </div>
 
-      <!-- 第2行：档案信息（完全来自 vm.profile）-->
       <div class="info-line-2" v-if="hasProfileInfo">
         <span v-if="profileInfo.totalShares" class="info-item">
           总股本：{{ profileInfo.totalShares }}万股（份）
@@ -121,7 +115,26 @@
 
     <!-- 右列：操作按钮 -->
     <div class="col-right">
-      <SymbolActions :loading="vm.loading.value" @refresh="onRefreshClick" />
+      <SymbolActions :loading="vm.loading.value" />
+
+      <div class="seg seg-download-refresh">
+        <button
+          class="seg-btn"
+          title="下载"
+          @click="openDownloadDialog"
+          :disabled="vm.loading.value"
+        >
+          数据下载
+        </button>
+        <button
+          class="seg-btn"
+          title="刷新"
+          @click="onRefreshClick"
+          :disabled="vm.loading.value"
+        >
+          行情刷新
+        </button>
+      </div>
     </div>
   </div>
 
@@ -129,14 +142,7 @@
 </template>
 
 <script setup>
-import {
-  inject,
-  ref,
-  computed,
-  onMounted,
-  onBeforeUnmount,
-  watch,
-} from "vue";
+import { inject, ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
@@ -155,6 +161,7 @@ const settings = useUserSettings();
 const { ready, search, findBySymbol, ensureIndexFresh } = useSymbolIndex();
 const hub = useViewCommandHub();
 const wl = useWatchlist();
+const dialogManager = inject("dialogManager", null);
 
 const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
 const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
@@ -198,7 +205,7 @@ async function selectItem(item) {
   );
 
   inputText.value = sym;
-  vm.code.value = sym;               // 仅改 code，任务触发交给 useMarketView.watch(code)
+  vm.code.value = sym;
   settings.setLastSymbol(sym);
   settings.addSymbolHistoryEntry(sym);
 
@@ -251,7 +258,6 @@ async function forceRefreshSymbols() {
   try {
     console.log("[SymbolPanel] 🔄 强制刷新标的列表...");
 
-    // 使用 ensureIndexFresh(true) 触发 symbol_index 任务并读取最新快照
     await ensureIndexFresh(true);
 
     console.log("[SymbolPanel] ✅ 标的列表刷新完成");
@@ -428,7 +434,6 @@ const profileInfo = computed(() => {
   };
 });
 
-// ===== 判断是否显示档案行 =====
 const hasProfileInfo = computed(() => {
   const p = profileInfo.value;
   return !!(
@@ -444,7 +449,6 @@ const hasProfileInfo = computed(() => {
   );
 });
 
-// ===== 格式化工具 =====
 function formatPe(pe) {
   const num = Number(pe);
   if (!Number.isFinite(num) || num <= 0) return "-";
@@ -455,7 +459,6 @@ function formatUpdatedAt(str) {
   if (!str) return "-";
   const dt = parseTimeValue(str);
   if (!dt) return "-";
-  // 显示到分钟即可
   return formatDateTime(dt, true);
 }
 
@@ -464,6 +467,43 @@ function formatListingDate(intVal) {
   const n = Number(intVal);
   if (!Number.isFinite(n)) return "";
   return formatYmdInt(n);
+}
+
+// ==============================
+// 下载弹窗入口（Dialog Action Contract：纯 key）
+// ==============================
+async function openDownloadDialog() {
+  try {
+    if (!dialogManager || typeof dialogManager.open !== "function") return;
+
+    const mod = await import("@/components/ui/DataDownloadDialog.vue");
+
+    dialogManager.open({
+      title: "盘后下载",
+      contentComponent: mod.default,
+      props: {},
+
+      footerActions: [
+        {
+          key: "export_list",
+          label: "导出列表",
+          variant: "ok",
+          disabled: false,
+        },
+        {
+          key: "download_data",
+          label: "数据下载",
+          disabled: false,
+        },
+        {
+          key: "close",
+          label: "关闭",
+        },
+      ],
+    });
+  } catch (e) {
+    console.error("[SymbolPanel] openDownloadDialog failed:", e);
+  }
 }
 </script>
 
@@ -474,6 +514,7 @@ function formatListingDate(intVal) {
   align-items: center;
   column-gap: 12px;
 }
+
 .col-left {
   display: flex;
   align-items: center;
@@ -485,7 +526,6 @@ function formatListingDate(intVal) {
   display: inline-block;
 }
 
-/* 中间栏：多行布局 */
 .col-middle {
   display: flex;
   flex-direction: column;
@@ -495,7 +535,6 @@ function formatListingDate(intVal) {
   overflow: hidden;
 }
 
-/* 第1行：名称和代码 + 元信息 */
 .info-line-1 {
   display: flex;
   align-items: baseline;
@@ -513,18 +552,17 @@ function formatListingDate(intVal) {
   color: #bbb;
 }
 
-/* NEW: 第一行追加元信息的样式（参考第二行的 info-item） */
 .sym-meta-chip {
   font-size: 11px;
   color: #999;
   margin-left: 8px;
   white-space: nowrap;
 }
+
 .sym-meta-chip + .sym-meta-chip {
   margin-left: 6px;
 }
 
-/* 第2行：档案信息 */
 .info-line-2 {
   display: flex;
   gap: 12px;
@@ -544,6 +582,7 @@ function formatListingDate(intVal) {
   align-items: center;
   gap: 8px;
 }
+
 .err {
   margin-top: 8px;
   color: #e74c3c;
@@ -604,13 +643,57 @@ function formatListingDate(intVal) {
     opacity: 0.6;
     transform: translateY(-50%) rotate(0deg);
   }
+
   50% {
     opacity: 0.3;
     transform: translateY(-50%) rotate(180deg);
   }
+
   100% {
     opacity: 0.6;
     transform: translateY(-50%) rotate(360deg);
   }
+}
+
+.seg-download-refresh {
+  height: 36px;
+}
+
+.seg {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #444;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #1a1a1a;
+  height: 36px;
+}
+
+.seg-btn {
+  background: transparent;
+  color: #ddd;
+  border: none;
+  padding: 8px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 14px;
+  line-height: 20px;
+  width: 90px;
+  height: 36px;
+  border-radius: 0;
+}
+
+.seg-btn + .seg-btn {
+  border-left: 1px solid #444;
+}
+
+.seg-btn:hover:not(:disabled) {
+  background: #2b4b7e;
+  color: #fff;
+}
+
+.seg-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>

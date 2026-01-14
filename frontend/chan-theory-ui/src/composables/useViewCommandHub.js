@@ -1,12 +1,12 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewCommandHub.js
 // ==============================
-// V5.6 - 清理 markerWidthPx/hostWidthPx 旧宽度体系（去冗余）
-//
-// 本轮修复（tooltip 基点持久化）：
-//   - 新增 tipTs：最后一次“显示 tooltip”的 bar.ts（独立于 rightTs 窗口锚点）
-//   - 唯一写入语义：由图表 showTip 事件触发 SyncTipTs（立即持久化）
-//   - 键盘左右移动只读取 tipTs 作为基点（映射到 idx），并通过 showTip 推进，
-//     持久化仍由 showTip 监听完成，保证单入口。
+// V5.7 - FIX: 右侧触底（最新）时刷新后保持“贴最新”
+// 变更说明：
+//   - 需求：当用户当前处于最右端（最新），刷新/数据延长后应继续贴住新的最新K；
+//           当用户在中段浏览时，刷新后应保持当前位置。
+//   - 修复点：原 setDatasetBounds 使用 atRightEdge（依赖旧 maxTsRef）判断，
+//            在 maxTs 更新后无法正确“贴新右端”。
+//   - 新逻辑：以“更新 maxTsRef 之前的旧 maxTsRef”判断是否在右端，然后在更新后对齐到新 maxTs。
 // ==============================
 
 import { ref, computed } from "vue";
@@ -175,13 +175,26 @@ export function useViewCommandHub() {
 
   function setDatasetBounds({ minTs, maxTs, totalRows }) {
     allRows.value = Math.max(0, Number(totalRows || 0));
+
+    // ===== NEW: 用“旧 maxTsRef”判断刷新前是否处于最右端 =====
+    // 规则：
+    //   - 若 rightTs 为空：视为“跟随右端”（因为用户没有明确锚点）
+    //   - 若 oldMaxTs 有效且 rightTs == oldMaxTs：视为在右端
+    const oldMaxTs = Number.isFinite(+maxTsRef.value) ? +maxTsRef.value : null;
+    const wasAtRightEdge =
+      rightTs.value == null ||
+      (oldMaxTs != null && Number.isFinite(rightTs.value) && Number(rightTs.value) === Number(oldMaxTs));
+
+    // ===== 更新边界 =====
     minTsRef.value = Number.isFinite(+minTs) ? +minTs : null;
     maxTsRef.value = Number.isFinite(+maxTs) ? +maxTs : null;
 
-    if (atRightEdge.value && maxTsRef.value != null) {
+    // ===== NEW: 若刷新前在右端，则贴到“新 maxTs” =====
+    if (wasAtRightEdge && maxTsRef.value != null) {
       rightTs.value = +maxTsRef.value;
     }
 
+    // ===== 非右端：仅做边界钳制（保持当前位置）=====
     if (rightTs.value != null) {
       if (minTsRef.value != null && rightTs.value < +minTsRef.value) {
         rightTs.value = +minTsRef.value;

@@ -1,16 +1,14 @@
 # backend/settings.py
 # ==============================
-# V7.3 - 新增 watchlist_update Task 类型（移除 symbol_index 子类型）
+# V8.1 - After Hours Bulk 设置收敛 + priority 全量 ×10
 #
-# 说明：
-#   - DATA_TYPE_DEFINITIONS 中仅保留核心 Task 类型：
-#       * trade_calendar
-#       * current_kline
-#       * current_factors
-#       * symbol_index
-#       * current_profile
-#       * watchlist_update
-#   - symbol_index_sh_stock/sz_stock/sh_fund/sz_fund 等子类型已移除。
+# 改动：
+#   1) Settings 新增：
+#        - bulk_max_jobs（默认 30000）
+#        - after_hours_priority（默认 1000）
+#   2) DATA_TYPE_DEFINITIONS.priority 全量乘以 10：
+#        10→100, 20→200, 30→300, 40→400
+#      仅改变数值尺度，不改变相对优先级顺序。
 # ==============================
 
 from __future__ import annotations
@@ -57,6 +55,14 @@ class Settings:
     default_market: str = "CN"
     data_source_name: str = "unified_executor"
     sync_init_start_date: int = 19900101
+
+    # ==============================
+    # After Hours Bulk（盘后批量入队）设置
+    # ==============================
+    # 单次 /api/ensure-data/bulk 允许提交的最大 job 数（建议值，后端不因超限拒绝）
+    bulk_max_jobs: int = int(os.getenv("CHAN_BULK_MAX_JOBS", "30000"))
+    # 盘后批量任务默认 priority（数值越大优先级越低；1000 低于常规 100/200/300/400）
+    after_hours_priority: int = int(os.getenv("CHAN_AFTER_HOURS_PRIORITY", "1000"))
 
     # 日志系统
     # log_file: 日志文件路径
@@ -127,46 +133,46 @@ settings = Settings()
 # ==============================
 
 DATA_TYPE_DEFINITIONS = {
-    # P10：交易日历
+    # P100：交易日历
     "trade_calendar": {
         "name": "交易日历",
         "category": "trade_calendar",
-        "priority": 10,
+        "priority": 100,
         # 是否在任务结束时通过事件总线 → SSE 通知前端（执行器已不再依赖该字段）
         "sse_notify": True,
     },
-    # P20：当前标的核心数据
+    # P200：当前标的核心数据
     "current_kline": {
         "name": "当前K线",
         "category": "kline",
-        "priority": 20,
+        "priority": 200,
         "sse_notify": True,
     },
     "current_factors": {
         "name": "当前复权因子",
         "category": "factors",
-        "priority": 20,
+        "priority": 200,
         "sse_notify": True,
     },
-    # P30：全局数据（标的列表）
+    # P300：全局数据（标的列表）
     "symbol_index": {
         "name": "标的列表",
         "category": "symbol_index",
-        "priority": 30,
+        "priority": 300,
         "sse_notify": True,
     },
-    # P40：当前标的档案（不阻塞渲染）
+    # P400：当前标的档案（不阻塞渲染）
     "current_profile": {
         "name": "当前档案",
         "category": "profile",
-        "priority": 40,
+        "priority": 400,
         "sse_notify": True,
     },
-    # P40：自选池更新（元数据类任务）
+    # P400：自选池更新（元数据类任务）
     "watchlist_update": {
         "name": "自选池更新",
         "category": "meta",
-        "priority": 40,
+        "priority": 400,
         "sse_notify": True,
     },
 }

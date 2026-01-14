@@ -83,20 +83,20 @@ export const DEFAULT_MA_CONFIGS = {
 
   // --- MA30（设置窗已暴露，默认关闭）---
   MA30: {
-    enabled: false,         // 是否启用（默认关闭）（✅ 设置窗可改）
+    enabled: true,         // 是否启用（默认关闭）（✅ 设置窗可改）
     period: 30,             // 周期（✅ 设置窗可改）
     color: STYLE_PALETTE.lines[3].color,  // 颜色（✅ 设置窗可改）
     width: 1,               // 线宽（✅ 设置窗可改）
-    style: "dashed",        // 线型（虚线，区分短期MA）（✅ 设置窗可改）
+    style: "solid",        // 线型（虚线，区分短期MA）（✅ 设置窗可改）
   },
 
   // --- MA60（设置窗已暴露，默认关闭）---
   MA60: {
-    enabled: false,         // 是否启用（默认关闭）（✅ 设置窗可改）
+    enabled: true,         // 是否启用（默认关闭）（✅ 设置窗可改）
     period: 60,             // 周期（✅ 设置窗可改）
     color: STYLE_PALETTE.lines[4].color,  // 颜色（✅ 设置窗可改）
     width: 1,               // 线宽（✅ 设置窗可改）
-    style: "dashed",        // 线型（✅ 设置窗可改）
+    style: "solid",        // 线型（✅ 设置窗可改）
   },
 
   // --- MA120（设置窗已暴露，默认关闭）---
@@ -105,7 +105,7 @@ export const DEFAULT_MA_CONFIGS = {
     period: 120,            // 周期（✅ 设置窗可改）
     color: STYLE_PALETTE.lines[5].color,  // 颜色（✅ 设置窗可改）
     width: 1,               // 线宽（✅ 设置窗可改）
-    style: "dotted",        // 线型（点线，区分中长期MA）（✅ 设置窗可改）
+    style: "solid",        // 线型（点线，区分中长期MA）（✅ 设置窗可改）
   },
 
   // --- MA250（设置窗已暴露，默认关闭）---
@@ -114,7 +114,7 @@ export const DEFAULT_MA_CONFIGS = {
     period: 250,            // 周期（年线）（✅ 设置窗可改）
     color: STYLE_PALETTE.lines[6].color,  // 颜色（✅ 设置窗可改）
     width: 1,               // 线宽（✅ 设置窗可改）
-    style: "dotted",        // 线型（✅ 设置窗可改）
+    style: "solid",        // 线型（✅ 设置窗可改）
   },
 };
 

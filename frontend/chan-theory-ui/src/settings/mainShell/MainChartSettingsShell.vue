@@ -7,7 +7,11 @@ V2.0 - 阶段2：设置保存归口 RenderHub（快照比对 + FULL/PATCH 决策
 - 执行：调用 renderHub.requestRender({intent:'settings_apply', mode, patchPlan})
 说明：
   - 仅对“用户暴露交互”的设置项做分类
-  - 结构性/算法性/系列增删类变更一律归 FULL（确定性规则）
+  - 结构性/算法性/系列增删类变更一律归 FULL（确定性规则范式）
+
+V3.1 - Dialog Action Contract（纯 key · 去冗版）
+- 彻底去冗：只暴露 defineExpose({ dialogActions })
+- footerActions 的执行不再依赖任何“固定方法名”（save/resetAll 等）
 ============================== -->
 <template>
   <div class="shell-wrap">
@@ -160,7 +164,6 @@ const baseAtrStop = createBaselineKeeper(atrStopManager.draft);
 const baseAtrBreach = createBaselineKeeper(atrBreachManager.draft);
 
 onMounted(() => {
-  // 弹窗打开后：记录 baseline（只对用户可交互草稿）
   baseKline.setBaseline(klineManager.draft);
   baseMa.setBaseline(maManager.draft);
   baseChan.setBaseline(chanManager.draft);
@@ -171,20 +174,15 @@ onMounted(() => {
 
 // ==============================
 // 规则表：路径 → FULL / PATCH(facet, kind)
-// 仅覆盖“用户暴露交互”的设置项（其余不管）
 // ==============================
 const RULES = [
-  // ===== display: K线结构类（FULL-6/7：结构变化）=====
-  { prefix: "klineStyle", mode: "FULL" }, // barPercent/originalEnabled/mergedEnabled/displayOrder/... 全部视为结构性
+  { prefix: "klineStyle", mode: "FULL" },
 
-  // ===== display: MA =====
-  // period 变更：FULL（涉及指标数据重算与一致性；阶段2先不做增量）
   {
     prefix: "maConfigs",
     mode: "FULL",
     match: (p) => /^maConfigs\.[^.]+\.period$/.test(p),
   },
-  // MA 样式：PATCH（facet=display, kind=style）
   {
     prefix: "maConfigs",
     mode: "PATCH",
@@ -195,12 +193,9 @@ const RULES = [
       !/^maConfigs\.[^.]+\.period$/.test(p),
   },
 
-  // ===== chan: 算法/结构（FULL-7）=====
   { prefix: "chanSettings", mode: "FULL" },
   { prefix: "fractalSettings", mode: "FULL" },
 
-  // ===== atr: stop settings =====
-  // 影响计算输出的参数：PATCH (facet=atr, kind=param)
   {
     prefix: "atrStopSettings",
     mode: "PATCH",
@@ -209,7 +204,6 @@ const RULES = [
     match: (p) =>
       /^atrStopSettings\.(fixed|chandelier)\.(long|short)\.(n|atrPeriod|lookback|basePriceMode)$/.test(p),
   },
-  // 样式：PATCH (facet=atr, kind=style)
   {
     prefix: "atrStopSettings",
     mode: "PATCH",
@@ -218,7 +212,6 @@ const RULES = [
     match: (p) =>
       /^atrStopSettings\.(fixed|chandelier)\.(long|short)\.(color|lineWidth|lineStyle)$/.test(p),
   },
-  // enabled 开关：FULL（系列集合增删，按你的 FULL-6(9)/FULL-7(12)）
   {
     prefix: "atrStopSettings",
     mode: "FULL",
@@ -226,9 +219,6 @@ const RULES = [
       /^atrStopSettings\.(fixed|chandelier)\.(long|short)\.enabled$/.test(p),
   },
 
-  // ===== atr: breach settings =====
-  // markerPercent：不做业务 patch（由 widthController 生效），但它属于用户交互项；
-  // 这里仍归为 PATCH(param)，用于触发一次“对齐”（让 widthController 后续在缩放/resize时自然更新，且 breach series 仍在）
   {
     prefix: "atrBreachSettings",
     mode: "PATCH",
@@ -236,7 +226,6 @@ const RULES = [
     kind: "param",
     match: (p) => /^atrBreachSettings\.markerPercent$/.test(p),
   },
-  // breach 样式：PATCH(style)
   {
     prefix: "atrBreachSettings",
     mode: "PATCH",
@@ -244,7 +233,6 @@ const RULES = [
     kind: "style",
     match: (p) => /^atrBreachSettings\.(shape|fill)$/.test(p),
   },
-  // breach enabled：FULL（overlay series 增删）
   {
     prefix: "atrBreachSettings",
     mode: "FULL",
@@ -252,9 +240,7 @@ const RULES = [
   },
 ];
 
-// === 暴露给 App.vue 的核心方法 ===
-const save = () => {
-  // 1) 计算变更路径（baseline vs draft）
+function saveImpl() {
   const changed = [];
 
   changed.push(...diffPaths(baseKline.getBaseline(), klineManager.draft, "klineStyle"));
@@ -264,16 +250,11 @@ const save = () => {
   changed.push(...diffPaths(baseAtrStop.getBaseline(), atrStopManager.draft, "atrStopSettings"));
   changed.push(...diffPaths(baseAtrBreach.getBaseline(), atrBreachManager.draft, "atrBreachSettings"));
 
-  // diffPaths 会在 basePath 相同且对象相同引用时返回空；这里合并去重
   const changedPaths = Array.from(new Set(changed.map((x) => String(x || "").trim()).filter(Boolean)));
 
-  // 2) 分类与决策
   const cls = classifyPaths(changedPaths, RULES);
-
-  // 未知路径：为保证正确性，升级 FULL
   const mustFull = cls.hasFull || cls.hasUnknown;
 
-  // 3) 写入 settings（保持原有保存语义）
   klineManager.save();
   maManager.save();
   chanManager.save();
@@ -281,7 +262,6 @@ const save = () => {
   atrStopManager.save();
   atrBreachManager.save();
 
-  // 4) 更新 baseline（保存后新的 baseline 应为当前草稿）
   baseKline.setBaseline(klineManager.draft);
   baseMa.setBaseline(maManager.draft);
   baseChan.setBaseline(chanManager.draft);
@@ -289,7 +269,6 @@ const save = () => {
   baseAtrStop.setBaseline(atrStopManager.draft);
   baseAtrBreach.setBaseline(atrBreachManager.draft);
 
-  // 5) 触发渲染：归口 RenderHub
   if (mustFull) {
     renderHub.requestRender({ intent: "settings_apply", mode: "full" });
   } else {
@@ -297,20 +276,33 @@ const save = () => {
     renderHub.requestRender({ intent: "settings_apply", mode: "patch", patchPlan });
   }
 
-  // 6) 维持原有“刷新”语义（但不再作为渲染触发源）
   hub.execute("Refresh", {});
-};
+}
 
-const resetAll = () => {
+function resetAllImpl() {
   klineResetter.resetAll();
   maResetter.resetAll();
   chanResetter.resetAll();
   fractalResetter.resetAll();
   atrStopResetter.resetAll();
   atrBreachResetter.resetAll();
+}
+
+// ==============================
+// Dialog Action Contract（纯 key · 唯一出口）
+// ==============================
+const dialogActions = {
+  reset_all: () => {
+    resetAllImpl();
+  },
+
+  save: ({ close }) => {
+    saveImpl();
+    close?.();
+  },
 };
 
-defineExpose({ save, resetAll });
+defineExpose({ dialogActions });
 
 const dialogManager = inject("dialogManager", null);
 watch(

@@ -1,14 +1,14 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\VolumeSettingsPanel.vue -->
 <!-- ==============================
 说明：量窗设置面板（UI-only）
-本轮改动：
-  - select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
-  - 控件 getProps 样板代码用工厂函数标准化复用
+本轮修复：
+  - MAVOL 总控 controller 改为稳定实例（禁止 computed 重建导致 snapshot 被重置）
+  - keys 使用 DEFAULT_VOL_SETTINGS.mavolStyles 的稳定键集合
 ============================== -->
 <template>
   <SettingsGrid
     :rows="rows"
-    :itemsPerRow="5"
+    :itemsPerRow="6"
     @row-toggle="onRowToggle"
     @row-reset="onRowReset"
   >
@@ -28,7 +28,7 @@ import {
   MARKER_SHAPE_OPTIONS,
   LINE_STYLES,
 } from "@/constants";
-import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
+import { createBooleanGroupTriController } from "@/composables/useTriToggle";
 import {
   useSettingsRenderer,
   makeNativeSelect,
@@ -39,14 +39,26 @@ import {
 const volDraft = inject("volDraft");
 const volResetter = inject("volResetter");
 
-const mavolTri = useTriMasterToggle({
-  items: Object.keys(volDraft.mavolStyles || {}).map((mk) => ({
-    get: () => !!volDraft.mavolStyles?.[mk]?.enabled,
-    set: (v) => {
-      const conf = volDraft.mavolStyles[mk] || {};
-      volDraft.mavolStyles[mk] = { ...conf, enabled: !!v };
-    },
-  })),
+// === 关键修复：keys 固定 + controller 单例（不可 computed 重建） ===
+const MAVOL_KEYS = Object.keys(DEFAULT_VOL_SETTINGS.mavolStyles || {});
+
+function getMavolEnabled(k) {
+  const key = String(k || "");
+  return !!volDraft?.mavolStyles?.[key]?.enabled;
+}
+
+function setMavolEnabled(k, v) {
+  const key = String(k || "");
+  const conf = volDraft?.mavolStyles?.[key];
+  if (!conf) return;
+  volDraft.mavolStyles[key] = { ...(conf || {}), enabled: !!v };
+}
+
+const mavolTri = createBooleanGroupTriController({
+  scopeKey: "mavolMaster",
+  keys: MAVOL_KEYS,
+  get: getMavolEnabled,
+  set: setMavolEnabled,
 });
 
 const rows = computed(() => {
@@ -65,14 +77,16 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
+  const ui = mavolTri.getUi();
+
   out.push({
     key: "mavol-global",
     name: "均线总控",
     items: [],
     check: {
       type: "tri",
-      checked: mavolTri.masterUi.checked.value,
-      indeterminate: mavolTri.masterUi.indeterminate.value,
+      checked: ui.checked,
+      indeterminate: ui.indeterminate,
     },
     reset: { visible: false },
   });
@@ -123,19 +137,22 @@ const rows = computed(() => {
 function onRowToggle(row) {
   const key = String(row.key || "");
   const vd = volDraft;
+
   if (key === "mavol-global") {
-    mavolTri.cycleOnce();
+    mavolTri.cycle();
     return;
   }
+
   if (key.startsWith("mavol-")) {
     const mk = key.slice("mavol-".length);
     const conf = vd.mavolStyles[mk];
     if (conf) {
       conf.enabled = !conf.enabled;
-      mavolTri.updateSnapshot();
+      mavolTri.syncSnapshotFromCurrent(); // external change -> 更新 snapshot（规则2）
     }
     return;
   }
+
   if (key === "marker-pump") vd.markerPump.enabled = !vd.markerPump.enabled;
   if (key === "marker-dump") vd.markerDump.enabled = !vd.markerDump.enabled;
 }
@@ -151,7 +168,7 @@ function onRowReset(row) {
   if (key.startsWith("mavol-")) {
     const mk = key.slice("mavol-".length);
     volResetter?.resetPath(`mavolStyles.${mk}`);
-    mavolTri.updateSnapshot();
+    mavolTri.syncSnapshotFromCurrent();
     return;
   }
 

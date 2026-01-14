@@ -176,3 +176,18 @@ export async function declareCurrentProfile({ symbol, force_fetch = false }) {
     },
   });
 }
+
+/**
+ * NEW: 批量入队（盘后批量任务契约）
+ * - POST /api/ensure-data/bulk
+ * - 本函数只做薄封装：不做分片/不做等待/不做重试（这些属于业务层，如 DataDownloadDialog）
+ *
+ * @param {object} payload
+ * @returns {Promise<object>} - 后端 bulk 响应体（opaque，前端仅按契约字段读取）
+ */
+export async function declareEnsureDataBulk(payload) {
+  const body = payload && typeof payload === "object" ? payload : {};
+
+  const { data } = await api.post("/api/ensure-data/bulk", body);
+  return data;
+}

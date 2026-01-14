@@ -1,9 +1,8 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\indicatorShell\IndicatorSettingsShell.vue -->
 <!-- ==============================
-V2.0 - 阶段2：副图设置保存归口 RenderHub（快照比对 + FULL/PATCH 决策）
-说明：
-  - 当前阶段：副图设置项（volSettings/macdSettings）暂不做细粒度 patch，统一视为 FULL（最稳）
-  - 仍实现 baseline/diff/classify 的框架，后续扩展 patch 只需补规则与 RenderHub 执行器
+V3.1 - Dialog Action Contract（纯 key · 去冗版）
+- 彻底去冗：只暴露 defineExpose({ dialogActions })
+- footerActions 的执行不再依赖任何“固定方法名”
 ============================== -->
 <template>
   <div class="shell-wrap">
@@ -99,14 +98,13 @@ function handleClickOutside(_e) {
   // 保持原有行为（此处不处理菜单，TechPanels 内处理）
 }
 
-// 规则：阶段2副图设置统一 FULL（最稳，符合你的 FULL-8/结构性风险规避）
-// 未来若要 pane级 patch，可将这里规则改为 PATCH 并在 RenderHub 中实现对应执行器
+// 规则：阶段2副图设置统一 FULL（最稳）
 const RULES = [
   { prefix: "volSettings", mode: "FULL" },
   { prefix: "macdSettings", mode: "FULL" },
 ];
 
-const save = () => {
+function saveImpl() {
   const changed = [];
   changed.push(...diffPaths(baseVol.getBaseline(), volManager.draft, "volSettings"));
   changed.push(...diffPaths(baseMacd.getBaseline(), macdManager.draft, "macdSettings"));
@@ -116,15 +114,12 @@ const save = () => {
   const cls = classifyPaths(changedPaths, RULES);
   const mustFull = cls.hasFull || cls.hasUnknown;
 
-  // 保存
   volManager.save();
   macdManager.save();
 
-  // baseline 更新
   baseVol.setBaseline(volManager.draft);
   baseMacd.setBaseline(macdManager.draft);
 
-  // 触发渲染
   if (mustFull) {
     renderHub.requestRender({ intent: "settings_apply", mode: "full" });
   } else {
@@ -133,14 +128,28 @@ const save = () => {
   }
 
   hub.execute("Refresh", {});
-};
+}
 
-const resetAll = () => {
+function resetAllImpl() {
   volResetter.resetAll();
   macdResetter.resetAll();
+}
+
+// ==============================
+// Dialog Action Contract（纯 key · 唯一出口）
+// ==============================
+const dialogActions = {
+  reset_all: () => {
+    resetAllImpl();
+  },
+
+  save: ({ close }) => {
+    saveImpl();
+    close?.();
+  },
 };
 
-defineExpose({ save, resetAll });
+defineExpose({ dialogActions });
 
 watch(
   () => dialogManager?.activeDialog?.value?.activeTab,

@@ -1,14 +1,15 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\MarketDisplaySettings.vue -->
 <!-- ==============================
 说明：行情设置面板（新版：UI-only, 数据驱动渲染）
-本轮改动：
-  1) select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
-  2) 控件 getProps 样板代码用工厂函数标准化复用
+本轮修复：
+  - 均线总控 controller 改为稳定实例（禁止 computed 重建导致 snapshot 被重置）
+  - keys 使用 DEFAULT_MA_CONFIGS 的稳定键集合
+  - 三态规则：snapshot -> all -> none -> snapshot；退化两态仅当 snapshot 本身退化
 ============================== -->
 <template>
   <SettingsGrid
     :rows="rows"
-    :itemsPerRow="5"
+    :itemsPerRow="6"
     @row-toggle="onRowToggle"
     @row-reset="onRowReset"
   >
@@ -28,8 +29,8 @@ import {
   DISPLAY_ORDER_OPTIONS,
   UI_LIMITS,
 } from "@/constants";
-import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
 import NumberSpinner from "@/components/ui/NumberSpinner.vue";
+import { createBooleanGroupTriController } from "@/composables/useTriToggle";
 import {
   useSettingsRenderer,
   makeNativeSelect,
@@ -43,18 +44,26 @@ const maDraft = inject("maDraft");
 const klineResetter = inject("klineResetter");
 const maResetter = inject("maResetter");
 
-function getMAKeys() {
-  return Object.keys(maDraft || {});
+// === 关键修复：keys 固定 + controller 单例（不可 computed 重建） ===
+const MA_KEYS = Object.keys(DEFAULT_MA_CONFIGS);
+
+function getMaEnabled(k) {
+  const key = String(k || "");
+  return !!maDraft?.[key]?.enabled;
 }
 
-const maTri = useTriMasterToggle({
-  items: getMAKeys().map((mk) => ({
-    get: () => !!maDraft?.[mk]?.enabled,
-    set: (v) => {
-      const conf = maDraft[mk] || {};
-      maDraft[mk] = { ...conf, enabled: !!v };
-    },
-  })),
+function setMaEnabled(k, v) {
+  const key = String(k || "");
+  if (!key || !maDraft?.[key]) return;
+  const conf = maDraft[key] || {};
+  maDraft[key] = { ...conf, enabled: !!v };
+}
+
+const maTri = createBooleanGroupTriController({
+  scopeKey: "maMaster",
+  keys: MA_KEYS,
+  get: getMaEnabled,
+  set: setMaEnabled,
 });
 
 const rows = computed(() => {
@@ -90,14 +99,16 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
+  const ui = maTri.getUi();
+
   out.push({
     key: "ma-global",
     name: "均线总控",
     items: [],
     check: {
       type: "tri",
-      checked: !!maTri.masterUi.checked.value,
-      indeterminate: !!maTri.masterUi.indeterminate.value,
+      checked: !!ui.checked,
+      indeterminate: !!ui.indeterminate,
     },
     reset: { visible: false },
   });
@@ -123,8 +134,9 @@ const rows = computed(() => {
 
 function onRowToggle(row) {
   const key = String(row.key || "");
+
   if (key === "ma-global") {
-    maTri.cycleOnce();
+    maTri.cycle();
     return;
   }
   if (key === "k-original") {
@@ -140,7 +152,7 @@ function onRowToggle(row) {
     const conf = maDraft[mk];
     if (conf) {
       conf.enabled = !conf.enabled;
-      maTri.updateSnapshot();
+      maTri.syncSnapshotFromCurrent(); // external change -> 更新 snapshot（规则2）
     }
   }
 }
@@ -164,7 +176,7 @@ function onRowReset(row) {
   if (key.startsWith("ma-")) {
     const mk = key.slice(3);
     maResetter?.resetPath(mk);
-    maTri.updateSnapshot();
+    maTri.syncSnapshotFromCurrent();
   }
 }
 

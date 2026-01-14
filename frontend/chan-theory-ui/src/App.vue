@@ -1,17 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
-<!-- V9.0 - 启动指令集版
-     
-     启动阶段被动任务顺序：
-       1) 探活（/api/ping）
-       2) 建立 SSE 连接（/api/events/stream）
-       3) trade_calendar：POST /api/ensure-data type=trade_calendar + waitTasksDone
-       4) 当前标的行情：vm.reload({force_refresh:false, with_profile:true})
-       5) 标的索引：
-            5.1) 先 ensureIndexFresh(false) 读取现有快照（或缓存/内置），确保搜索等功能立即可用；
-            5.2) 再 POST /api/ensure-data type=symbol_index（force_fetch=false）+ waitTasksDone；
-            5.3) 最后再次 ensureIndexFresh(false) 读取可能更新后的快照。
-       6) 自选池：wl.smartLoad()
+<!-- V10.2 - 新增：footer-left 支持 props 透传（方案D）
+       - 规则：
+         * 内容组件可 defineExpose({ dialogFooterLeft: Component, dialogFooterLeftProps: Object|Ref })
+         * App.vue 读取 props 并通过 v-bind 透传（向后兼容：无 props 则不传）
+       - 优势：数据流显式、组件完全解耦、符合 Vue 最佳实践
 -->
 <template>
   <div v-if="!backendReady" class="loading-screen">
@@ -31,16 +24,25 @@
       :title="activeDialog.title"
       :tabs="activeDialog.tabs"
       :activeTab="activeDialog.activeTab"
+      :footerActions="activeDialog.footerActions"
       @close="handleModalClose"
-      @save="handleModalSave"
-      @reset-all="handleModalResetAll"
       @tab-change="handleTabChange"
+      @action="handleFooterAction"
     >
       <template #body>
         <component
           :is="activeDialog.contentComponent"
           v-bind="activeDialog.props || {}"
           ref="dialogBodyRef"
+        />
+      </template>
+
+      <!-- 关键升级：支持 props 透传 -->
+      <template #footer-left>
+        <component 
+          v-if="footerLeftComp" 
+          :is="footerLeftComp" 
+          v-bind="footerLeftProps"
         />
       </template>
     </ModalDialog>
@@ -100,6 +102,25 @@ provide("exportController", exportCtl);
 const activeDialog = computed(() => dialogManager.activeDialog.value);
 const dialogBodyRef = ref(null);
 
+// footer-left：组件 + props（新契约）
+const footerLeftComp = computed(() => {
+  const body = dialogBodyRef.value;
+  const comp = body && typeof body === "object" ? body.dialogFooterLeft : null;
+  return comp || null;
+});
+
+const footerLeftProps = computed(() => {
+  const body = dialogBodyRef.value;
+  const props = body && typeof body === "object" ? body.dialogFooterLeftProps : null;
+  
+  // 支持 ref/computed（自动解包 .value）
+  if (props && typeof props === "object" && "value" in props) {
+    return props.value || {};
+  }
+  
+  return props && typeof props === "object" ? props : {};
+});
+
 function nowTs() {
   return new Date().toISOString();
 }
@@ -116,40 +137,56 @@ function handleModalClose() {
   }
 }
 
-function handleModalSave() {
-  try {
-    if (dialogBodyRef.value && typeof dialogBodyRef.value.save === "function") {
-      dialogBodyRef.value.save();
-    }
-    const onSave = activeDialog.value?.onSave;
-    if (typeof onSave === "function") {
-      onSave();
-    }
-    dialogManager.close();
-  } catch (e) {
-    console.error("Modal save error:", e);
-  }
-}
-
-function handleModalResetAll() {
-  try {
-    if (dialogBodyRef.value && typeof dialogBodyRef.value.resetAll === "function") {
-      dialogBodyRef.value.resetAll();
-    }
-    const onResetAll = activeDialog.value?.onResetAll;
-    if (typeof onResetAll === "function") {
-      onResetAll();
-    }
-  } catch (e) {
-    console.error("Modal resetAll error:", e);
-  }
-}
-
 function handleTabChange(key) {
   try {
     dialogManager.setActiveTab(key);
   } catch (e) {
     console.error("Tab change error:", e);
+  }
+}
+
+// footerActions 统一分发（纯粹单通道：只按 action.key 路由）
+// 规则：
+//   1) key==='close'：由壳层执行关闭（内置动作）
+//   2) 其它 key：从内容组件暴露的 dialogActions 字典中取 handler 执行
+//   3) 找不到 handler：DEV warn，PROD 静默
+function handleFooterAction(action) {
+  try {
+    const act = action && typeof action === "object" ? action : {};
+    const key = String(act.key || "").trim();
+    if (!key) return;
+
+    // 内置动作：关闭
+    if (key === "close") {
+      handleModalClose();
+      return;
+    }
+
+    const body = dialogBodyRef.value;
+
+    // 内容组件契约：defineExpose({ dialogActions: { [key]: fn } })
+    const actionMap = body && typeof body === "object" ? body.dialogActions : null;
+    const fn = actionMap && typeof actionMap === "object" ? actionMap[key] : null;
+
+    if (typeof fn !== "function") {
+      if (import.meta.env.DEV) {
+        const title = String(activeDialog.value?.title || "");
+        console.warn(
+          `[DialogActionContract] missing handler: key='${key}' title='${title}'`
+        );
+      }
+      return;
+    }
+
+    fn({
+      action: act,
+      actionKey: key,
+      dialogManager,
+      dialogBodyRef: body,
+      close: handleModalClose,
+    });
+  } catch (e) {
+    console.error("Footer action error:", e);
   }
 }
 
@@ -180,7 +217,21 @@ onMounted(async () => {
   registerModalSettingsHandlers({
     hotkeys,
     onClose: handleModalClose,
-    onSave: handleModalSave,
+    // 重要：保存快捷键走 footerActions 的"保存并关闭"按钮语义。
+    // 为保持现有快捷键行为回归，这里将 modal:settings 的 saveSettings 映射为：
+    //   - 如果当前弹窗存在 footerActions 且其中包含 key='save' 的动作，则触发它；
+    //   - 否则保持无动作（避免壳层猜测业务实现）。
+    onSave: () => {
+      try {
+        const acts = activeDialog.value?.footerActions || [];
+        const saveAct = Array.isArray(acts) ? acts.find((a) => String(a?.key || "") === "save") : null;
+        if (saveAct) {
+          handleFooterAction(saveAct);
+        }
+      } catch (e) {
+        console.error("Hotkey saveSettings error:", e);
+      }
+    },
   });
 
   const alive = await waitBackendAlive({ intervalMs: 200 });
@@ -223,10 +274,9 @@ onMounted(async () => {
     console.log(`${nowTs()} [App] trade_calendar-ready`);
   } catch (e) {
     console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
-    // 日历失败不阻断 UI，但后端缺口判断可能退化
   }
 
-  // NEW: 前端加载 trade_calendar 快照并常驻内存（若后端未提供 GET /api/trade-calendar 会失败）
+  // 前端加载 trade_calendar 快照并常驻内存
   try {
     const tc = useTradeCalendar();
     await tc.ensureLoaded();
@@ -243,10 +293,8 @@ onMounted(async () => {
   await vm.reload({ force_refresh: false, with_profile: true });
 
   // 3) 标的索引：
-  //    3.1) 先读现有快照；若失败退回缓存/内置。
   await ensureIndexFresh(false);
 
-  //    3.2) 再声明 symbol_index 任务（缺口判断），完成后再读一次快照。
   try {
     const t = await declareSymbolIndex({ force_fetch: false });
     const tid = t?.task_id ? String(t.task_id) : null;

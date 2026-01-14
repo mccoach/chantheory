@@ -1,11 +1,10 @@
 // frontend/src/charts/options/tooltips/index.js
 // ==============================
-// V4.1 - 主图 Tooltip：TR/MATR/ATR_stop 显式注入版（职责清晰、无隐式依赖）
-//
+// V4.2 - NEW: 主图 Tooltip 增加“涨跌幅”（今收/昨收百分比）
 // 变更要点：
-//   1) makeMainTooltipFormatter 显式接收 indicators（由主图 builder 注入）
-//   2) TR/MATR 永不出图：tooltip 通过 indicators 只读展示（不重复计算）
-//   3) tooltip 顺序：价格(GD OHL C) -> MA 均线族 -> TR -> 各 MATR/ATR_stop 对
+//   - 仅在 tooltip 中展示，不出图、不写入 indicators
+//   - 数据来源：candles（唯一真相源）
+//   - 位置：C 行下面、MA 均线族上面
 // ==============================
 
 import { formatNumberScaled } from "@/utils/numberUtils";
@@ -111,6 +110,22 @@ export function makeMainTooltipFormatter({
     };
   }
 
+  // NEW: 计算涨跌幅（今收/昨收）
+  function calcChgPctByClose(idx) {
+    const i = Number(idx);
+    if (!Number.isFinite(i)) return null;
+
+    const cur = list[i];
+    const prev = i > 0 ? list[i - 1] : null;
+
+    const c = Number(cur?.c);
+    const prevC = Number(prev?.c);
+
+    if (!Number.isFinite(c) || !Number.isFinite(prevC) || prevC === 0) return null;
+
+    return ((c - prevC) / prevC) * 100;
+  }
+
   return function (params) {
     if (!Array.isArray(params) || !params.length) return "";
 
@@ -198,6 +213,25 @@ export function makeMainTooltipFormatter({
           value: formatNumberScaled(k.c, { digits: 3, allowEmpty: true }),
         })
       );
+
+      // ===== NEW: 涨跌幅（C 下、MA 上）=====
+      {
+        const chgPct = calcChgPctByClose(idx);
+        rows.push(
+          renderRow({
+            color: null,
+            label: "涨跌幅",
+            value:
+              chgPct == null
+                ? "-"
+                : `${formatNumberScaled(chgPct, {
+                  digits: 2,
+                  allowEmpty: true,
+                  minIntDigitsToScale: 9,
+                })}%`,
+          })
+        );
+      }
     } else {
       const closeLineColor =
         (STYLE_PALETTE.lines[5] && STYLE_PALETTE.lines[5].color) || STYLE_PALETTE.lines[0].color;

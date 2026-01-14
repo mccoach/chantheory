@@ -5,6 +5,12 @@
 - 仅提供 UI 外观与事件，不承载三态算法/持久化/重置逻辑；
 - 槽位 control 由上层渲染具体控件；
 - 复用现有 .std-* 样式，与 ModalDialog/App 的 :deep 定义无缝对接。
+
+V2.1 - CHANGED: 三态 checkbox 统一改用全局指令 v-tri-state（在 useTriToggle 归口）
+原因：
+  - 原生 checkbox 的 indeterminate 只是“视觉态”，点击后会残留 checked 真值导致反弹勾选；
+  - v-tri-state 会在 mounted/updated 强制写入 DOM，确保显示只由真实状态决定；
+  - SettingsGrid 不再定义本地 vSetIndeterminate，避免重复与分散。
 -->
 
 <template>
@@ -38,13 +44,12 @@
       <!-- 倒数第2列：复选框（单/三态） -->
       <div class="std-check">
         <template v-if="row.check && (row.check.visible ?? true)">
-          <!-- 三态复选 -->
+          <!-- 三态复选（统一用 v-tri-state 强制同步 DOM） -->
           <input
             v-if="row.check.type === 'tri'"
             type="checkbox"
-            :checked="!!row.check.checked"
             :disabled="!!row.check.disabled"
-            v-set-indeterminate="!!row.check.indeterminate"
+            v-tri-state="{ checked: !!row.check.checked, indeterminate: !!row.check.indeterminate }"
             @change="$emit('row-toggle', row)"
           />
           <!-- 单态复选 -->
@@ -90,7 +95,7 @@ const props = defineProps({
   },
   itemsPerRow: {
     type: Number,
-    default: 5, // 与现有标准网格保持一致：5列“标签+输入”
+    default: 6, // 与现有标准网格保持一致：5列“标签+输入”
   },
 });
 defineEmits(["row-toggle", "row-reset"]);
@@ -101,17 +106,6 @@ function normalizedItems(row) {
   const pad = Math.max(0, props.itemsPerRow - raw.length);
   return [...raw, ...new Array(pad).fill(null)];
 }
-
-// 自定义指令：设置 indeterminate 状态（适用于三态复选框）
-// 在 <script setup> 下，命名为 vSetIndeterminate，可在模板中直接使用 v-set-indeterminate
-const vSetIndeterminate = {
-  mounted(el, binding) {
-    try { el.indeterminate = !!binding.value; } catch {}
-  },
-  updated(el, binding) {
-    try { el.indeterminate = !!binding.value; } catch {}
-  },
-};
 </script>
 
 <style scoped>

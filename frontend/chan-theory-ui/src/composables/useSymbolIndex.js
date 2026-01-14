@@ -1,5 +1,12 @@
 // frontend/chan-theory-ui/src/composables/useSymbolIndex.js
 // ==============================
+// V6.1 - NEW: 暴露全量列表只读接口 listAll()
+// 目的：为“盘后下载/选择集构建”弹窗提供全量标的列表数据源（不打后端，不改变现有行为）。
+// 约束：
+//   - 单一真相源仍为本模块内部 idx.value（由后端快照/缓存/内置构建）；
+//   - listAll 只读返回（默认 shallow copy），避免外部误改内部状态。
+// ==============================
+//
 // V6.0 - Task/Job + 快照双阶段版（支持档案信息 + 精简日志）
 //
 // 本版要点：
@@ -282,10 +289,21 @@ export function useSymbolIndex() {
     return idx.value.find((it) => it.symbol === q) || null;
   }
 
+  // ==============================
+  // NEW: 全量列表只读接口（供下载弹窗使用）
+  // ==============================
+  function listAll({ clone = true } = {}) {
+    const arr = Array.isArray(idx.value) ? idx.value : [];
+    return clone === false ? arr : arr.slice();
+  }
+
   return {
     ready,
     search,
     findBySymbol,
     ensureIndexFresh,
+
+    // NEW
+    listAll,
   };
 }

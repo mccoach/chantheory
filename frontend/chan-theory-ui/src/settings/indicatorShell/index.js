@@ -1,11 +1,13 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\indicatorShell\index.js
 // ==============================
 // 说明：指标窗设置壳的对外入口函数 openIndicatorSettings
-// - 职责：通过全局 dialogManager 打开设置壳组件 IndicatorSettingsShell.vue。
-// - 逻辑：
-//   * 根据传入的 initialKind 确定 activeTab。
-//   * VOL 和 AMOUNT 共享同一个 "量窗" 标签页。
-//   * 为所有支持的指标构建 tabs 数组。
+//
+// V3.0 - footerActions 统一版
+// 目标：所有弹窗底部按钮统一由 ModalDialog 渲染；业务通过 footerActions 配置。
+//
+// V4.0 - Dialog Action Contract（纯 key）
+// 变更：footerActions 不再携带 onClick；只声明 key/label。
+//       具体执行由 App.vue 按 action.key 路由到内容组件 expose 的 dialogActions[key]。
 // ==============================
 
 export async function openIndicatorSettings(dialogManager, { initialKind = "VOL" } = {}) {
@@ -17,23 +19,40 @@ export async function openIndicatorSettings(dialogManager, { initialKind = "VOL"
   const Shell = mod.default;
 
   const tabs = [
-    { key: "VOL", label: "量窗" }, // VOL 和 AMOUNT 共用
+    { key: "VOL", label: "量窗" },
     { key: "MACD", label: "MACD" },
     { key: "KDJ", label: "KDJ" },
     { key: "RSI", label: "RSI" },
     { key: "BOLL", label: "BOLL" },
   ];
 
-  // 如果 initialKind 是 AMOUNT，则激活 VOL 标签页
-  const activeTab = String(initialKind).toUpperCase() === 'AMOUNT' ? 'VOL' : String(initialKind).toUpperCase();
+  const activeTab = String(initialKind).toUpperCase() === "AMOUNT"
+    ? "VOL"
+    : String(initialKind).toUpperCase();
 
   dialogManager.open({
     title: "副图指标设置",
     contentComponent: Shell,
-    props: { initialKind }, // 传递初始 kind，以便 Shell 内部知道上下文
+    props: { initialKind },
     tabs,
     activeTab,
-    // 保存与重置逻辑已移至 App.vue，通过 ref 直接调用子组件方法
+
+    footerActions: [
+      {
+        key: "reset_all",
+        label: "全部恢复默认",
+      },
+      {
+        key: "save",
+        label: "保存并关闭",
+        variant: "ok",
+      },
+      {
+        key: "close",
+        label: "取消",
+      },
+    ],
+
     onClose: () => {
       try {
         dialogManager.close();

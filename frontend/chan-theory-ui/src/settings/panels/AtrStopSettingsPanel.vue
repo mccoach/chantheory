@@ -9,7 +9,7 @@
 <template>
   <SettingsGrid
     :rows="rows"
-    :itemsPerRow="5"
+    :itemsPerRow="6"
     @row-toggle="onRowToggle"
     @row-reset="onRowReset"
   >

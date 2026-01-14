@@ -1,9 +1,12 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\SymbolActions.vue -->
 <!-- ============================== -->
-<!-- V2.3 - 快捷键按钮独立于刷新按钮（不再包含在 seg 内），刷新按钮样式与宽度完美回归 -->
+<!-- V2.4 - 删除独立【刷新】按钮，仅保留【快捷键设置】图标按钮
+     说明：
+       - 刷新功能已迁移到 SymbolPanel 的【下载/刷新】组合按钮中，页面仅保留一个刷新入口；
+       - 本组件职责回归为“快捷键设置入口”，避免重复按钮与职责混乱。
+-->
 <template>
   <div class="actions-group">
-    <!-- NEW: 独立图标按钮（左侧） -->
     <button
       class="icon-btn"
       title="快捷键设置"
@@ -12,18 +15,6 @@
       :disabled="loading"
       v-html="SETTINGS_ICON_SVG"
     ></button>
-
-    <!-- 刷新按钮：保持原结构与宽度 -->
-    <div class="seg">
-      <button
-        class="seg-btn"
-        title="刷新"
-        @click="$emit('refresh')"
-        :disabled="loading"
-      >
-        刷新
-      </button>
-    </div>
   </div>
 </template>
 
@@ -34,7 +25,6 @@ import { SETTINGS_ICON_SVG } from "@/constants/icons";
 defineProps({
   loading: { type: Boolean, default: false },
 });
-defineEmits(["refresh"]);
 
 const dialogManager = inject("dialogManager", null);
 
@@ -77,41 +67,5 @@ async function openHotkeySettings() {
 .icon-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-/* 刷新按钮容器（保持原样） */
-.seg {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid #444;
-  border-radius: 10px;
-  overflow: hidden;
-  background: #1a1a1a;
-  height: 36px;
-}
-
-/* 刷新按钮（保持原样：宽度 60px） */
-.seg-btn {
-  background: transparent;
-  color: #ddd;
-  border: none;
-  padding: 8px 14px;
-  cursor: pointer;
-  user-select: none;
-  font-size: 14px;
-  line-height: 20px;
-  width: 60px;
-  height: 36px;
-  border-radius: 10px;
-}
-
-.seg-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.seg-btn:hover:not(:disabled) {
-  background: #2b4b7e;
-  color: #fff;
 }
 </style>

@@ -1,9 +1,13 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\mainShell\index.js
 // ==============================
 // 说明：主窗设置壳的对外入口函数 openMainChartSettings
-// - 职责：通过全局 dialogManager 打开设置壳组件 MainChartSettingsShell.vue。
-// - 简化：移除 onSave/onResetAll 回调。保存和重置逻辑将由 App.vue 通过 ref 直接调用
-//         MainChartSettingsShell.vue 实例上暴露的方法来完成，不再通过事件。
+//
+// V3.0 - footerActions 统一版
+// 目标：所有弹窗底部按钮统一由 ModalDialog 渲染；业务通过 footerActions 配置。
+//
+// V4.0 - Dialog Action Contract（纯 key）
+// 变更：footerActions 不再携带 onClick；只声明 key/label。
+//       具体执行由 App.vue 按 action.key 路由到内容组件 expose 的 dialogActions[key]。
 // ==============================
 
 export async function openMainChartSettings(dialogManager, { activeTab = "chan" } = {}) {
@@ -21,10 +25,26 @@ export async function openMainChartSettings(dialogManager, { activeTab = "chan" 
     tabs: [
       { key: "display", label: "行情显示" },
       { key: "chan", label: "缠论标记" },
-      { key: "atr", label: "ATR止损" }, // NEW
+      { key: "atr", label: "ATR止损" },
     ],
     activeTab,
-    // 保存与重置逻辑已移至 App.vue，通过 ref 直接调用子组件方法
+
+    footerActions: [
+      {
+        key: "reset_all",
+        label: "全部恢复默认",
+      },
+      {
+        key: "save",
+        label: "保存并关闭",
+        variant: "ok",
+      },
+      {
+        key: "close",
+        label: "取消",
+      },
+    ],
+
     onClose: () => {
       try {
         dialogManager.close();

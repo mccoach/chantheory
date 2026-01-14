@@ -140,3 +140,69 @@ button:focus-visible {
   padding: 6px 10px;
   outline: none;
 }
+
+/* ============================= */
+/* 标准化：三态开关（checkbox skin）
+   说明：
+     - 原先该样式定义在 ModalDialog.vue（设置窗可用，但不属于“壳职责”）
+     - 现在迁移到 global.css，成为全局可复用的标准皮肤
+     - 业务只要使用 .std-check 包裹 input[type=checkbox] 即可复用
+   约定：
+     - checked：对勾
+     - indeterminate：横杠（用于三态“部分选择”）
+/* ============================= */
+
+.std-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.std-check input[type="checkbox"] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #555;
+  border-radius: 3px;
+  background: #0f0f0f;
+  position: relative;
+  cursor: pointer;
+  outline: none;
+}
+
+.std-check input[type="checkbox"]:hover {
+  border-color: #aaa;
+}
+
+.std-check input[type="checkbox"]:checked {
+  background: #2b4b7e;
+  border-color: #3c5f91;
+}
+
+.std-check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.std-check input[type="checkbox"]:indeterminate {
+  background: #7f8c8d;
+  border-color: #95a5a6;
+}
+
+.std-check input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 10px;
+  height: 2px;
+  background: #fff;
+  border-radius: 1px;
+}

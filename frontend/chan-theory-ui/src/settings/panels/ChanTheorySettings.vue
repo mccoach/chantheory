@@ -1,14 +1,15 @@
-<!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\settings\panels\ChanTheorySettings.vue -->
+<!-- src/settings/panels/ChanTheorySettings.vue -->
 <!-- ==============================
-说明：缠论设置面板（新版：UI-only）
-本轮改动：
-  - select 统一改为 options children 渲染（不再使用 innerHTML 拼接）
-  - 控件 getProps 样板代码用工厂函数标准化复用
+说明：缠论设置面板（UI-only）
+本轮变更：
+  - 使用 createBooleanGroupTriController 统一“分型总控”三态逻辑
+  - 删除旧 master toggle 与业务层大量样板代码
+  - 修复 tri.getScopes/getUi 不存在导致的运行时报错
 ============================== -->
 <template>
   <SettingsGrid
     :rows="rows"
-    :itemsPerRow="5"
+    :itemsPerRow="6"
     @row-toggle="onRowToggle"
     @row-reset="onRowReset"
   >
@@ -35,7 +36,7 @@ import {
   MARKER_SHAPE_OPTIONS,
   FILL_OPTIONS,
 } from "@/constants";
-import { useTriMasterToggle } from "@/settings/common/useTriMasterToggle";
+import { createBooleanGroupTriController } from "@/composables/useTriToggle";
 import {
   useSettingsRenderer,
   makeNativeSelect,
@@ -49,28 +50,39 @@ const fractalDraft = inject("fractalDraft");
 const chanResetter = inject("chanResetter", null);
 const fractalResetter = inject("fractalResetter", null);
 
-const frTri = useTriMasterToggle({
-  items: ["strong", "standard", "weak"]
-    .map((lvl) => ({
-      get: () => !!fractalDraft?.styleByStrength?.[lvl]?.enabled,
-      set: (v) => {
-        const s = fractalDraft.styleByStrength || {};
-        const conf = s[lvl] || {};
-        s[lvl] = { ...conf, enabled: !!v };
-        fractalDraft.styleByStrength = s;
-        const ss = fractalDraft.showStrength || {};
-        fractalDraft.showStrength = { ...ss, [lvl]: !!v };
-      },
-    }))
-    .concat([
-      {
-        get: () => !!fractalDraft?.confirmStyle?.enabled,
-        set: (v) => {
-          const cs = fractalDraft.confirmStyle || {};
-          fractalDraft.confirmStyle = { ...cs, enabled: !!v };
-        },
-      },
-    ]),
+// ===== 分型总控（三态）=====
+const FR_KEYS = ["strong", "standard", "weak", "confirm"];
+
+function getFrEnabled(k) {
+  const key = String(k || "");
+  if (key === "confirm") return !!fractalDraft?.confirmStyle?.enabled;
+  return !!fractalDraft?.styleByStrength?.[key]?.enabled;
+}
+
+function setFrEnabled(k, v) {
+  const key = String(k || "");
+  const on = !!v;
+
+  if (key === "confirm") {
+    const cs = fractalDraft.confirmStyle || {};
+    fractalDraft.confirmStyle = { ...cs, enabled: on };
+    return;
+  }
+
+  const s = fractalDraft.styleByStrength || {};
+  const cur = s[key] || {};
+  s[key] = { ...cur, enabled: on };
+  fractalDraft.styleByStrength = s;
+
+  const ss = fractalDraft.showStrength || {};
+  fractalDraft.showStrength = { ...ss, [key]: on };
+}
+
+const frTri = createBooleanGroupTriController({
+  scopeKey: "fractalStrengths",
+  keys: FR_KEYS,
+  get: getFrEnabled,
+  set: setFrEnabled,
 });
 
 const rows = computed(() => {
@@ -92,6 +104,8 @@ const rows = computed(() => {
     reset: { visible: true, title: "恢复默认" },
   });
 
+  const frUi = frTri.getUi();
+
   out.push({
     key: "fr-global",
     name: "分型总控",
@@ -103,8 +117,8 @@ const rows = computed(() => {
     ],
     check: {
       type: "tri",
-      checked: !!frTri.masterUi.checked.value,
-      indeterminate: !!frTri.masterUi.indeterminate.value,
+      checked: !!frUi.checked,
+      indeterminate: !!frUi.indeterminate,
     },
     reset: { visible: true, title: "恢复默认" },
   });
@@ -205,26 +219,37 @@ function onRowToggle(row) {
     cf.showUpDownMarkers = !cf.showUpDownMarkers;
     return;
   }
+
   if (key === "fr-global") {
-    frTri.cycleOnce();
+    frTri.cycle();
     return;
   }
 
   if (key.startsWith("fr-kind-")) {
     const kind = key.slice("fr-kind-".length);
+
+    // 单行 toggle 属于 external change：应更新 snapshot（规则2）
+    const before = frTri.tri.getSnapshot(frTri.scopeKey);
+
     if (kind === "confirm") {
       const cs = ff.confirmStyle || {};
       ff.confirmStyle = { ...cs, enabled: !(cs.enabled ?? true) };
-      frTri.updateSnapshot();
-      return;
+    } else {
+      const s = ff.styleByStrength || {};
+      const cur = s[kind] || {};
+      s[kind] = { ...cur, enabled: !cur.enabled };
+      ff.styleByStrength = s;
+
+      const ss = ff.showStrength || {};
+      ff.showStrength = { ...ss, [kind]: !!s[kind].enabled };
     }
-    const s = ff.styleByStrength || {};
-    const cur = s[kind] || {};
-    s[kind] = { ...cur, enabled: !cur.enabled };
-    ff.styleByStrength = s;
-    const ss = ff.showStrength || {};
-    ff.showStrength = { ...ss, [kind]: !!s[kind].enabled };
-    frTri.updateSnapshot();
+
+    // snapshot 刷新为“外部变化后的状态”（不自发污染来自总控 cycle）
+    // 这里我们显式调用，符合规则2（对总控而言，这是 external）
+    frTri.syncSnapshotFromCurrent();
+
+    // 避免 eslint 未使用
+    void before;
     return;
   }
 
@@ -272,7 +297,8 @@ function onRowReset(row) {
     fractalResetter?.resetPath("markerPercent");
     fractalResetter?.resetPath("showStrength");
     fractalResetter?.resetPath("confirmStyle");
-    frTri.updateSnapshot();
+
+    frTri.syncSnapshotFromCurrent();
     return;
   }
 
@@ -280,13 +306,13 @@ function onRowReset(row) {
     const kind = key.slice("fr-kind-".length);
     if (kind === "confirm") {
       fractalResetter?.resetPath("confirmStyle");
-      frTri.updateSnapshot();
+      frTri.syncSnapshotFromCurrent();
       return;
     }
     fractalResetter?.resetPath(`styleByStrength.${kind}`);
     const ss = fractalDraft.showStrength || {};
     fractalDraft.showStrength = { ...ss, [kind]: true };
-    frTri.updateSnapshot();
+    frTri.syncSnapshotFromCurrent();
     return;
   }
 
