@@ -1,8 +1,11 @@
 // src/composables/afterHoursBulk/bulkPayload.js
 // ==============================
 // AfterHoursBulk 模块：Bulk payload 纯构造器（纯函数）
-// - 只负责把“队列 job 定义”转为契约 jobs[] 与 payload
-// - 不做网络、不做 SSE、不做状态管理
+//
+// v1.1 契约改造：
+// - payload 新增 batch 字段（batch_id/client_instance_id/started_at/selected_symbols/planned_total_tasks）
+// - batch_id 与 client_instance_id 由前端生成并注入
+// - 本文件仍保持：不做网络、不做 SSE、不做持久化
 // ==============================
 
 import { AFTER_HOURS_PURPOSE } from "@/constants";
@@ -83,16 +86,29 @@ export function buildJobsFromQueue(queue) {
 }
 
 /**
- * 构造 bulk payload（契约格式）
+ * 构造 bulk payload（契约 v1.1 格式）
  * @param {object} args
  * @param {Array<object>} args.jobs
  * @param {boolean} args.force_fetch
  * @param {number|null} args.priority
+ * @param {object} args.batch - v1.1 批次信息（必须注入）
  * @returns {object}
  */
-export function buildAfterHoursBulkPayload({ jobs, force_fetch, priority }) {
+export function buildAfterHoursBulkPayload({ jobs, force_fetch, priority, batch }) {
+  const b = batch && typeof batch === "object" ? batch : {};
+
   return {
     purpose: AFTER_HOURS_PURPOSE,
+
+    // v1.1: batch
+    batch: {
+      batch_id: asStr(b.batch_id),
+      client_instance_id: asStr(b.client_instance_id),
+      started_at: asStr(b.started_at) || nowIso(),
+      selected_symbols: Number.isFinite(+b.selected_symbols) ? +b.selected_symbols : 0,
+      planned_total_tasks: Number.isFinite(+b.planned_total_tasks) ? +b.planned_total_tasks : 0,
+    },
+
     force_fetch: !!force_fetch,
     priority: priority == null ? null : Number(priority),
     jobs: Array.isArray(jobs) ? jobs : [],

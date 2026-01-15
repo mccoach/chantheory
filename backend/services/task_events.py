@@ -6,17 +6,31 @@
 #   - 提供 emit_job_done / emit_task_done 两个统一出口；
 #   - 按共识文档构造 job_done / task_done SSE 事件；
 #   - 通过 utils.events.publish 转发到全局事件总线 → SSE。
+#
+# V1.1 - After Hours Bulk（批次真相源在后端）
+#   - 若 task.metadata 含 batch_id：
+#       * 以 task_done 为触发点更新批次进度（真相源）
+#       * 失败时写入失败明细（真相源）
+#       * 将最新 batch 快照写入 task_done 事件的 'batch' 字段
+#   - 普通（非 bulk）任务：不携带 batch 字段，避免污染。
 # ==============================
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 from backend.services.task_model import Task
 from backend.utils.events import publish as publish_event
 from backend.utils.time import now_iso
 from backend.utils.logger import get_logger
+
+# After Hours Bulk v1.1 DB
+from backend.db.bulk_batches import (
+    update_progress_on_task_done,
+    upsert_failure_once,
+    get_batch,
+)
 
 _LOG = get_logger("task_events")
 
@@ -117,6 +131,30 @@ def _summarize_overall_status(status_list: list[str]) -> str:
     return "failed"
 
 
+def _extract_failure_from_task_done_summary(summary: Dict[str, Any] | None) -> tuple[Optional[str], Optional[str]]:
+    """
+    从 task_done.summary 中尽力提取 error_code / error_message（用于 failures 明细）。
+    当前 schema：
+      summary: { total_rows, message, extra:{...} }
+    v1.1 要求失败明细包含 error_code/error_message。
+    由于各配方的 task_done summary 不保证包含 error_code，我们采取“尽量提取”：
+      - 优先 summary.extra.error_code / error_message
+      - 其次用 summary.message 作为 error_message 兜底
+    """
+    if not isinstance(summary, dict):
+        return None, None
+
+    extra = summary.get("extra") if isinstance(summary.get("extra"), dict) else {}
+    code = extra.get("error_code") or None
+    msg = extra.get("error_message") or None
+
+    if not msg:
+        m = summary.get("message")
+        msg = str(m) if m is not None else None
+
+    return (str(code) if code else None, str(msg) if msg else None)
+
+
 def emit_task_done(
     task: Task,
     *,
@@ -144,7 +182,8 @@ def emit_task_done(
         cp = "all_required"
 
     summ = dict(summary or {})
-    event = {
+
+    event: Dict[str, Any] = {
         "type": "task_done",
 
         "trace_id": task.trace_id,
@@ -171,6 +210,49 @@ def emit_task_done(
 
         "timestamp": now_iso(),
     }
+
+    # ======================================================================
+    # After Hours Bulk v1.1: task_done 携带 batch 快照（真相源在后端）
+    # 触发点：task_done（而非 job_done），避免前端乱序/重复统计
+    # ======================================================================
+    try:
+        md = task.metadata or {}
+        batch_id = md.get("batch_id")
+        if isinstance(batch_id, str) and batch_id.strip():
+            bid = batch_id.strip()
+
+            # 1) 更新批次进度（partial_fail 计失败）
+            batch_snapshot = update_progress_on_task_done(
+                batch_id=bid,
+                overall_status=overall_status,
+            )
+
+            # 2) 若失败，写 failures 明细（按 batch_id+task_id 幂等）
+            if overall_status in ("failed", "partial_fail"):
+                code, msg = _extract_failure_from_task_done_summary(event.get("summary"))
+                upsert_failure_once(
+                    batch_id=bid,
+                    task_id=task.task_id,
+                    task_type=task.type,
+                    symbol=task.symbol,
+                    freq=task.freq,
+                    adjust=task.adjust,
+                    overall_status=overall_status,
+                    error_code=code,
+                    error_message=msg,
+                    timestamp=event.get("timestamp") or now_iso(),
+                )
+
+            # 3) event 携带 batch 快照（进度真相源）
+            # 若更新失败（例如批次被清理），尽力回退读取
+            if not batch_snapshot:
+                batch_snapshot = get_batch(bid)
+            if batch_snapshot:
+                event["batch"] = batch_snapshot
+
+    except Exception as e:
+        # 绝不让批次统计问题阻断 task_done 的发布（但要有日志可查）
+        _LOG.error("[Bulk] attach batch snapshot failed: %s", e, exc_info=True)
 
     publish_event(event)
 

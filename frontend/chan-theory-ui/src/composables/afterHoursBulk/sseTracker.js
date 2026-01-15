@@ -1,18 +1,20 @@
 // src/composables/afterHoursBulk/sseTracker.js
 // ==============================
-// AfterHoursBulk 模块：SSE task_done 跟踪器
-// - 严格按契约：仅统计 task_id ∈ 本批次映射表
-// - 去重：同一 task_id 只计一次
-// - 失败识别：overall_status !== 'success' 视为失败
-// - 订阅/退订归口：tracker.start()/tracker.stop()
+// AfterHoursBulk 模块：SSE task_done 跟踪器（契约 v1.1）
+//
+// v1.1 核心要求：真相源在后端
+// - SSE 仅作为“增量快照推送”通道
+// - 前端不再通过 SSE 自行累加 done/failed
+// - 统一走 version gate：只接受 progress.version 更大的 batch 快照
 // ==============================
 
-import { TASK_DONE_STATUS } from "@/constants";
-
-export function createSseTaskDoneTracker({ state, eventStream }) {
+export function createSseTaskDoneTracker({ state, eventStream, onBatchSnapshot }) {
   if (!state) throw new Error("[AfterHoursBulk] state is required");
   if (!eventStream || typeof eventStream.subscribe !== "function") {
     throw new Error("[AfterHoursBulk] eventStream.subscribe is required");
+  }
+  if (typeof onBatchSnapshot !== "function") {
+    throw new Error("[AfterHoursBulk] onBatchSnapshot is required");
   }
 
   let _unsub = null;
@@ -29,49 +31,17 @@ export function createSseTaskDoneTracker({ state, eventStream }) {
 
     _unsub = eventStream.subscribe("task_done", (data) => {
       try {
-        const tid = String(data?.task_id || "").trim();
-        if (!tid) return;
+        const b = data?.batch;
+        if (!b || typeof b !== "object") return;
 
-        const map = state.taskIdToJobId.value;
-        if (!(map instanceof Map) || !map.has(tid)) {
-          return;
-        }
+        const active = state.activeBatch.value;
+        const activeBatchId = active?.batch_id ? String(active.batch_id) : "";
+        const batchId = b?.batch_id ? String(b.batch_id) : "";
 
-        const doneSet = state.doneTaskIds.value;
-        if (doneSet instanceof Set && doneSet.has(tid)) {
-          return;
-        }
+        if (!activeBatchId || !batchId) return;
+        if (batchId !== activeBatchId) return;
 
-        if (doneSet instanceof Set) doneSet.add(tid);
-
-        const p0 = state.progress.value || {};
-        const nextDone = Math.max(0, Number(p0.done || 0)) + 1;
-
-        let nextFailed = Math.max(0, Number(p0.failed || 0));
-        const status = String(data?.overall_status || "").trim();
-
-        if (status !== TASK_DONE_STATUS.SUCCESS) {
-          nextFailed += 1;
-
-          const jobId = map.get(tid);
-          const fset = state.failedJobIds.value;
-          if (jobId && fset instanceof Set) fset.add(jobId);
-        }
-
-        state.progress.value = { ...p0, done: nextDone, failed: nextFailed };
-
-        const total = Math.max(0, Number(state.progress.value.total || 0));
-        if (total > 0 && nextDone >= total) {
-          state.progress.value = {
-            ...(state.progress.value || {}),
-            active: false,
-            ended_at: new Date().toISOString(),
-          };
-          state.running.value = false;
-
-          // 批次完成：自动停止订阅，避免污染后续批次
-          stop();
-        }
+        onBatchSnapshot(b, { source: "sse_task_done" });
       } catch {}
     });
   }

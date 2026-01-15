@@ -1,14 +1,16 @@
 <!-- src/components/ui/DataDownloadDialog.vue -->
 <!-- ==============================
-盘后下载弹窗（瘦身版）
-- UI：标的列表 + 快速筛选 + 下载参数
-- 业务：bulk 入队 / SSE 跟踪 / 失败重试 / CSV 导出 —— 全部下沉到 src/composables/afterHoursBulk（全局单例）
+盘后下载弹窗（契约 v1.1 适配版）
 
-本轮改动（方案D）：
-  - 删除 h() 渲染函数（defineComponent + 60行内联样式）
-  - 新增 dialogFooterLeftProps（显式 props 对象）
-  - 引入 DownloadFooterLeft 组件（纯展示，通过 props 驱动）
-  - 保留 elapsedTime ticker（数据源）
+核心变更（严格按 v1.1）：
+1) 进度真相源在后端：UI 展示只读取 bulkCtl.state.activeBatch / bulkCtl.progress（computed）
+2) 打开弹窗/页面重启可恢复：
+   - 组件 mounted 时调用 bulkCtl.restoreFromLocalOrLatest()
+   - latest 恢复时提示“可能非本设备发起”（契约 5.4）
+3) 点击“数据下载”：
+   - 生成队列后调用 bulkCtl.startFromQueue(...)，并把 selected_symbols 传给后端 batch 记录
+4) 不再提供“失败重试”执行链路（v1.1 明确本期不提供 retryable/重试接口）
+   - 因此：按钮语义始终为“开始下载”（若已 finished/running 则按状态禁用/提示）
 ============================== -->
 <template>
   <div class="dd-wrap">
@@ -128,6 +130,11 @@
               stock 标的固定拉取：复权因子 + 不复权K线；复权选项仅影响非 stock 标的。
               （若频率未选择，则不生成任何任务）
             </div>
+
+            <!-- v1.1：latest 兜底提示 -->
+            <div v-if="fromLatestHint" class="hint-line warn">
+              当前进度为“找回入口（latest）”恢复，可能非本设备发起的 running 批次（系统无登录鉴权隔离）。
+            </div>
           </div>
         </div>
       </div>
@@ -173,12 +180,17 @@ const { listAll } = useSymbolIndex();
 const wl = useWatchlist();
 const allItems = ref([]);
 
-onMounted(() => {
+onMounted(async () => {
   try {
     allItems.value = listAll({ clone: true });
   } catch {
     allItems.value = [];
   }
+
+  // v1.1：弹窗打开时尝试恢复（页面重启也可恢复）
+  try {
+    await bulkCtl.restoreFromLocalOrLatest();
+  } catch {}
 });
 
 const totalUniverseCount = computed(() => {
@@ -210,14 +222,12 @@ const {
   applyScopeAll,
   applyScopeNone,
   applyScopeSnapshot,
-  triSyncSnapshotsOnExternalChange,
-  triSetSnapshotForScope,
-  triGetSnapshotForScope,
 } = useUniverseBuilder({
   itemsRef: allItems,
   watchlistSetRef: watchSet,
 });
 
+// scope 列表：提供给 tri controller 做 external sync（快照更新）
 const scopesList = computed(() => {
   const out = [];
   for (const g of selectorGroups.value || []) {
@@ -228,6 +238,9 @@ const scopesList = computed(() => {
   return out;
 });
 
+// ==============================
+// 三态总控（唯一快照真相源）
+// ==============================
 const tri = createTriStateController({
   getUi: (_scopeKey, universeSet) => {
     const U = universeSet instanceof Set ? universeSet : new Set();
@@ -247,21 +260,19 @@ const tri = createTriStateController({
     };
   },
 
-  applyAll: (scopeKey, universeSet) => {
-    triSetSnapshotForScope(scopeKey, universeSet);
-    applyScopeAll(scopeKey, universeSet);
+  applyAll: (_scopeKey, universeSet) => {
+    applyScopeAll(_scopeKey, universeSet);
   },
 
-  applyNone: (scopeKey, universeSet) => {
-    triSetSnapshotForScope(scopeKey, universeSet);
-    applyScopeNone(scopeKey, universeSet);
+  applyNone: (_scopeKey, universeSet) => {
+    applyScopeNone(_scopeKey, universeSet);
   },
 
-  applySnapshot: (scopeKey, universeSet) => {
-    applyScopeSnapshot(scopeKey, universeSet, triGetSnapshotForScope(scopeKey));
+  applySnapshot: (_scopeKey, universeSet) => {
+    applyScopeSnapshot(_scopeKey, universeSet, tri.getSnapshot(_scopeKey));
   },
 
-  buildSnapshot: (scopeKey, universeSet) => {
+  buildSnapshot: (_scopeKey, universeSet) => {
     const U = universeSet instanceof Set ? universeSet : new Set();
     const S = selectedSet.value;
 
@@ -273,11 +284,20 @@ const tri = createTriStateController({
   },
 });
 
+/**
+ * external change：同步快照（规则2：非自发更新）
+ */
+function syncTriSnapshotsFromExternalChange(sourceScopeKey = null) {
+  try {
+    tri.syncSnapshotsOnExternalChange(sourceScopeKey, scopesList.value);
+  } catch {}
+}
+
+// 1) watchlist 变化：scope universeSet 改变，属于 external change → 更新所有 scope 快照
 watch(
   watchKeyStable,
   () => {
-    tri.syncSnapshotsOnExternalChange(null, scopesList.value);
-    triSyncSnapshotsOnExternalChange(null, scopesList.value);
+    syncTriSnapshotsFromExternalChange(null);
   },
   { flush: "post" }
 );
@@ -326,8 +346,7 @@ function isStarred(symbol) {
 
 function onToggleSelect(symbol) {
   toggleSymbolSelected(symbol);
-  tri.syncSnapshotsOnExternalChange(null, scopesList.value);
-  triSyncSnapshotsOnExternalChange(null, scopesList.value);
+  syncTriSnapshotsFromExternalChange(null);
 }
 
 async function onToggleStar(symbol) {
@@ -343,6 +362,7 @@ async function onToggleStar(symbol) {
 function onCycleScope(it) {
   try {
     tri.cycle(it.scopeKey, it.universeSet);
+    syncTriSnapshotsFromExternalChange(it.scopeKey);
   } catch {}
 }
 
@@ -438,7 +458,9 @@ const downloadQueue = computed(() => {
 
 const jobsTotal = computed(() => downloadQueue.value.length);
 
-// ===== 持续时间计算（实时更新）=====
+// ===== v1.1：elapsed 不再用前端 ticker 作为真相源（以 started_at 展示即可）=====
+// 说明：契约要求真相源在后端；started_at 是展示字段，持续时间可以由前端用 started_at 自行计算。
+// 这里保留轻量 ticker（纯展示），不参与进度闭环与 finished 判定。
 const elapsedTime = ref("00:00:00");
 let _ticker = null;
 
@@ -454,15 +476,18 @@ function formatElapsed(ms) {
 function startTicker() {
   stopTicker();
   _ticker = setInterval(() => {
-    const p = bulkCtl.state.progress.value || {};
-    const startedAt = p.started_at;
+    const b = bulkCtl.state.activeBatch.value;
+    const startedAt = b?.started_at;
     if (!startedAt) {
       elapsedTime.value = "00:00:00";
       return;
     }
     const start = new Date(startedAt).getTime();
-    const now = Date.now();
-    elapsedTime.value = formatElapsed(now - start);
+    if (!Number.isFinite(start)) {
+      elapsedTime.value = "00:00:00";
+      return;
+    }
+    elapsedTime.value = formatElapsed(Date.now() - start);
   }, 200);
 }
 
@@ -472,29 +497,35 @@ function stopTicker() {
 }
 
 watch(
-  () => bulkCtl.state.running.value,
+  () => bulkCtl.running.value,
   (running) => {
     if (running) startTicker();
     else stopTicker();
-  }
+  },
+  { immediate: true }
 );
 
 onBeforeUnmount(() => {
   stopTicker();
 });
 
-// ===== footer-left 数据准备（显式 props）=====
+// ===== footer-left 数据准备（显式 props；按 v1.1 字段口径）=====
 const dialogFooterLeftProps = computed(() => {
-  const p = bulkCtl.state.progress.value || {};
+  const b = bulkCtl.state.activeBatch.value;
+  const p = bulkCtl.progress.value;
+
+  const selectedSymbols = Math.max(0, Number(b?.selected_symbols || counts.value.nTotal || 0));
+  const planned = Math.max(0, Number(b?.planned_total_tasks || jobsTotal.value || 0));
+
+  const totalJobs = Math.max(0, Number(p.total || 0)); // accepted_tasks
   const done = Math.max(0, Number(p.done || 0));
-  const total = Math.max(0, Number(jobsTotal.value || 0));
-  const succeeded = Math.max(0, done - Number(p.failed || 0));
+  const succeeded = Math.max(0, Number(p.success || 0));
   const failed = Math.max(0, Number(p.failed || 0));
 
   return {
-    selectedCount: counts.value.nTotal,
+    selectedCount: selectedSymbols,
     totalCount: totalUniverseCount.value,
-    totalJobs: total,
+    totalJobs: totalJobs > 0 ? totalJobs : planned, // 优先展示 accepted_tasks；若为 0 则展示 planned_total_tasks
     done,
     succeeded,
     failed,
@@ -502,13 +533,15 @@ const dialogFooterLeftProps = computed(() => {
   };
 });
 
-async function startBulk() {
-  const res = await bulkCtl.startFromQueue(downloadQueue.value, { force_fetch: false, priority: null });
-  if (!res.ok) alert(res.message);
-}
+const fromLatestHint = computed(() => bulkCtl.state.fromLatestHint.value === true);
 
-async function retryFailed() {
-  const res = await bulkCtl.retryFailed({ force_fetch: false, priority: null });
+// ===== v1.1：启动批次 =====
+async function startBulk() {
+  const res = await bulkCtl.startFromQueue(downloadQueue.value, {
+    force_fetch: false,
+    priority: null,
+    selected_symbols: counts.value.nTotal,
+  });
   if (!res.ok) alert(res.message);
 }
 
@@ -524,12 +557,8 @@ const dialogActions = {
   export_list: () => exportList(),
 
   download_data: () => {
-    if (bulkCtl.state.running.value === true) return;
-
-    if (bulkCtl.canRetryFailed.value) {
-      retryFailed();
-      return;
-    }
+    // v1.1：不支持 retryFailed；若当前 running 则不重复提交
+    if (bulkCtl.running.value === true) return;
 
     if (jobsTotal.value <= 0) {
       alert("当前没有可执行的下载任务（请先选择标的并勾选频率/复权）");
@@ -541,8 +570,8 @@ const dialogActions = {
 };
 
 // ===== 新契约：暴露组件 + props（App.vue 会 v-bind 透传）=====
-defineExpose({ 
-  dialogActions, 
+defineExpose({
+  dialogActions,
   dialogFooterLeft: DownloadFooterLeft,
   dialogFooterLeftProps
 });
@@ -703,5 +732,9 @@ defineExpose({
   color: #999;
   font-size: 12px;
   text-align: left;
+}
+
+.hint-line.warn {
+  color: #e6b35c;
 }
 </style>

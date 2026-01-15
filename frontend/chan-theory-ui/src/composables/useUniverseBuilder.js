@@ -1,14 +1,12 @@
 // src/composables/useUniverseBuilder.js
 // ==============================
-// 本轮新增：懒排序（冻结自选排序键）
-//   - 当排序 key=__starred__（自选列）时：点击排序那一刻生成 starredRankMap 快照
-//   - 排序过程中只使用快照，不实时读取 watchlistSet，从而避免“取消星标后行位置立刻跳动”
-//
-// V4 - 复权/频率选择彻底去约束（按你最终规则）
-//   - 默认值只是草稿：freq 默认 1d；adjust 默认 qfq
-//   - 允许用户把 freq/adjust 全部取消为空集合
-//   - 对 stock：任务派发规则写死（none + factors），不由此处“约束”
-//   - 对 non-stock：严格按用户选择的 freq×adjust 做笛卡尔积；任一为空 => 0
+// 本轮变更（盘后下载去冗 · 归口三态快照）：
+// 1) 删除内部 _triSnapshotMap 及 triSetSnapshotForScope/triGetSnapshotForScope/triSyncSnapshotsOnExternalChange：
+//    - 原因：三态快照与退化判断已由 useTriToggle.createTriStateController 统一归口；本文件不应维护第二套快照真相源。
+// 2) 本模块职责回归：
+//    - 只负责 selectedSet（唯一真相源）+ scope universeSet 构建 + applyScopeAll/None/Snapshot 三种集合操作。
+// 3) 其它行为保持不变：
+//    - 排序/分组/任务估算/导出 rows 等逻辑全部回归原实现。
 // ==============================
 
 import { computed, ref } from "vue";
@@ -135,7 +133,6 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
     const next = new Set(selectedFreqs.value);
     if (next.has(f)) next.delete(f);
     else next.add(f);
-    // NEW: 允许 freq 为空（你要求），不做自动补回
     selectedFreqs.value = next;
   }
 
@@ -155,7 +152,6 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
     if (next.has(a)) next.delete(a);
     else next.add(a);
 
-    // NEW: 允许 adjust 为空（你要求），不做自动补回
     selectedAdjusts.value = next;
   }
 
@@ -201,7 +197,8 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
   // ==============================
   const groupDefs = computed(() => {
     const items = itemsAll.value;
-    const watchSet = watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
+    const watchSet =
+      watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
 
     const markets = new Map();
     const boards = new Map();
@@ -324,7 +321,8 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
     baseOrderMapRef.value = buildBaseOrderMap(sortedItems.value);
 
     if (k === "__starred__") {
-      const starredSet = watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
+      const starredSet =
+        watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
       starredRankMapRef.value = buildStarredRankMap(itemsAll.value, starredSet);
     } else {
       starredRankMapRef.value = null;
@@ -389,13 +387,17 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
   const sortedItems = computed(() => {
     const list = itemsAll.value;
 
-    const starredSet = watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
+    const starredSet =
+      watchlistSetRef?.value instanceof Set ? watchlistSetRef.value : new Set();
 
     const { key, dir } = sortState.value || {};
     const sortKey = asStr(key) || "symbol";
     const sortDir = dir === "desc" ? "desc" : "asc";
 
-    const baseOrderMap = baseOrderMapRef.value instanceof Map ? baseOrderMapRef.value : buildBaseOrderMap(list);
+    const baseOrderMap =
+      baseOrderMapRef.value instanceof Map
+        ? baseOrderMapRef.value
+        : buildBaseOrderMap(list);
 
     const starredRankMap = sortKey === "__starred__" ? starredRankMapRef.value : null;
 
@@ -418,7 +420,8 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
         const totalCount = U.size;
 
         const checked = totalCount > 0 && selectedCount === totalCount;
-        const indeterminate = totalCount > 0 && selectedCount > 0 && selectedCount < totalCount;
+        const indeterminate =
+          totalCount > 0 && selectedCount > 0 && selectedCount < totalCount;
 
         items.push({
           scopeKey: it.scopeKey,
@@ -453,66 +456,19 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
   });
 
   // ==============================
-  // 9) tri 单源辅助（供 DataDownloadDialog 绑定 tri 控制器）
+  // 9) scope 操作（供 tri controller 调用）
   // ==============================
-  function triSetSnapshotForScope(scopeKey, universeSet) {
-    const key = asStr(scopeKey);
-    if (!key) return;
-    const U = universeSet instanceof Set ? universeSet : new Set();
-    const snap = new Set();
-    const S = selectedSet.value;
-    const [small, large] = S.size <= U.size ? [S, U] : [U, S];
-    for (const x of small) if (large.has(x)) snap.add(x);
-    _triSnapshotMap.value.set(key, snap);
-  }
-
-  function triGetSnapshotForScope(scopeKey) {
-    const key = asStr(scopeKey);
-    if (!key) return new Set();
-    return _triSnapshotMap.value.get(key) || new Set();
-  }
-
-  const _triSnapshotMap = ref(new Map());
-
-  function triSyncSnapshotsOnExternalChange(sourceScopeKey, scopes) {
-    const src = asStr(sourceScopeKey);
-    const list = Array.isArray(scopes) ? scopes : [];
-
-    const next = new Map(_triSnapshotMap.value);
-
-    for (const sc of list) {
-      const key = asStr(sc?.scopeKey);
-      if (!key) continue;
-
-      const U = sc?.universeSet instanceof Set ? sc.universeSet : new Set();
-
-      if (src && key === src) continue;
-
-      const snap = new Set();
-      const S = selectedSet.value;
-      const [small, large] = S.size <= U.size ? [S, U] : [U, S];
-      for (const x of small) if (large.has(x)) snap.add(x);
-
-      next.set(key, snap);
-    }
-
-    _triSnapshotMap.value = next;
-  }
-
-  // ==============================
-  // 10) scope 操作（供 tri controller 调用）
-  // ==============================
-  function applyScopeAll(scopeKey, universeSet) {
+  function applyScopeAll(_scopeKey, universeSet) {
     const U = universeSet instanceof Set ? universeSet : new Set();
     selectedSet.value = unionSet(selectedSet.value, U);
   }
 
-  function applyScopeNone(scopeKey, universeSet) {
+  function applyScopeNone(_scopeKey, universeSet) {
     const U = universeSet instanceof Set ? universeSet : new Set();
     selectedSet.value = diffSet(selectedSet.value, U);
   }
 
-  function applyScopeSnapshot(scopeKey, universeSet, snapshotSet) {
+  function applyScopeSnapshot(_scopeKey, universeSet, snapshotSet) {
     const U = universeSet instanceof Set ? universeSet : new Set();
     const snap = snapshotSet instanceof Set ? snapshotSet : new Set();
 
@@ -547,10 +503,7 @@ export function useUniverseBuilder({ itemsRef, watchlistSetRef } = {}) {
 
     selectedRowsForExport,
 
-    triSyncSnapshotsOnExternalChange,
-    triSetSnapshotForScope,
-    triGetSnapshotForScope,
-
+    // tri controller 需要的 scope 应用函数
     applyScopeAll,
     applyScopeNone,
     applyScopeSnapshot,

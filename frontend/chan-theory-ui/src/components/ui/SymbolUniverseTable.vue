@@ -1,11 +1,11 @@
 <!-- src/components/ui/SymbolUniverseTable.vue -->
 <!-- ==============================
-本轮变更（按你的要求）：
-1) 竖向滚动条固定在视口右侧：vscroll 为固定宽度视口，overflow-y: auto
-2) 横向滚动条固定在视口底部：独立 hbar（始终可见）
-3) 表格内容横向滚动仍然存在，但隐藏其自身横向滚动条（避免出现两条横向滚动条）
-4) hbar 与内容区 hcontent 双向同步 scrollLeft（最小 JS）
-5) 保持：表头 sticky、虚拟滚动、列宽对齐
+本轮修正目标（按你的“最高原则”执行）：
+- 总尺寸不变：整体表格区高度=原值不变（表头30px + 表体滚动区463px = 原 vscroll 493px），hbar 14px 不变
+- 逻辑拉直：横向滚动仅允许一个入口（底部 hbar）；表头/内容区都只被动跟随 hbar.scrollLeft
+- 竖向滚动仅覆盖表体：vscroll 只滚动 body，不含表头
+- 表头右侧滚动条等宽占位：用一次性测量 vscroll scrollbar 宽度对齐
+- 去高频/去绕弯：不在 scrollTop 时测 scrollbar 宽度；不让表头自身滚动；同步只做单向（hbar -> others）
 ============================== -->
 <template>
   <div class="sut-wrap">
@@ -14,27 +14,35 @@
     </div>
 
     <div class="table">
-      <!-- 竖向滚动视口（右侧滚动条固定） -->
-      <div ref="vscrollRef" class="vscroll" @scroll="handleVScroll">
-        <!-- 内容横向滚动（隐藏其横向滚动条），表头/表体一起横向移动 -->
-        <div ref="hcontentRef" class="hcontent" @scroll="handleHContentScroll">
-          <div class="table-inner" :style="{ width: totalWidthPx + 'px' }">
-            <div class="thead">
-              <div
-                v-for="col in columns"
-                :key="col.key"
-                class="th"
-                :class="`c-${col.key}`"
-                :style="colStyle(col)"
-                :title="colTitle(col)"
-                @click="onHeaderClick(col)"
-              >
-                <span class="th-text">{{ col.label }}</span>
-                <span class="sort-ind">{{ sortMark(col) }}</span>
-              </div>
+      <!-- 冻结表头（不在竖向滚动范围内） -->
+      <div class="thead-wrap">
+        <!-- 表头横向展示区：不允许用户横向滚动，只被动跟随 hbar -->
+        <div class="thead-h" ref="theadHRef">
+          <div class="thead-inner" :style="{ width: totalWidthPx + 'px' }">
+            <div
+              v-for="col in columns"
+              :key="col.key"
+              class="th"
+              :class="`c-${col.key}`"
+              :style="colStyle(col)"
+              :title="colTitle(col)"
+              @click="onHeaderClick(col)"
+            >
+              <span class="th-text">{{ col.label }}</span>
+              <span class="sort-ind">{{ sortMark(col) }}</span>
             </div>
+          </div>
+        </div>
 
-            <!-- 表体（虚拟列表）：不再自身滚动，跟随 vscroll -->
+        <!-- 表头右侧滚动条占位：宽度=竖向滚动条宽度 -->
+        <div class="thead-spacer" :style="{ width: vScrollBarWidthPx + 'px' }"></div>
+      </div>
+
+      <!-- 竖向滚动视口（仅表体，滚动条固定在右侧） -->
+      <div ref="vscrollRef" class="vscroll" @scroll="handleVScroll">
+        <!-- 内容横向滚动容器：仍隐藏其横向滚动条，但不再作为“入口”，只被动接受 hbar 同步 -->
+        <div ref="hcontentRef" class="hcontent">
+          <div class="table-inner" :style="{ width: totalWidthPx + 'px' }">
             <div class="tbody">
               <div :style="{ height: padTop + 'px' }"></div>
 
@@ -79,7 +87,7 @@
         </div>
       </div>
 
-      <!-- 底部横向滚动条（固定在视口底部） -->
+      <!-- 底部横向滚动条（固定显示在视口底部；唯一入口） -->
       <div ref="hbarRef" class="hbar" @scroll="handleHBarScroll">
         <div class="hbar-inner" :style="{ width: totalWidthPx + 'px' }"></div>
       </div>
@@ -88,7 +96,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 import { useVirtualListFixedRow } from "@/composables/useVirtualListFixedRow";
 
 const props = defineProps({
@@ -112,6 +120,12 @@ const emit = defineEmits(["sort", "toggle-select", "toggle-star"]);
 const vscrollRef = ref(null);
 const hcontentRef = ref(null);
 const hbarRef = ref(null);
+
+// 表头展示容器（非滚动入口，仅用于被动设置 scrollLeft）
+const theadHRef = ref(null);
+
+// 竖向滚动条宽度（表头右侧占位）
+const vScrollBarWidthPx = ref(0);
 
 // 列宽固定策略（不允许改列宽）
 const columns = ref([
@@ -190,32 +204,10 @@ function onHeaderClick(col) {
   emit("sort", key);
 }
 
-// ===== 虚拟滚动：使用 vscroll 的可视高度 - 表头高度 =====
-const viewportHeight = ref(420);
-
-// 表头高度（与 CSS 同步；不做动态测量，保持简单、确定）
-const THEAD_H = 30;
-const HBAR_H = 14;
-
-function updateViewportHeight() {
-  try {
-    const h = vscrollRef.value?.clientHeight;
-    if (Number.isFinite(+h) && +h > 0) {
-      viewportHeight.value = Math.max(0, Math.floor(+h) - THEAD_H);
-    }
-  } catch {}
-}
-
-onMounted(() => {
-  updateViewportHeight();
-  window.addEventListener("resize", updateViewportHeight);
-  // 初次对齐横向滚动位置
-  syncHBarFromContent();
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener("resize", updateViewportHeight);
-});
+// ===== 虚拟滚动：表体视口高度固定（总尺寸不变约束的关键）=====
+// 旧：vscroll(493) 内含表头30 => body viewport=463
+// 新：表头拆出 => vscroll 仅表体，直接固定为 463
+const viewportHeight = ref(463);
 
 const totalCountRef = computed(() => (Array.isArray(props.rows) ? props.rows.length : 0));
 
@@ -230,38 +222,63 @@ function handleVScroll(e) {
   onScroll(e);
 }
 
-// ===== 横向滚动同步（最小实现）=====
-let syncing = false;
-
-function syncHBarFromContent() {
-  if (syncing) return;
+// ===== 竖向滚动条宽度测量（只在必要时测）=====
+function updateVScrollBarWidth() {
   try {
-    syncing = true;
-    const left = hcontentRef.value?.scrollLeft || 0;
-    if (hbarRef.value) hbarRef.value.scrollLeft = left;
-  } finally {
-    syncing = false;
-  }
+    const el = vscrollRef.value;
+    if (!el) return;
+    const w = Math.max(0, Number(el.offsetWidth || 0) - Number(el.clientWidth || 0));
+    vScrollBarWidthPx.value = Number.isFinite(w) ? Math.floor(w) : 0;
+  } catch {}
 }
 
-function syncContentFromHBar() {
+// ===== 横向滚动：唯一入口 hbar；单向同步到 hcontent + thead =====
+let syncing = false;
+
+function syncHorizontalFromHBar() {
   if (syncing) return;
   try {
     syncing = true;
     const left = hbarRef.value?.scrollLeft || 0;
     if (hcontentRef.value) hcontentRef.value.scrollLeft = left;
+    if (theadHRef.value) theadHRef.value.scrollLeft = left;
   } finally {
     syncing = false;
   }
 }
 
-function handleHContentScroll() {
-  syncHBarFromContent();
+function handleHBarScroll() {
+  syncHorizontalFromHBar();
 }
 
-function handleHBarScroll() {
-  syncContentFromHBar();
+// 初始化：按当前 hcontent 或 hbar 位置对齐（优先 hbar，作为唯一入口）
+function initHorizontalAlignment() {
+  try {
+    const left = hbarRef.value?.scrollLeft || 0;
+    if (hcontentRef.value) hcontentRef.value.scrollLeft = left;
+    if (theadHRef.value) theadHRef.value.scrollLeft = left;
+  } catch {}
 }
+
+onMounted(() => {
+  updateVScrollBarWidth();
+  initHorizontalAlignment();
+
+  window.addEventListener("resize", updateVScrollBarWidth);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", updateVScrollBarWidth);
+});
+
+// rows 数量变化可能导致“是否出现竖向滚动条”变化：下一拍重测一次宽度
+watch(
+  () => totalCountRef.value,
+  async () => {
+    await nextTick();
+    updateVScrollBarWidth();
+  }
+);
 
 const visibleRows = computed(() => {
   const a = Array.isArray(props.rows) ? props.rows : [];
@@ -298,48 +315,62 @@ const visibleRows = computed(() => {
   flex: 1;
 }
 
-/* 竖向滚动视口：右侧滚动条固定在视口边缘 */
+/* 表头冻结区（独立） */
+.thead-wrap {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  background: #141414;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.thead-h {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden; /* 表头不作为滚动入口 */
+}
+
+.thead-inner {
+  display: flex;
+  align-items: center;
+  height: 30px;
+}
+
+/* 表头右侧滚动条占位 */
+.thead-spacer {
+  flex-shrink: 0;
+  height: 30px;
+  background: #141414;
+}
+
+/* 竖向滚动视口：仅表体，固定高度 463px（保持总尺寸不变） */
 .vscroll {
   overflow-y: auto;
   overflow-x: hidden;
-  height: 493px;
+  height: 463px;
   min-height: 260px;
 }
 
-/* 内容横向滚动：隐藏其横向滚动条（横向滚动条由 hbar 统一显示） */
+/* 内容横向滚动：隐藏自身横向滚动条（由底部 hbar 统一入口） */
 .hcontent {
   overflow-x: auto;
   overflow-y: hidden;
   min-height: 0;
 
-  scrollbar-width: none;          /* Firefox */
-  -ms-overflow-style: none;       /* IE/旧 Edge */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 .hcontent::-webkit-scrollbar {
-  display: none;                  /* Chrome/Safari */
+  display: none;
 }
 
-/* 内层承载列布局（超宽时通过 hscroll 横向滚动） */
 .table-inner {
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-/* header（冻结） */
-.thead {
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid #2a2a2a;
-  background: #141414;
-  flex-shrink: 0;
-
-  /* NEW: 冻结表头 */
-  position: sticky;
-  top: 0;
-  z-index: 3;
-}
-
+/* 表头单元格 */
 .th {
   position: relative;
   height: 30px;
@@ -369,7 +400,6 @@ const visibleRows = computed(() => {
   flex-shrink: 0;
 }
 
-/* body：不再滚动（滚动由 vscroll 统一承载） */
 .tbody {
   overflow: hidden;
 }
@@ -432,7 +462,7 @@ const visibleRows = computed(() => {
   background: rgba(241, 196, 15, 0.08);
 }
 
-/* 底部横向滚动条：固定显示在视口底部 */
+/* 底部横向滚动条：固定显示在视口底部（不改实现方式） */
 .hbar {
   height: 14px;
   overflow-x: auto;
@@ -441,6 +471,6 @@ const visibleRows = computed(() => {
   border-top: 1px solid rgba(255, 255, 255, 0.04);
 }
 .hbar-inner {
-  height: 1px; /* 只为撑出横向滚动宽度 */
+  height: 1px;
 }
 </style>
