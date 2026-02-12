@@ -1,6 +1,6 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useWatchlist.js
 // ==============================
-// V5.2 - SSE 对齐版（Task/Job 模型 + 扁平日志）
+// V6.0 - BREAKING: SSE 契约对齐（task.finished）
 // ==============================
 
 import { ref, readonly } from "vue";
@@ -42,13 +42,10 @@ export function useWatchlist() {
 
   // 异步写入 LocalStorage，避免阻塞
   function saveToCache() {
-    // 使用 requestIdleCallback 延迟写入（不阻塞主线程）
     const asyncWrite = (fn) => {
       if (typeof requestIdleCallback === "function") {
-        // 现代浏览器：在空闲时执行
         requestIdleCallback(fn, { timeout: 2000 });
       } else {
-        // 降级方案：Safari/旧浏览器不支持 requestIdleCallback
         setTimeout(fn, 0);
       }
     };
@@ -76,10 +73,8 @@ export function useWatchlist() {
   // ==============================
 
   async function smartLoad() {
-    // 1. 先读缓存（立即可用）
     loadFromCache();
 
-    // 2. 检查新鲜度
     const cacheAge = getCacheAge();
 
     if (cacheAge === null || cacheAge > CACHE_VALID_MS) {
@@ -87,9 +82,7 @@ export function useWatchlist() {
       await refresh();
     } else {
       const ageMin = Math.floor(cacheAge / 60000);
-      console.log(
-        `${ts()} [Watchlist] cache-valid age_min=${ageMin} skip-refresh`
-      );
+      console.log(`${ts()} [Watchlist] cache-valid age_min=${ageMin} skip-refresh`);
     }
   }
 
@@ -97,30 +90,30 @@ export function useWatchlist() {
   // SSE 同步（最终一致性保障）
   // ==============================
 
-  eventStream.subscribe("task_done", (data) => {
+  // NEW: task.finished（新契约）
+  eventStream.subscribe("task.finished", (data) => {
     try {
-      if (!data || data.task_type !== "watchlist_update") return;
+      if (!data || data.type !== "task.finished") return;
+      if (data.task_type !== "watchlist_update") return;
+
+      const ok = String(data.overall_status || "") === "success";
 
       const action = data.summary?.extra?.action;
       const list = Array.isArray(data.summary?.extra?.items)
         ? data.summary.extra.items
         : [];
 
-      const ok = data.overall_status === "success";
-
       console.log(
-        `${ts()} [Watchlist][SSE] task_done action=${action || "null"} ok=${ok} count=${list.length}`
+        `${ts()} [Watchlist][SSE] task.finished action=${action || "null"} ok=${ok} count=${list.length}`
       );
 
-      if (list.length) {
+      if (ok && list.length) {
         items.value = list;
         saveToCache();
-        console.log(
-          `${ts()} [Watchlist] sse-sync count=${items.value.length}`
-        );
+        console.log(`${ts()} [Watchlist] sse-sync count=${items.value.length}`);
       }
     } catch (e) {
-      console.error(`${ts()} [Watchlist] sse-task_done-error`, e);
+      console.error(`${ts()} [Watchlist] sse-task.finished-error`, e);
     }
   });
 
@@ -152,10 +145,8 @@ export function useWatchlist() {
     const sym = String(symbol || "").trim();
     if (!sym) return;
 
-    // ===== 步骤1：乐观更新（立即生效）=====
-    const snapshot = items.value.slice(); // 备份（用于回滚）
+    const snapshot = items.value.slice();
 
-    // 去重后追加
     const newItems = items.value.filter((item) => item.symbol !== sym);
     newItems.push({
       symbol: sym,
@@ -167,7 +158,6 @@ export function useWatchlist() {
 
     console.log(`${ts()} [Watchlist] optimistic-add symbol=${sym}`);
 
-    // ===== 步骤2：后台同步（不阻塞）=====
     loading.value = true;
     error.value = "";
 
@@ -178,11 +168,9 @@ export function useWatchlist() {
       error.value = e?.message || "添加失败";
       console.error(`${ts()} [Watchlist] backend-add-failed symbol=${sym}`, e);
 
-      // ===== 步骤3：失败回滚 =====
       items.value = snapshot;
       saveToCache();
 
-      // 显示错误提示（可选：集成 Toast 组件）
       alert(`添加失败：${e?.message || "网络错误"}`);
     } finally {
       loading.value = false;
@@ -193,7 +181,6 @@ export function useWatchlist() {
     const sym = String(symbol || "").trim();
     if (!sym) return;
 
-    // ===== 步骤1：乐观删除 =====
     const snapshot = items.value.slice();
 
     items.value = items.value.filter((item) => item.symbol !== sym);
@@ -201,7 +188,6 @@ export function useWatchlist() {
 
     console.log(`${ts()} [Watchlist] optimistic-remove symbol=${sym}`);
 
-    // ===== 步骤2：后台同步 =====
     loading.value = true;
     error.value = "";
 
@@ -212,7 +198,6 @@ export function useWatchlist() {
       error.value = e?.message || "删除失败";
       console.error(`${ts()} [Watchlist] backend-remove-failed symbol=${sym}`, e);
 
-      // ===== 步骤3：失败回滚 =====
       items.value = snapshot;
       saveToCache();
 

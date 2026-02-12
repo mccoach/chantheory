@@ -5,17 +5,7 @@
 # - 设计：与同步版 `retry.py` 保持相同的接口风格，但使用 `asyncio.sleep` 替代 `time.sleep`。
 #
 # 改动（Schema统一）：
-#   - system_alert 事件统一为：
-#       {
-#         "type": "system_alert",
-#         "level": "error" | "critical" | ...,
-#         "code": "ANTISPIDER_TRIGGERED" | ...,
-#         "message": "...",
-#         "details": "...",
-#         "source": "async_retry",
-#         "trace_id": null | "...",
-#         "timestamp": "ISO8601"
-#       }
+#   - system_alert 事件统一由 backend.utils.alerts.emit_system_alert 发布，避免重复拼 schema。
 # ==============================
 
 from __future__ import annotations
@@ -30,9 +20,9 @@ except ImportError:
     httpx = None
 
 from backend.utils.logger import get_logger, log_event
-from backend.utils.events import publish as publish_event
 from backend.settings import settings
-from backend.utils.time import now_iso
+
+from backend.utils.alerts import emit_system_alert
 
 _LOG = get_logger("async_retry")
 
@@ -79,16 +69,14 @@ async def async_retry_call(
                     message="Potential anti-spider mechanism triggered.",
                     extra={"error_message": str(e)}
                 )
-                publish_event({
-                    "type": "system_alert",
-                    "level": "error",
-                    "code": "ANTISPIDER_TRIGGERED",
-                    "message": "网络请求被远程主机关闭，可能触发了反爬虫策略。",
-                    "details": str(e),
-                    "source": "async_retry",
-                    "trace_id": None,
-                    "timestamp": now_iso(),
-                })
+                emit_system_alert(
+                    level="error",
+                    code="ANTISPIDER_TRIGGERED",
+                    message="网络请求被远程主机关闭，可能触发了反爬虫策略。",
+                    details=str(e),
+                    source="async_retry",
+                    trace_id=None,
+                )
 
             if i >= max_attempts:
                 break

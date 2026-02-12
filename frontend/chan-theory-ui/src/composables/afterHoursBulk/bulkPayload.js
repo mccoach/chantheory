@@ -2,9 +2,10 @@
 // ==============================
 // AfterHoursBulk 模块：Bulk payload 纯构造器（纯函数）
 //
-// v1.1 契约改造：
-// - payload 新增 batch 字段（batch_id/client_instance_id/started_at/selected_symbols/planned_total_tasks）
-// - batch_id 与 client_instance_id 由前端生成并注入
+// v2.1.2-FINAL+ 契约改造：
+// - payload 使用 bulk_tasks[]（不再是 jobs[]）
+// - 批次内幂等键：client_task_key（替代 job_id）
+// - start payload 需要 submit_policy.when_active_exists（replace/enqueue/abort）
 // - 本文件仍保持：不做网络、不做 SSE、不做持久化
 // ==============================
 
@@ -19,88 +20,93 @@ function asStr(x) {
 }
 
 /**
- * 客户端 job_id：批次内稳定唯一（契约要求）
- * - 后端不解析，仅回传
+ * 客户端 client_task_key：批次内稳定唯一（契约要求）
+ * - 后端以 (batch_id, client_task_key) 做唯一性约束
  */
-export function makeJobId(job) {
-  const type = asStr(job?.type);
-  const symbol = asStr(job?.symbol);
+export function makeClientTaskKey(task) {
+  const type = asStr(task?.type);
+  const symbol = asStr(task?.symbol);
   if (!type || !symbol) return "";
 
   if (type === "current_kline") {
-    const freq = asStr(job?.freq);
-    const adjust = asStr(job?.adjust || "none") || "none";
+    const freq = asStr(task?.freq);
+    const adjust = asStr(task?.adjust || "none") || "none";
     return `${type}|${symbol}|${freq}|${adjust}`;
   }
 
+  // current_factors / current_profile 等：只需要 type|symbol
   return `${type}|${symbol}`;
 }
 
 /**
- * 将“下载队列（你现有 downloadQueue 的元素）”转换为 bulk jobs[]
+ * 将“下载队列（你现有 downloadQueue 的元素）”转换为 bulk_tasks[]
  * @param {Array<object>} queue
- * @returns {{ jobs: Array<object>, jobByJobId: Map<string, object> }}
+ * @returns {{ bulk_tasks: Array<object>, taskByKey: Map<string, object> }}
  */
-export function buildJobsFromQueue(queue) {
+export function buildBulkTasksFromQueue(queue) {
   const list = Array.isArray(queue) ? queue : [];
 
-  const jobs = [];
+  const bulk_tasks = [];
   const seen = new Set();
-  const jobByJobId = new Map();
+  const taskByKey = new Map();
 
-  for (const j of list) {
-    const job_id = makeJobId(j);
-    if (!job_id) continue;
+  for (const t of list) {
+    const client_task_key = makeClientTaskKey(t);
+    if (!client_task_key) continue;
 
     // 批次内去重（契约必须唯一）
-    if (seen.has(job_id)) continue;
-    seen.add(job_id);
+    if (seen.has(client_task_key)) continue;
+    seen.add(client_task_key);
 
-    const type = asStr(j?.type);
-    const symbol = asStr(j?.symbol);
-    const freq = j?.freq == null ? null : asStr(j?.freq);
-    const adjust = asStr(j?.adjust || "none") || "none";
+    const type = asStr(t?.type);
+    const scope = asStr(t?.scope || "symbol") || "symbol";
+    const symbol = asStr(t?.symbol);
 
-    if (!type || !symbol) continue;
+    const freq = t?.freq == null ? null : asStr(t?.freq);
+    const adjust = asStr(t?.adjust || "none") || "none";
+
+    if (!type || !scope || !symbol) continue;
 
     const params = {};
-    if (Object.prototype.hasOwnProperty.call(j, "force_fetch")) {
-      params.force_fetch = !!j.force_fetch;
+    if (Object.prototype.hasOwnProperty.call(t, "force_fetch")) {
+      params.force_fetch = !!t.force_fetch;
     }
+    // 允许未来扩展其它 params（严格透传；本文件不做解释）
 
-    const job = {
-      job_id,
+    const task = {
+      client_task_key,
       type,
-      scope: "symbol",
+      scope,
       symbol,
       freq: freq || null,
       adjust,
       params,
     };
 
-    jobs.push(job);
-    jobByJobId.set(job_id, job);
+    bulk_tasks.push(task);
+    taskByKey.set(client_task_key, task);
   }
 
-  return { jobs, jobByJobId };
+  return { bulk_tasks, taskByKey };
 }
 
 /**
- * 构造 bulk payload（契约 v1.1 格式）
+ * 构造 bulk/start payload（契约 v2.1.2-FINAL+ 格式）
  * @param {object} args
- * @param {Array<object>} args.jobs
+ * @param {Array<object>} args.bulk_tasks
  * @param {boolean} args.force_fetch
  * @param {number|null} args.priority
- * @param {object} args.batch - v1.1 批次信息（必须注入）
+ * @param {object} args.batch - v2.1.2 批次信息（必须注入）
+ * @param {object} args.submit_policy - { when_active_exists: 'replace'|'enqueue'|'abort' }
  * @returns {object}
  */
-export function buildAfterHoursBulkPayload({ jobs, force_fetch, priority, batch }) {
+export function buildAfterHoursBulkStartPayload({ bulk_tasks, force_fetch, priority, batch, submit_policy }) {
   const b = batch && typeof batch === "object" ? batch : {};
+  const sp = submit_policy && typeof submit_policy === "object" ? submit_policy : {};
 
   return {
     purpose: AFTER_HOURS_PURPOSE,
 
-    // v1.1: batch
     batch: {
       batch_id: asStr(b.batch_id),
       client_instance_id: asStr(b.client_instance_id),
@@ -111,10 +117,11 @@ export function buildAfterHoursBulkPayload({ jobs, force_fetch, priority, batch 
 
     force_fetch: !!force_fetch,
     priority: priority == null ? null : Number(priority),
-    jobs: Array.isArray(jobs) ? jobs : [],
-    client_meta: {
-      feature: "after_hours_download",
-      submitted_at: nowIso(),
+
+    bulk_tasks: Array.isArray(bulk_tasks) ? bulk_tasks : [],
+
+    submit_policy: {
+      when_active_exists: asStr(sp.when_active_exists) || "enqueue",
     },
   };
 }

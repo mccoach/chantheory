@@ -113,7 +113,7 @@ import math
 import pandas as pd
 import httpx
 
-from backend.utils.async_limiter import limit_async_network_io
+from backend.utils.async_limiter import limit_provider_network_io
 from backend.utils.async_retry import async_retry_call
 from backend.utils.logger import get_logger
 from backend.utils.time import parse_yyyymmdd
@@ -240,7 +240,7 @@ def _parse_lsjz_records(records: List[Dict[str, Any]]) -> pd.DataFrame:
 # ==============================================================================
 
 
-@limit_async_network_io
+@limit_provider_network_io("eastmoney")
 async def get_fund_nav_em(
     fund_code: str,
     start_date: Optional[str] = None,

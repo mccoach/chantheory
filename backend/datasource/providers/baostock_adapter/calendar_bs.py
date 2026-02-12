@@ -27,7 +27,7 @@ from typing import Optional
 
 import pandas as pd
 
-from backend.utils.async_limiter import limit_async_network_io
+from backend.utils.async_limiter import limit_provider_network_io
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("baostock_adapter")
@@ -50,7 +50,7 @@ async def _run_sync_in_thread(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
-@limit_async_network_io
+@limit_provider_network_io("baostock")
 async def get_trade_calendar_bs(
     start_date: str = "1990-01-01",
     end_date: str = "2100-12-31",

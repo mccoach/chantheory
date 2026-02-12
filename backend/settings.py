@@ -1,14 +1,8 @@
 # backend/settings.py
 # ==============================
-# V8.1 - After Hours Bulk 设置收敛 + priority 全量 ×10
+# 设置中心（统一归口版）
 #
-# 改动：
-#   1) Settings 新增：
-#        - bulk_max_jobs（默认 30000）
-#        - after_hours_priority（默认 1000）
-#   2) DATA_TYPE_DEFINITIONS.priority 全量乘以 10：
-#        10→100, 20→200, 30→300, 40→400
-#      仅改变数值尺度，不改变相对优先级顺序。
+# 你只需要改这个文件，就能控制后端的关键行为（并发、限流、重试、日志等）。
 # ==============================
 
 from __future__ import annotations
@@ -16,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # --- 基础路径定义 ---
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
@@ -27,78 +21,163 @@ DEFAULT_CONFIG_PATH: Path = DEFAULT_DATA_DIR / "config.json"
 
 @dataclass
 class Settings:
-    # 服务器与 CORS
-    host: str = os.getenv("CHAN_HOST", "0.0.0.0")
-    port: int = int(os.getenv("CHAN_PORT", "8000"))
-    debug: bool = os.getenv("CHAN_DEBUG", "1") == "1"
+    # ==========================================================
+    # 一、服务启动相关
+    # ==========================================================
+    # host/port：FastAPI 服务监听地址与端口
+    # - 一般不用改，除非你想让局域网其他设备访问
+    host: str = "0.0.0.0"
+    port: int = 8000
+
+    # debug：调试开关
+    # - True：错误响应会包含更多细节（便于开发）
+    # - False：生产模式隐藏细节（更安全）
+    debug: bool = True
+
+    # cors_origins：允许哪些前端地址跨域访问后端
+    # - 如果你的前端换了端口/域名，需要把新地址加到这里
     cors_origins: List[str] = None
 
-    # 本地路径
+    # ==========================================================
+    # 二、本地路径（数据落地位置）
+    # ==========================================================
+    # data_dir：所有本地数据目录
     data_dir: Path = DEFAULT_DATA_DIR
+
+    # db_path：SQLite 数据库文件路径
     db_path: Path = DEFAULT_DB_PATH
+
+    # user_config_path：用户配置文件路径（config.json）
     user_config_path: Path = DEFAULT_CONFIG_PATH
 
-    # 网络与重试
-    retry_max_attempts: int = int(os.getenv("CHAN_RETRY_MAX_ATTEMPTS", "3"))
-    retry_base_delay_ms: int = int(
-        os.getenv("CHAN_RETRY_BASE_DELAY_MS", "3000"))
+    # ==========================================================
+    # 三、网络与重试（影响“稳定性”与“速度”）
+    # ==========================================================
+    # retry_max_attempts：请求失败时最多重试次数
+    # - 越大：越不容易因为临时网络问题失败，但整体会更慢
+    # - 越小：更快失败，更快暴露问题
+    retry_max_attempts: int = 3
 
-    # 全局网络限流器
-    network_limiter_enabled: bool = os.getenv("CHAN_NETWORK_LIMITER_ENABLED",
-                                              "1") == "1"
-    network_requests_per_second: float = float(
-        os.getenv("CHAN_NETWORK_RPS", "2.0"))
-    network_max_burst_tokens: int = int(os.getenv("CHAN_NETWORK_BURST", "3"))
+    # retry_base_delay_ms：重试的基础等待时间（毫秒）
+    # - 实际等待会指数增长（第一次等 base，第二次等 2*base...）并带随机抖动
+    retry_base_delay_ms: int = 3000
 
-    # 业务常量
+    # ==========================================================
+    # 四、全局网络限流（最关键的反爬控制闸门）
+    # ==========================================================
+    # network_limiter_enabled：是否启用全局限流
+    # - True：所有被 @limit_async_network_io 包裹的请求都会被限速
+    # - False：不限速，速度可能很快，但更容易触发反爬、被封IP/封UA
+    network_limiter_enabled: bool = True
+
+    # network_requests_per_second（RPS）：全系统每秒允许发起多少个网络请求（平均）
+    # - 这是你提速最直接的旋钮之一
+    # - 例子：2.0 表示全系统平均每秒最多 2 个请求；5.0 表示最多 5 个请求
+    # - 你“先尽量快探索边界”，可以先设 5.0
+    network_requests_per_second: float = 5.0
+
+    # network_max_burst_tokens：突发令牌数（允许短时间“瞬间多发几个请求”）
+    # - 例子：10 表示可以短时间积攒最多 10 个令牌，一口气发 10 个请求后再慢下来
+    # - 太小：会显得“卡顿”，吞吐上不去
+    # - 太大：可能瞬间打爆对方接口，更容易触发反爬
+    network_max_burst_tokens: int = 10
+
+    # ==========================================================
+    # 四点一、分源限流（在保留全局限流基础上按数据源再限一次）
+    # ==========================================================
+    # 说明（小白版）：
+    #   - 全局限流：控制全系统总出网速度（总闸门）
+    #   - 分源限流：控制某一个数据源（新浪/东财/baostock）自身的出网速度（分闸门）
+    #
+    # 规则：
+    #   - 若某数据源未配置，默认跟随全局限流（不额外限制）
+    #   - rps 表示平均每秒允许请求数；burst 表示允许短时间突发的最大令牌数
+    provider_limiters: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        "sina": {"rps": 1, "burst": 1},
+        "eastmoney": {"rps": 1, "burst": 1},
+        "baostock": {"rps": 1, "burst": 1},
+    })
+
+    # ==========================================================
+    # 五、执行器并发（盘后提速的核心）
+    # ==========================================================
+    # executor_concurrency：同时运行多少个 Task（多少个“工人”并行干活）
+    # - 你现在最大瓶颈就是原来只有 1 个工人（并发=1）
+    # - 推荐先设 16：会明显提速
+    # - 如果你机器配置好也可以试 32（更快，但更容易触发反爬）
+    executor_concurrency: int = 8
+
+    # ==========================================================
+    # 五点一、Task 级超时兜底（确保前端不再卡死）
+    # ==========================================================
+    # 语义：单个 Task 从开始执行到结束，最多允许多少秒；
+    # 超过则视为 failed，并保证发出 task_done，bulk 状态可推进。
+    task_timeout_seconds: float = 30.0
+
+    # ==========================================================
+    # 五点二、运行时指标推送（线程数监测）
+    # ==========================================================
+    runtime_metrics_interval_seconds: float = 3.0
+
+    # ==========================================================
+    # 六、业务常量（一般不用动）
+    # ==========================================================
     timezone: str = "Asia/Shanghai"
     default_market: str = "CN"
     data_source_name: str = "unified_executor"
     sync_init_start_date: int = 19900101
 
-    # ==============================
-    # After Hours Bulk（盘后批量入队）设置
-    # ==============================
-    # 单次 /api/ensure-data/bulk 允许提交的最大 job 数（建议值，后端不因超限拒绝）
-    bulk_max_jobs: int = int(os.getenv("CHAN_BULK_MAX_JOBS", "30000"))
-    # 盘后批量任务默认 priority（数值越大优先级越低；1000 低于常规 100/200/300/400）
-    after_hours_priority: int = int(os.getenv("CHAN_AFTER_HOURS_PRIORITY", "1000"))
+    # ==========================================================
+    # 七、After Hours Bulk（盘后批量入队）
+    # ==========================================================
+    # bulk_max_jobs：单次 bulk 请求允许提交的最大 job 数（仅提示，不会拒绝）
+    bulk_max_jobs: int = 30000
 
-    # 日志系统
-    # log_file: 日志文件路径
+    # after_hours_priority：盘后任务优先级（数值越大优先级越低）
+    after_hours_priority: int = 1000
+
+    # NEW (After Hours Bulk v2.1.2 project edition):
+    # 成功/取消的批次任务明细保留天数（启动时清理过期 bulk_tasks）
+    after_hours_tasks_retention_days: int = 2
+
+    # NEW: Bulk inflight 闸门（硬限制每个 batch 同时 running 的任务数）
+    bulk_max_inflight_tasks: int = 8
+
+    # ==========================================================
+    # 八、日志系统（一般不用动；出问题时再调）
+    # ==========================================================
     log_file: Path = PROJECT_ROOT / "chan-theory.log"
 
-    # log_level: 全局日志级别（字符串）
-    # 可选值（不区分大小写）："CRITICAL","ERROR","WARNING","WARN","INFO","DEBUG","NOTSET"
-    # 修改方式：直接改这里，例如 log_level="DEBUG"
+    # log_level：全局日志级别
+    # - INFO：推荐常用
+    # - DEBUG：会很吵，但排错更方便
     log_level: str = "INFO"
 
-    # log_max_bytes: 单个日志文件最大大小（字节），超过后滚动
+    # log_max_bytes：单个日志文件最大大小（字节），超过后滚动
     log_max_bytes: int = 16 * 1024 * 1024  # 16MB
 
-    # log_backup_count: 最多保留多少个滚动备份文件
+    # log_backup_count：最多保留多少个滚动备份文件
     log_backup_count: int = 10
 
-    # log_debug_trace_ids_raw: 保留字段（目前不用环境变量），仍允许你在这里手工填逗号分隔的 trace_id
+    # log_debug_trace_ids_raw：仅对指定 trace_id 放行 DEBUG（高级用法）
     log_debug_trace_ids_raw: str = ""
     log_debug_trace_ids: List[str] = None
 
-    # log_summary: 是否开启摘要模式
-    #   True  -> 只保留关键字段（推荐生产用）
-    #   False -> 保留所有字段（推荐调试用）
+    # log_summary：是否开启摘要模式（True 更省日志体积）
     log_summary: bool = True
 
-    # 是否在日志中包含 HTTP 请求详情（endpoint/method/query）
+    # log_include_request：日志是否包含请求详情
     log_include_request: bool = False
 
-    # 是否在日志中包含结果详情（status_code/rows 等）
+    # log_include_result：日志是否包含结果详情
     log_include_result: bool = False
 
-    # log_module_levels_raw: 备用的“字符串形式配置”，暂不推荐使用环境变量，在 __post_init__ 里有默认值可直接改
+    # log_module_levels：模块级日志级别覆盖
     log_module_levels_raw: str = ""
     log_module_levels: Dict[str, str] = None
 
     def __post_init__(self):
+        # CORS 默认值
         if self.cors_origins is None:
             self.cors_origins = [
                 "http://localhost:5173",
@@ -106,23 +185,94 @@ class Settings:
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
             ]
+
+        # 确保目录存在
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = Path(self.db_path).resolve()
         self.user_config_path = Path(self.user_config_path).resolve()
+
+        # trace_id 白名单解析
         raw_trace_ids = str(self.log_debug_trace_ids_raw or "").strip()
         self.log_debug_trace_ids = (
             [s.strip() for s in raw_trace_ids.split(",") if s.strip()]
             if raw_trace_ids else []
         )
 
-        # 模块级日志级别默认值（你可以直接改这个字典来调整各模块日志级别）
-        # 可选级别同 log_level："CRITICAL","ERROR","WARNING","WARN","INFO","DEBUG","NOTSET"
+        # executor_concurrency 防御性兜底：至少为 1
+        try:
+            self.executor_concurrency = max(1, int(self.executor_concurrency))
+        except Exception:
+            self.executor_concurrency = 1
+
+        # network 参数兜底：避免写错导致崩溃
+        try:
+            self.network_requests_per_second = float(self.network_requests_per_second)
+        except Exception:
+            self.network_requests_per_second = 2.0
+
+        try:
+            self.network_max_burst_tokens = max(1, int(self.network_max_burst_tokens))
+        except Exception:
+            self.network_max_burst_tokens = 3
+
+        # Task timeout 兜底
+        try:
+            self.task_timeout_seconds = float(self.task_timeout_seconds)
+            if self.task_timeout_seconds <= 0:
+                self.task_timeout_seconds = 30.0
+        except Exception:
+            self.task_timeout_seconds = 30.0
+
+        # runtime metrics interval 兜底
+        try:
+            self.runtime_metrics_interval_seconds = float(self.runtime_metrics_interval_seconds)
+            if self.runtime_metrics_interval_seconds <= 0:
+                self.runtime_metrics_interval_seconds = 1.0
+        except Exception:
+            self.runtime_metrics_interval_seconds = 1.0
+
+        # provider_limiters 兜底
+        if not isinstance(self.provider_limiters, dict):
+            self.provider_limiters = {}
+        # 逐项清洗
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for k, v in self.provider_limiters.items():
+            if not isinstance(k, str) or not k.strip():
+                continue
+            if not isinstance(v, dict):
+                continue
+            try:
+                rps = float(v.get("rps", self.network_requests_per_second))
+            except Exception:
+                rps = float(self.network_requests_per_second)
+            try:
+                burst = int(v.get("burst", self.network_max_burst_tokens))
+                burst = max(1, burst)
+            except Exception:
+                burst = int(self.network_max_burst_tokens)
+            cleaned[k.strip().lower()] = {"rps": rps, "burst": burst}
+        self.provider_limiters = cleaned
+
+        # # NEW: retention_days 防御性兜底
+        # try:
+        #     self.after_hours_tasks_retention_days = max(0, int(self.after_hours_tasks_retention_days))
+        # except Exception:
+        #     self.after_hours_tasks_retention_days = 2
+
+        # # NEW: bulk_max_inflight_tasks 兜底
+        # try:
+        #     self.bulk_max_inflight_tasks = max(1, int(self.bulk_max_inflight_tasks))
+        # except Exception:
+        #     self.bulk_max_inflight_tasks = 8
+
         self.log_module_levels = {
-            "eastmoney_adapter.kline": "WARN",  # 东财K线适配器
-            "sse_adapter": "WARN",             # 上交所适配器
-            "szse_adapter": "WARN",            # 深交所适配器
-            "baostock_adapter": "WARN",        # Baostock 适配器
-            "sina_adapter": "WARN",            # 新浪适配器
+            "eastmoney_adapter.kline": "WARN",
+            "sse_adapter": "WARN",
+            "sse_adapter.profile": "WARN",
+            "szse_adapter": "WARN",
+            "szse_adapter.profile": "WARN",
+            "baostock_adapter": "WARN",
+            "sina_adapter": "WARN",
         }
 
 
@@ -133,15 +283,12 @@ settings = Settings()
 # ==============================
 
 DATA_TYPE_DEFINITIONS = {
-    # P100：交易日历
     "trade_calendar": {
         "name": "交易日历",
         "category": "trade_calendar",
         "priority": 100,
-        # 是否在任务结束时通过事件总线 → SSE 通知前端（执行器已不再依赖该字段）
         "sse_notify": True,
     },
-    # P200：当前标的核心数据
     "current_kline": {
         "name": "当前K线",
         "category": "kline",
@@ -154,21 +301,18 @@ DATA_TYPE_DEFINITIONS = {
         "priority": 200,
         "sse_notify": True,
     },
-    # P300：全局数据（标的列表）
     "symbol_index": {
         "name": "标的列表",
         "category": "symbol_index",
         "priority": 300,
         "sse_notify": True,
     },
-    # P400：当前标的档案（不阻塞渲染）
     "current_profile": {
         "name": "当前档案",
         "category": "profile",
         "priority": 400,
         "sse_notify": True,
     },
-    # P400：自选池更新（元数据类任务）
     "watchlist_update": {
         "name": "自选池更新",
         "category": "meta",
@@ -188,50 +332,36 @@ class SpiderConfig:
     """
     爬虫通用参数池
 
-    设计原则：
-      1. 仅管理与具体接口无关的参数（浏览器特征/语言偏好/连接方式）
-      2. 不管理业务逻辑参数（Referer/sqlId/Accept 等）
-      3. 支持环境变量覆盖
-
-    职责边界：
-      ✅ 负责：User-Agent 池、Accept-Language 池、Connection 池
-      ❌ 不负责：Referer（业务逻辑）、Accept（接口类型）、Sec-Fetch-*（固定值）
+    说明（小白版）：
+      - 这块是为了模拟浏览器请求，降低被识别为“机器人”的概率
+      - 一般不用动，除非你遇到某个网站突然开始封禁
     """
 
-    # ===== User-Agent 池（核心反爬参数）=====
     user_agents: List[str] = field(default_factory=lambda: [
-        # Chrome 140 (Windows) - 2025年1月最新版
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-        # Chrome 137 (Windows) - 稳定版
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        # Edge 140 (Windows) - 2025年1月最新版
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
-        # Chrome 140 (macOS)
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-        # Firefox 133 (Windows) - 2025年1月最新版
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
     ])
 
-    # ===== Accept-Language 池（语言偏好混淆）=====
     accept_languages: List[str] = field(default_factory=lambda: [
-        "zh-CN,zh;q=0.9",  # Chrome 简洁版（最常见）
-        "zh-CN,zh;q=0.9,en;q=0.8",  # +英文
-        "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",  # Edge 完整版
-        "zh-CN,zh-TW;q=0.9,zh;q=0.8",  # +繁体中文
+        "zh-CN,zh;q=0.9",
+        "zh-CN,zh;q=0.9,en;q=0.8",
+        "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+        "zh-CN,zh-TW;q=0.9,zh;q=0.8",
     ])
 
-    # ===== Connection 类型池（连接行为混淆）=====
     connection_types: List[str] = field(default_factory=lambda: [
-        "keep-alive",  # 长连接（95% 真实用户行为）
-        "close",  # 短连接（5% 场景）
+        "keep-alive",
+        "close",
     ])
 
-    # ===== 反爬策略开关 =====
+    # enable_random_delay：是否在请求间随机睡一会儿（更像真人，但会变慢）
     enable_random_delay: bool = os.getenv("SPIDER_RANDOM_DELAY", "1") == "1"
-    random_delay_range: tuple = (0.5, 2.0)  # 随机延迟范围（秒）
-    enable_header_randomization: bool = os.getenv("SPIDER_HEADER_RANDOM",
-                                                  "1") == "1"
+    random_delay_range: tuple = (0.5, 2.0)
+
+    enable_header_randomization: bool = os.getenv("SPIDER_HEADER_RANDOM", "1") == "1"
 
 
-# 全局单例
 spider_config = SpiderConfig()

@@ -1,9 +1,10 @@
 // src/composables/useTaskWaiter.js
 // ==============================
-// 说明：Task 等待工具（集中式 TaskStore 版 · 模块加载即订阅）
+// V2.0 - BREAKING: SSE 契约对齐（task.finished）
+//
 // 职责：
-//   - 基于 SSE task_done 事件，按 task_id 集合等待一批任务完成；
-//   - 使用全局 TaskStore：统一订阅 SSE，一处缓存与分发所有 task_done；
+//   - 基于 SSE task.finished 事件，按 task_id 集合等待一批任务完成；
+//   - 使用全局 TaskStore：统一订阅 SSE，一处缓存与分发所有 task.finished；
 //   - waitTasksDone 本身只与 TaskStore 交互。
 // ==============================
 
@@ -21,7 +22,8 @@ function initTaskStoreSubscription() {
   try {
     const eventStream = useEventStream();
 
-    eventStream.subscribe("task_done", (data) => {
+    // NEW: task.finished（新契约）
+    eventStream.subscribe("task.finished", (data) => {
       try {
         const tid = String(data?.task_id || "").trim();
         if (!tid) return;
@@ -47,23 +49,16 @@ function initTaskStoreSubscription() {
             try {
               cb(data);
             } catch (err) {
-              console.error(
-                "[waitTasksDone/TaskStore] 回调执行失败:",
-                tid,
-                err
-              );
+              console.error("[waitTasksDone/TaskStore] callback failed:", tid, err);
             }
           }
         }
       } catch (e) {
-        console.error("[waitTasksDone/TaskStore] 处理 task_done 事件失败:", e);
+        console.error("[waitTasksDone/TaskStore] handle task.finished failed:", e);
       }
     });
   } catch (e) {
-    console.warn(
-      "[waitTasksDone] 无法订阅 task_done（可能在非浏览器环境）",
-      e
-    );
+    console.warn("[waitTasksDone] cannot subscribe task.finished", e);
   }
 }
 
@@ -71,12 +66,12 @@ function initTaskStoreSubscription() {
 initTaskStoreSubscription();
 
 /**
- * 等待一批 Task 全部完成（task_done 收到）
+ * 等待一批 Task 全部完成（task.finished 收到）
  *
  * @param {Object} options
  * @param {Array<string>} options.taskIds
  * @param {number} [options.timeoutMs=30000]
- * @returns {Promise<Object>} - { [taskId]: taskDonePayload }
+ * @returns {Promise<Object>} - { [taskId]: taskFinishedPayload }
  */
 export async function waitTasksDone({ taskIds, timeoutMs = 30000 } = {}) {
   const ids = (Array.isArray(taskIds) ? taskIds : [])
@@ -172,9 +167,7 @@ export async function waitTasksDone({ taskIds, timeoutMs = 30000 } = {}) {
       const still = Array.from(pending);
       cleanup();
       const err = new Error(
-        `[waitTasksDone] timeout after ${timeoutMs}ms, pending task_ids=${still.join(
-          ","
-        )}`
+        `[waitTasksDone] timeout after ${timeoutMs}ms, pending task_ids=${still.join(",")}`
       );
       reject(err);
     }, timeoutMs);

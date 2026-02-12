@@ -176,7 +176,7 @@ import pandas as pd
 import httpx
 import json
 
-from backend.utils.async_limiter import limit_async_network_io
+from backend.utils.async_limiter import limit_provider_network_io
 from backend.utils.async_retry import async_retry_call
 from backend.utils.logger import get_logger
 from backend.utils.time import today_ymd, parse_yyyymmdd
@@ -365,7 +365,7 @@ def _parse_klines_to_df(klines: List[str]) -> pd.DataFrame:
 # ==============================================================================
 
 
-@limit_async_network_io
+@limit_provider_network_io("eastmoney")
 async def get_kline_em(
     symbol: str,
     freq: str,

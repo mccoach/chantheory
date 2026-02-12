@@ -1,21 +1,22 @@
 # backend/db/calendar.py
 # ==============================
-# 交易日历表操作模块（V2.0 - 新增get_latest_date）
+# 交易日历表操作模块（V2.1 - upsert 加写锁）
 # ==============================
 
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 
-from backend.db.connection import get_conn
+from backend.db.connection import get_conn, get_write_lock
+
 
 def upsert_trade_calendar(records: List[Dict[str, Any]]) -> int:
-    """批量插入或更新交易日历"""
+    """批量插入或更新交易日历（串行写锁保护）"""
     if not records:
         return 0
-    
-    conn = get_conn()
-    cur = conn.cursor()
-    
+
+    for rec in records:
+        rec["market"] = rec.get("market", "CN")
+
     sql = """
     INSERT INTO trade_calendar (date, market, is_trading_day)
     VALUES (:date, :market, :is_trading_day)
@@ -23,13 +24,13 @@ def upsert_trade_calendar(records: List[Dict[str, Any]]) -> int:
         market=excluded.market,
         is_trading_day=excluded.is_trading_day;
     """
-    
-    for rec in records:
-        rec['market'] = rec.get('market', 'CN')
-    
-    cur.executemany(sql, records)
-    conn.commit()
-    return cur.rowcount
+
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.executemany(sql, records)
+        conn.commit()
+        return cur.rowcount
 
 
 def is_trading_day(date_ymd: int, market: str = 'CN') -> bool:
@@ -80,10 +81,10 @@ def select_trading_days_in_range(start_ymd: int, end_ymd: int, market: str = 'CN
 def get_latest_date(market: str = 'CN') -> Optional[int]:
     """
     获取本地交易日历的最晚日期
-    
+
     用途：
       启动时判断是否需要更新日历
-    
+
     Returns:
         Optional[int]: 最晚日期（YYYYMMDD），不存在返回 None
     """

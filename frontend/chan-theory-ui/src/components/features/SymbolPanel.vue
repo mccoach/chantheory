@@ -1,13 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V10.0 - 下载弹窗 footerActions 归口
-     - 下载弹窗底部按钮不再由 App.vue 硬编码或 useCustomFooter 控制；
-     - 改为 dialogManager.open 时配置 footerActions；
-     - ModalDialog 统一渲染按钮，业务仅提供动作。
+<!-- V10.1 - REFACTOR: viewCommandHub 使用唯一注入路径（不再直接调用 useViewCommandHub 单例）
+     - 按“唯一工作路径/不留退路”原则：必须由 App.vue provide 的 hub 注入获取。
 -->
 <template>
   <div class="symbol-row">
-    <!-- 左列：标的输入与自选 -->
     <div class="col-left">
       <div class="search-container">
         <SymbolSearch
@@ -45,7 +42,6 @@
       />
     </div>
 
-    <!-- 中列：标的信息 -->
     <div class="col-middle">
       <div class="info-line-1" :title="middleTitle">
         <span class="sym-name">{{ middleName }}</span>
@@ -113,7 +109,6 @@
       </div>
     </div>
 
-    <!-- 右列：操作按钮 -->
     <div class="col-right">
       <SymbolActions :loading="vm.loading.value" />
 
@@ -146,7 +141,6 @@ import { inject, ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
-import { useViewCommandHub } from "@/composables/useViewCommandHub";
 
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
@@ -158,10 +152,12 @@ import { parseTimeValue } from "@/utils/timeParse";
 const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);
 const settings = useUserSettings();
-const { ready, search, findBySymbol, ensureIndexFresh } = useSymbolIndex();
-const hub = useViewCommandHub();
+const { ready, search, findBySymbol, ensureIndexReady } = useSymbolIndex();
 const wl = useWatchlist();
 const dialogManager = inject("dialogManager", null);
+
+// 唯一工作路径：必须注入 hub（不再直接 useViewCommandHub）
+const hub = inject("viewCommandHub");
 
 const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
 const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
@@ -200,9 +196,7 @@ async function selectItem(item) {
     return;
   }
 
-  console.log(
-    `[SymbolPanel] 🔄 标的变化: ${lastRenderedSymbol.value} → ${sym}`
-  );
+  console.log(`[SymbolPanel] 🔄 标的变化: ${lastRenderedSymbol.value} → ${sym}`);
 
   inputText.value = sym;
   vm.code.value = sym;
@@ -258,7 +252,8 @@ async function forceRefreshSymbols() {
   try {
     console.log("[SymbolPanel] 🔄 强制刷新标的列表...");
 
-    await ensureIndexFresh(true);
+    // 唯一入口：force
+    await ensureIndexReady({ mode: "force" });
 
     console.log("[SymbolPanel] ✅ 标的列表刷新完成");
   } catch (e) {
@@ -378,7 +373,7 @@ function onDocClick(e) {
   }
 }
 
-// ===== 中间栏信息（基础：symbol_index）=====
+// ===== 中间栏信息 =====
 const middleCode = computed(() => (vm.code?.value || "").trim());
 
 const symbolEntry = computed(() => {
@@ -403,7 +398,7 @@ const middleTitle = computed(() =>
     : middleCode.value || ""
 );
 
-// ===== 档案信息（仅 vm.profile，来自 /api/profile/current）=====
+// ===== 档案信息 =====
 const profileInfo = computed(() => {
   const pf = vm.profile?.value || null;
 
@@ -469,9 +464,7 @@ function formatListingDate(intVal) {
   return formatYmdInt(n);
 }
 
-// ==============================
-// 下载弹窗入口（Dialog Action Contract：纯 key）
-// ==============================
+// 下载弹窗入口
 async function openDownloadDialog() {
   try {
     if (!dialogManager || typeof dialogManager.open !== "function") return;
@@ -483,6 +476,8 @@ async function openDownloadDialog() {
       contentComponent: mod.default,
       props: {},
 
+      // CHANGED: 新增“终止下载”（触发 DataDownloadDialog.dialogActions.terminate_download）
+      // 说明：按你的要求，“终止下载”放到底栏右半区，与“数据下载”主按钮并排。
       footerActions: [
         {
           key: "export_list",
@@ -493,6 +488,11 @@ async function openDownloadDialog() {
         {
           key: "download_data",
           label: "数据下载",
+          disabled: false,
+        },
+        {
+          key: "terminate_download",
+          label: "终止下载",
           disabled: false,
         },
         {
@@ -508,6 +508,7 @@ async function openDownloadDialog() {
 </script>
 
 <style scoped>
+/* 原样保留：CSS 未改 */
 .symbol-row {
   display: grid;
   grid-template-columns: auto 1fr auto;

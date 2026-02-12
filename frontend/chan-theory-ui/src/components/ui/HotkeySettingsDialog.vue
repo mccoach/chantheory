@@ -1,10 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\ui\HotkeySettingsDialog.vue -->
-<!--
-本轮改动：
-1) scope 组名显示为中文（仅展示层），不改变实际 scope key，不影响保存与生效。
-2) 维持三列瀑布流布局 + 溢出修复版。
--->
-
 <template>
   <div class="settings-content">
     <div class="desc">
@@ -13,7 +7,6 @@
 
     <div class="scopes-masonry">
       <div v-for="scope in scopes" :key="scope" class="scope">
-        <!-- NEW: 组名中文展示 -->
         <div class="scope-title" :title="scopeTitle(scope)">
           {{ scopeTitle(scope) }}
         </div>
@@ -51,7 +44,6 @@ const settings = useUserSettings();
 const draftBindings = reactive({});
 const scopes = Object.keys(defaultKeymap);
 
-// NEW: scope 中文名映射（仅用于展示）
 const SCOPE_LABELS = {
   global: "全局",
   "panel:symbol": "标的输入面板",
@@ -69,17 +61,20 @@ function scopeTitle(scope) {
 function initDraft() {
   scopes.forEach((s) => {
     draftBindings[s] = draftBindings[s] || {};
-    const mergedCmdToCombo = hotkeys.getBindings(s);
-    Object.keys(mergedCmdToCombo).forEach((cmd) => {
-      draftBindings[s][cmd] = mergedCmdToCombo[cmd];
+
+    // 唯一派生：cmd -> combo
+    const cmdToCombo = hotkeys.getCommandToCombo(s);
+
+    Object.keys(cmdToCombo).forEach((cmd) => {
+      draftBindings[s][cmd] = cmdToCombo[cmd];
     });
   });
 }
 
 function labelsForScope(scope) {
-  const combos = hotkeys.getBindings(scope);
+  const comboToCmd = hotkeys.getComboToCommand(scope);
   const out = {};
-  Object.keys(combos).forEach((cmd) => {
+  Object.values(comboToCmd).forEach((cmd) => {
     out[cmd] = commandLabels[cmd] || cmd;
   });
   return out;
@@ -117,13 +112,14 @@ function captureKey(scope, cmd, e) {
 
 function stopCapture(scope, cmd, keep) {
   if (!keep && !draftBindings[scope][cmd]) {
-    const merged = hotkeys.getBindings(scope);
-    draftBindings[scope][cmd] = merged[cmd] || "";
+    const cmdToCombo = hotkeys.getCommandToCombo(scope);
+    draftBindings[scope][cmd] = cmdToCombo[cmd] || "";
   }
   capturing.value = { scope: "", cmd: "" };
 }
 
 function save() {
+  // 保存结构：scope -> combo -> cmd（运行时唯一真相源）
   const overrides = {};
   scopes.forEach((s) => {
     overrides[s] = overrides[s] || {};
@@ -137,14 +133,17 @@ function save() {
 
 function resetAll() {
   try {
-    const invert = (map) => {
+    // defaultKeymap 本身就是 combo->cmd
+    // draftBindings 需要 cmd->combo 视图：做一次反转（仅用于 UI）
+    const invert = (comboToCmd) => {
       const out = {};
-      Object.keys(map || {}).forEach((combo) => {
-        const cmd = map[combo];
+      Object.keys(comboToCmd || {}).forEach((combo) => {
+        const cmd = comboToCmd[combo];
         out[cmd] = combo;
       });
       return out;
     };
+
     scopes.forEach((s) => {
       draftBindings[s] = invert(defaultKeymap[s] || {});
     });

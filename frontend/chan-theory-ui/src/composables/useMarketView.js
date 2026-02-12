@@ -1,12 +1,8 @@
 // src/composables/useMarketView.js
 // ==============================
-// V17.5 - force_refresh 指令触发“仅一次”FULL（在数据落地后触发，避免重复 full）
-//
-// 变更说明（按你的最新条文）：
-//   - 仅当实际动作指令为 reload(force_refresh=true) 时触发 FULL；
-//   - FULL 仅触发一次：在 candles/indicators/meta（及可选 profile）落地后触发；
-//   - 不绑定按钮/快捷键等用户行为；不影响 symbol_index 强制刷新；
-//   - 若请求被取消/过期（seq 不匹配）则不触发 FULL。
+// V17.6 - CHANGED: 页面请求在“提交任务”阶段也按 class 分流
+//   - stock：无论页面 adjust/freq，只提交 current_kline(adjust=none) + current_factors
+//   - non-stock：按页面 adjust 提交 current_kline；不提交 current_factors，且不读取 factors
 // ==============================
 
 import { ref, watch, computed, toRef } from "vue";
@@ -93,6 +89,15 @@ export function useMarketView(options = {}) {
     const forceRefresh = !!opts.force_refresh;
     const withProfile = opts.with_profile === true;
 
+    // ===== NEW: 提交任务阶段也按 class 分流（与读取阶段保持一致）=====
+    const entry = findBySymbol(currentSymbol);
+    const cls = String(entry?.class || "").toLowerCase();
+    const isStock = cls === "stock";
+
+    // stock 固定 none；非 stock 按页面 adjust 透传
+    const requestAdjust = isStock ? "none" : String(currentAdjust || "none");
+    const shouldFetchFactors = isStock;
+
     try {
       if (_abortCtl) _abortCtl.abort();
     } catch { }
@@ -117,7 +122,7 @@ export function useMarketView(options = {}) {
           const kTask = await declareCurrentKline({
             symbol: currentSymbol,
             freq: currentFreq,
-            adjust: currentAdjust,
+            adjust: requestAdjust, // CHANGED: stock 固定 none；非 stock 透传页面 adjust
             force_fetch: forceRefresh,
           });
           if (kTask?.task_id) {
@@ -128,17 +133,20 @@ export function useMarketView(options = {}) {
           throw e;
         }
 
-        try {
-          const fTask = await declareCurrentFactors({
-            symbol: currentSymbol,
-            force_fetch: forceRefresh,
-          });
-          if (fTask?.task_id) {
-            majorTaskIds.push(String(fTask.task_id));
+        // CHANGED: 仅 stock 声明 factors；非 stock 不声明
+        if (shouldFetchFactors) {
+          try {
+            const fTask = await declareCurrentFactors({
+              symbol: currentSymbol,
+              force_fetch: forceRefresh,
+            });
+            if (fTask?.task_id) {
+              majorTaskIds.push(String(fTask.task_id));
+            }
+          } catch (e) {
+            console.error(`${ts()} [MarketView] declare-current_factors-failed`, e);
+            throw e;
           }
-        } catch (e) {
-          console.error(`${ts()} [MarketView] declare-current_factors-failed`, e);
-          throw e;
         }
 
         if (withProfile) {
@@ -162,7 +170,7 @@ export function useMarketView(options = {}) {
           return;
         }
 
-        // ===== Step 2: 等待 K+因子任务完成 =====
+        // ===== Step 2: 等待任务完成 =====
         if (majorTaskIds.length) {
           await waitTasksDone({
             taskIds: majorTaskIds,
@@ -174,19 +182,13 @@ export function useMarketView(options = {}) {
           }
         }
 
-        // ===== Step 3: 拉取业务数据（/api/candles + /api/factors）=====
-        const entry = findBySymbol(currentSymbol);
-        const cls = String(entry?.class || "").toLowerCase();
-        const isStock = cls === "stock";
-
-        const requestAdjust = isStock ? "none" : String(currentAdjust || "none");
-
+        // ===== Step 3: 拉取业务数据（/api/candles + 可选 /api/factors）=====
         const [candlesRes, factorsRes] = await Promise.all([
           fetchCandles(currentSymbol, currentFreq, {
             signal: ctl.signal,
-            adjust: requestAdjust,
+            adjust: requestAdjust, // CHANGED: 与提交一致
           }),
-          fetchFactors(currentSymbol),
+          shouldFetchFactors ? fetchFactors(currentSymbol) : Promise.resolve([]),
         ]);
 
         if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
@@ -204,7 +206,7 @@ export function useMarketView(options = {}) {
         };
 
         rawCandles.value = candlesRes.candles || [];
-        factors.value = factorsRes || [];
+        factors.value = Array.isArray(factorsRes) ? factorsRes : [];
 
         if (candlesRes.meta.all_rows > 0) {
           const wantAdjust = String(currentAdjust || "none");
@@ -236,12 +238,16 @@ export function useMarketView(options = {}) {
               );
             }
           } else {
+            // non-stock：后端已按 adjust 返回（不再需要 factors）
             finalCandles = rawCandles.value;
           }
 
           candles.value = finalCandles;
 
-          indicators.value = computeIndicators(finalCandles, indicatorConfig.value);
+          indicators.value = computeIndicators(
+            finalCandles,
+            indicatorConfig.value
+          );
 
           const allRows = finalCandles.length;
           const minTs = finalCandles[0]?.ts;

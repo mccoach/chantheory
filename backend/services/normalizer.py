@@ -1,6 +1,6 @@
 # backend/services/normalizer.py
 # ==============================
-# 说明：数据标准化器（V7.2 - 标的列表日期容错版）
+# 说明：数据标准化器（V7.3 - bars 体系统一：移除基于 source_id 的 volume 二次换算）
 #
 # 核心职责：
 #   - K线标准化（bars）
@@ -9,13 +9,9 @@
 #   - 交易日历标准化（trade_calendar）
 #   - 档案基础信息标准化（profile 基础字段）
 #
-# 本次改动：
-#   - normalize_symbol_list_df 中 listing_date 的解析改为“宽松容错”：
-#       * 空字符串 / '-' / '--' 等视为 None；
-#       * 解析失败记录 warning，不再抛异常，避免整批沪市基金同步失败。
-#   - normalize_trade_calendar_df 支持 Baostock 返回结构：
-#       * 识别 'calendar_date' 作为日期列；
-#       * 若存在 'is_trading_day' 列，则在此处过滤 == 1，仅保留交易日。
+# 本次改动（bars）：
+#   - normalize_bars_df 中删除基于 source_id 子串（'_em'/'_tx'）对 volume 的二次换算逻辑：
+#       * 单位换算应由数据源原子适配器负责（明确职责），标准化层仅做数值化与字段映射。
 # ==============================
 
 from __future__ import annotations
@@ -41,7 +37,7 @@ _LOG = get_logger("normalizer")
 def _extract_market_and_clean_symbol(raw_symbol: str) -> Tuple[str, str]:
     """
     从代码中提取市场信息并去除前缀（兜底用）。
-    
+
     说明：
       - 新架构中，market 的主判定应来自接口源头（SSE/SZSE），
         本函数仅在极端场景下用于容错或日志诊断，而不作为主逻辑。
@@ -79,7 +75,7 @@ def _extract_market_and_clean_symbol(raw_symbol: str) -> Tuple[str, str]:
 def normalize_bars_df(raw_df: pd.DataFrame, source_id: str) -> Optional[pd.DataFrame]:
     """
     标准化K线数据（完全自包含版）
-    
+
     时间戳规范：
       - 所有K线的 ts 统一表示"收盘时刻"
       - 分钟K线：保持原始时间（如 14:35）
@@ -87,11 +83,11 @@ def normalize_bars_df(raw_df: pd.DataFrame, source_id: str) -> Optional[pd.DataF
     """
     if raw_df is None or raw_df.empty:
         return None
-    
+
     df = normalize_dataframe(raw_df)
     if df is None or df.empty:
         return None
-    
+
     field_map = {
         # 时间列
         '日期': 'date', 'date': 'date',
@@ -112,57 +108,52 @@ def normalize_bars_df(raw_df: pd.DataFrame, source_id: str) -> Optional[pd.DataF
     }
     rename_map = {col: field_map[col] for col in df.columns if col in field_map}
     df = df.rename(columns=rename_map)
-    
+
     has_date = 'date' in df.columns
     has_time = 'time' in df.columns
     time_col = 'time' if has_time else ('date' if has_date else None)
-    
+
     if not time_col:
         _LOG.error(f"[标准化] 未找到时间列，source={source_id}, columns={df.columns.tolist()}")
         return None
-    
+
     required = ['open', 'high', 'low', 'close']
     if not all(c in df.columns for c in required):
         _LOG.error(f"[标准化] 缺少必需字段，source={source_id}, columns={df.columns.tolist()}")
         return None
-    
+
     is_minutely = has_time
     if is_minutely:
         df['ts'] = df[time_col].apply(_safe_parse_datetime)
     else:
         df['ts'] = df[time_col].apply(_safe_parse_date_to_close)
     df = df.drop(columns=[time_col], errors='ignore')
-    
+
+    # volume：标准化层只做数值化，不做单位换算（单位换算应由数据源适配器明确负责）
     if 'volume' in df.columns:
-        if '_em' in source_id or '_tx' in source_id:
-            df['volume'] = pd.to_numeric(df['volume'], errors='coerce') * 100
-        else:
-            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
     else:
         df['volume'] = 0.0
-    
+
     if 'amount' in df.columns:
-        if '_tx' in source_id:
-            df['volume'] = pd.to_numeric(df['amount'], errors='coerce') * 100
-            df['amount'] = None
-        else:
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
     else:
         df['amount'] = None
-    
+
     if 'turnover_rate' in df.columns:
         df['turnover_rate'] = pd.to_numeric(df['turnover_rate'], errors='coerce') / 100.0
     else:
         df['turnover_rate'] = None
-    
+
     output_cols = ['ts', 'open', 'high', 'low', 'close', 'volume', 'amount', 'turnover_rate']
     for col in output_cols:
         if col not in df.columns:
             df[col] = None
-    
+
     df = df[output_cols].copy()
     df = df.drop_duplicates(subset=['ts']).sort_values('ts').reset_index(drop=True)
     return df
+
 
 def _safe_parse_datetime(value: Any) -> int:
     """安全解析datetime字符串 → 毫秒时间戳（分钟K线用）"""
@@ -171,6 +162,7 @@ def _safe_parse_datetime(value: Any) -> int:
     except Exception as e:
         _LOG.warning(f"[时间戳解析] datetime解析失败: {value}, error={e}")
         return now_ms()
+
 
 def _safe_parse_date_to_close(value: Any) -> int:
     """安全解析日期 → 收盘时刻（日K线用）"""
@@ -208,7 +200,7 @@ def normalize_baostock_adj_factors_df(
     """
     if raw_df is None or raw_df.empty:
         return None
-    
+
     df = normalize_dataframe(raw_df)
     if df is None or df.empty:
         return None
@@ -264,29 +256,7 @@ def normalize_baostock_adj_factors_df(
 def normalize_symbol_list_df(raw_df: pd.DataFrame, source_tag: str) -> Optional[pd.DataFrame]:
     """
     标的列表标准化（新语义版）
-
-    设计目标：
-      1. 明确从“方法源 + 市场 + 股票/基金”推导出 class/type/board/market/listing_date；
-      2. 不再依赖模糊的 category 概念，不再兼容旧逻辑；
-      3. 所有语义字段（class/type/board/market）只在此处定义，不在 DB 层做二次推断。
-
-    输入：
-      - raw_df: 原始 DataFrame（来自 SSE/SZSE 的 listing 接口）
-      - source_tag: 字符串，标识调用源，建议值：
-          * 'sse_sh_stock' : 上交所股票列表
-          * 'sse_sh_fund'  : 上交所基金列表
-          * 'szse_sz_stock': 深交所股票列表
-          * 'szse_sz_fund' : 深交所基金列表
-        （后续在 symbol_sync 中会按此约定调用）
-
-    输出 DataFrame 字段：
-      - symbol        (str): 代码（不带前缀）
-      - name          (str): 名称（股票简称 / 基金扩展简称）
-      - market        (str): 'SH' / 'SZ'
-      - class         (str): 'stock' / 'fund'
-      - type          (str): 标的类别（A/B/科创/ETF/LOF/实时申赎货币/基础设施公募REITs/...）
-      - board         (str): 股票板块 '主板'/'科创板'/'创业板'，基金为 None
-      - listing_date  (int|None): 上市日期 YYYYMMDD
+    ...
     """
     if raw_df is None or raw_df.empty:
         _LOG.error(f"[列表标准化] 输入为空，source_tag={source_tag}")
@@ -415,9 +385,6 @@ def normalize_symbol_list_df(raw_df: pd.DataFrame, source_tag: str) -> Optional[
     result["type"] = df.apply(map_type, axis=1)
     result["board"] = df.apply(map_board, axis=1)
 
-    # B 股支持逻辑：当前规范暂不纳入 B 股，但在此仍实现识别规则，方便未来扩展。
-    # 调用方若不希望纳入 B 股，可在上游根据 type=='B' 过滤掉相关记录。
-
     # listing_date 标准化为 YYYYMMDD 整数
     if listing_col in df.columns:
         def _safe_parse_listing(v: Any) -> Optional[int]:
@@ -456,31 +423,22 @@ def normalize_symbol_list_df(raw_df: pd.DataFrame, source_tag: str) -> Optional[
 def normalize_trade_calendar_df(raw_df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
     标准化交易日历
-
-    支持的输入格式：
-      - 列名中包含以下任意一个日期列：
-          'trade_date', 'calendar_date', 'date', '日期', 'day'
-      - 可选列：
-          'is_trading_day'：若存在，则在此处过滤 == 1，仅保留交易日；
-                            若不存在，则假定输入已为纯交易日列表。
-
-    输出：
-      - 列：['date']，YYYYMMDD 整型，去重升序。
+    ...
     """
     if raw_df is None or raw_df.empty:
         return None
-    
+
     df = normalize_dataframe(raw_df)
     if df is None or df.empty:
         return None
-    
+
     date_col = None
     # 扩展支持 Baostock 的 'calendar_date'
     for col in ['trade_date', 'calendar_date', 'date', '日期', 'day']:
         if col in df.columns:
             date_col = col
             break
-    
+
     if not date_col:
         _LOG.error(f"[日历标准化] 未找到日期列，columns={df.columns.tolist()}")
         return None
@@ -506,7 +464,7 @@ def normalize_trade_calendar_df(raw_df: pd.DataFrame) -> Optional[pd.DataFrame]:
     )
     df = df.dropna(subset=['date'])
     df['date'] = df['date'].astype(int)
-    
+
     return df[['date']].drop_duplicates().sort_values('date').reset_index(drop=True)
 
 # ==============================================================================
@@ -516,29 +474,18 @@ def normalize_trade_calendar_df(raw_df: pd.DataFrame) -> Optional[pd.DataFrame]:
 def normalize_stock_profile_df(raw_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """
     标准化个股/基金档案（单标的 · EM 源基础版）
-
-    当前用途：
-      - 仅用于获取部分基础信息（如总股本/流通股本/行业/地区等）时的兜底解析；
-      - 数值型市值、估值类字段（total_value/nego_value/pe_static）将由
-        SSE/SZSE 专用 profile 管线提供，不在此处从 EM 源推断。
-
-    返回字段：
-      - total_shares: 可用时尝试解析总股本（具体单位由上层决定）
-      - float_shares: 同上，流通股本
-      - industry: 行业名称
-      - region: 地区
-      - total_value/nego_value/pe_static/concepts: 预留键，默认 None
+    ...
     """
     if raw_df is None or raw_df.empty:
         return None
-    
+
     df = normalize_dataframe(raw_df)
     if df is None or df.empty:
         return None
-    
+
     item_col = None
     value_col = None
-    
+
     for col in ['item', 'Item', '项目']:
         if col in df.columns:
             item_col = col
@@ -550,7 +497,7 @@ def normalize_stock_profile_df(raw_df: pd.DataFrame) -> Optional[Dict[str, Any]]
     if not item_col or not value_col:
         _LOG.error(f"[档案标准化] 未找到item/value列，columns={df.columns.tolist()}")
         return None
-    
+
     profile: Dict[str, Any] = {
         "total_shares": None,
         "float_shares": None,
@@ -561,11 +508,11 @@ def normalize_stock_profile_df(raw_df: pd.DataFrame) -> Optional[Dict[str, Any]]
         "region": None,
         "concepts": None,
     }
-    
+
     for _, row in df.iterrows():
         item = str(row[item_col]).strip()
         value = row[value_col]
-        
+
         if item in ['总股本', 'total_shares']:
             try:
                 if pd.notna(value):

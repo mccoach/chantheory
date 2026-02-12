@@ -1,66 +1,48 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\interaction\hotkeys\registry.js
 // ==============================
-// V2.3 - NEW: 输入框优先（NumberSpinner 编辑态时放行 Esc/Enter 等键，不被全局快捷键系统抢占）
-// 背景：
-//   - 本项目存在全局 HotkeyService（capture 阶段）会拦截 Esc/Ctrl+Enter 等命令；
-//   - 用户要求：当数字框（NumberSpinner）处于编辑态时，Esc=回滚本框，Enter=提交本框，
-//              且 modal 的 Esc 关闭弹窗、Ctrl+Enter 保存等不触发。
-// 实现：
-//   - NumberSpinner 根节点暴露 data-ct-numspin="1" 且 data-editing="1|0"；
-//   - HotkeyService 在 capture 阶段检测：若事件来自编辑态 NumberSpinner，则直接 return 放行。
+// V3.0 - REFACTOR: Hotkey 映射方向拉直为唯一真相源（combo -> command）
+//
+// 目标：
+//   - 唯一真相源：scope -> combo -> command（运行时按 combo 查命令）
+//   - UI 展示需要 cmd -> combo：由本类提供唯一派生方法 getCommandToCombo
+//   - 删除方向混乱的 getBindings/_invert 旧绕路实现
+//
+// 保持：
+//   - userOverrides 结构仍为 scope -> combo -> cmd（与设置弹窗保存/持久化链路一致）
 // ==============================
 
 import { ref } from "vue";
 import { toCombo, isReservedBrowserCombo } from "./core.js";
 
 export class HotkeyService {
-  // 定义热键服务类
   constructor(defaultKeymap) {
-    // 构造函数
-    this.defaultKeymap = defaultKeymap || {}; // 默认键位映射
-    this.userOverrides = {}; // 用户覆盖（scope -> combo -> command）
-    this.handlers = {}; // 命令处理器（scope -> command -> fn）
-    this.scopeStack = ref(["global"]); // 作用域栈（顶层优先，默认 global）
-    this._onKeydown = this._onKeydown.bind(this); // 绑定 this
-    window.addEventListener("keydown", this._onKeydown, {
-      // 注册键盘监听（捕获阶段）
-      capture: true,
-    });
+    this.defaultKeymap = defaultKeymap || {};
+    this.userOverrides = {};
+    this.handlers = {};
+    this.scopeStack = ref(["global"]);
+    this._onKeydown = this._onKeydown.bind(this);
+    window.addEventListener("keydown", this._onKeydown, { capture: true });
   }
 
   destroy() {
-    // 销毁（移除监听）
     window.removeEventListener("keydown", this._onKeydown, { capture: true });
   }
 
+  // 合并后的唯一真相源 keymap：scope -> combo -> cmd
   get keymap() {
-    // 计算属性：合并后的键位表
-    const merged = {}; // 合并结果
+    const merged = {};
     const scopes = new Set([
-      // 所有 scope（默认 + 覆盖）
       ...Object.keys(this.defaultKeymap),
       ...Object.keys(this.userOverrides || {}),
-    ]); // 结束集合
+    ]);
     scopes.forEach((s) => {
-      // 遍历 scope
-      merged[s] = Object.assign(
-        // 合并（默认优先，覆盖后应用）
-        {},
-        this.defaultKeymap[s] || {},
-        this.userOverrides[s] || {}
-      );
+      merged[s] = Object.assign({}, this.defaultKeymap[s] || {}, this.userOverrides[s] || {});
     });
     return merged;
   }
 
   registerHandlers(scope, map) {
-    // 注册命令处理器
-    this.handlers[scope] = Object.assign(
-      // 覆盖追加
-      {},
-      this.handlers[scope] || {},
-      map || {}
-    );
+    this.handlers[scope] = Object.assign({}, this.handlers[scope] || {}, map || {});
   }
 
   unregisterHandlers(scope) {
@@ -74,7 +56,6 @@ export class HotkeyService {
   }
 
   popScope(scope) {
-    // 弹出作用域
     if (!scope) {
       const s = this.scopeStack.value.slice();
       if (s.length > 1) s.pop();
@@ -86,64 +67,45 @@ export class HotkeyService {
     this.scopeStack.value = s;
   }
 
-  setBinding(scope, command, combo) {
-    // 这个方法现在逻辑上被 setUserOverrides 覆盖，但保留以防未来需要单点修改
-    const currentScopeOverrides = this.userOverrides[scope] || {};
-    // 移除旧的绑定
-    Object.keys(currentScopeOverrides).forEach((c) => {
-      if (currentScopeOverrides[c] === command) {
-        delete currentScopeOverrides[c];
-      }
-    });
-    // 添加新的绑定
-    if (combo) {
-      currentScopeOverrides[combo] = command;
-    }
-    this.userOverrides[scope] = currentScopeOverrides;
-  }
-
   setUserOverrides(overrides) {
-    // 接收完整的、按 scope 组织的 overrides 对象
+    // overrides 必须是 scope -> combo -> cmd（真相源方向）
     this.userOverrides = overrides || {};
   }
 
-  getBindings(scope) {
-    // 获取“命令 → 组合”视图
-    const merged = this.keymap[scope] || {}; // 合并映射
-    return this._invert(merged); // 反转（返回 cmd->combo）
-  } // 结束 getBindings
+  // ===== 唯一派生：cmd -> combo（供 UI 展示/编辑）=====
+  getCommandToCombo(scope) {
+    const s = String(scope || "");
+    const map = this.keymap[s] || {};
+    const out = {};
+    for (const [combo, cmd] of Object.entries(map)) {
+      if (!cmd) continue;
+      out[String(cmd)] = String(combo);
+    }
+    return out;
+  }
 
-  _invert(obj) {
-    // 反转 {a:b} → {b:a}
-    const out = {}; // 结果
-    Object.keys(obj || {}).forEach((k) => (out[obj[k]] = k)); // 遍历反转
-    return out; // 返回
-  } // 结束 _invert
+  // ===== UI 若需要 combo -> cmd，也可显式拿到（同真相源）=====
+  getComboToCommand(scope) {
+    const s = String(scope || "");
+    return this.keymap[s] || {};
+  }
 
   focusNextPrev(dir = +1) {
-    // 默认行为：在输入可聚焦元素间切换
     const candidates = Array.from(
-      // 查找可见可用输入控件
       document.querySelectorAll(
         'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [contenteditable="true"]'
       )
     ).filter((el) => {
-      // 过滤不可见
-      const rs = getComputedStyle(el); // 读取样式
-      return (
-        rs.display !== "none" &&
-        rs.visibility !== "hidden" &&
-        el.offsetParent !== null
-      );
-    }); // 结束过滤
-    if (!candidates.length) return; // 无可用项
-    const active = document.activeElement; // 当前聚焦
-    let idx = candidates.indexOf(active); // 索引
-    idx = idx < 0 ? (dir > 0 ? -1 : 0) : idx; // 初始位置
-    const next =
-      candidates[(idx + dir + candidates.length) % candidates.length]; // 计算下一个
-    if (next && typeof next.focus === "function") next.focus(); // 聚焦
-  } // 结束 focusNextPrev
+      const rs = getComputedStyle(el);
+      return rs.display !== "none" && rs.visibility !== "hidden" && el.offsetParent !== null;
+    });
+    if (!candidates.length) return;
+    const active = document.activeElement;
+    let idx = candidates.indexOf(active);
+    idx = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+    const next = candidates[(idx + dir + candidates.length) % candidates.length];
+    if (next && typeof next.focus === "function") next.focus();
+  }
 
   _isEditingNumberSpinnerTarget(e) {
     try {
@@ -160,79 +122,64 @@ export class HotkeyService {
   }
 
   _onKeydown(e) {
-    // 全局 keydown 处理
-    const combo = toCombo(e); // 组合规范化
-    if (!combo) return; // 无组合 → 忽略
+    const combo = toCombo(e);
+    if (!combo) return;
 
-    // ===== NEW: 输入框优先（编辑态 NumberSpinner 放行）=====
-    // 说明：
-    //   - 必须在 capture 阶段尽早 return，避免后续 preventDefault/命令执行；
-    //   - 放行范围：编辑态下所有按键都应交给输入控件自行处理（包括 Esc/Enter/方向键等）。
-    //     这里采取最严格的“完全放行”，以兑现“输入过程不被打断”的要求。
-    if (this._isEditingNumberSpinnerTarget(e)) {
-      return;
-    }
+    if (this._isEditingNumberSpinnerTarget(e)) return;
+    if (isReservedBrowserCombo(e)) return;
 
-    if (isReservedBrowserCombo(e)) return; // 浏览器保留 → 放行
+    const tag = ((e.target && e.target.tagName) || "").toLowerCase();
+    const inInput = tag === "input" || tag === "textarea" || (e.target && e.target.isContentEditable);
 
-    const tag = ((e.target && e.target.tagName) || "").toLowerCase(); // 标签名
-    const inInput =
-      tag === "input" ||
-      tag === "textarea" ||
-      (e.target && e.target.isContentEditable); // 是否输入环境
     const inputWhitelist = new Set([
-      // 输入环境白名单组合
-      "Escape", // 取消
-      "Ctrl+Enter", // 确认
-      "Meta+Enter", // 确认（Mac）
-      "Tab", // 下一个输入
-      "Shift+Tab", // 上一个输入
-      "Ctrl+Right", // 快速跳转下一个输入
-      "Ctrl+Left", // 快速跳转上一个输入
-      "Ctrl+Comma", // 打开设置
-      "F1", // 帮助/设置
-      "Alt+R", // 刷新
-      "Alt+E", // 导出菜单
-      "ArrowDown", // 下拉下移
-      "ArrowUp", // 下拉上移
-      "Enter", // 确认
-      "ArrowLeft", // 键盘向左
-      "ArrowRight", // 键盘向右
-    ]); // 结束白名单
-    if (inInput && !inputWhitelist.has(combo)) return; // 输入环境且不在白名单 → 忽略
+      "Escape",
+      "Ctrl+Enter",
+      "Meta+Enter",
+      "Tab",
+      "Shift+Tab",
+      "Ctrl+Right",
+      "Ctrl+Left",
+      "Ctrl+Comma",
+      "F1",
+      "Alt+R",
+      "Alt+E",
+      "ArrowDown",
+      "ArrowUp",
+      "Enter",
+      "ArrowLeft",
+      "ArrowRight",
+    ]);
+
+    if (inInput && !inputWhitelist.has(combo)) return;
 
     const stack = [...this.scopeStack.value].reverse();
 
     for (const scope of stack) {
-      // 逐层匹配
-      const map = this.keymap[scope] || {}; // 合并映射
-      const cmd = map[combo]; // 查命令
-      if (!cmd) continue; // 未映射 → 下一个
+      const map = this.keymap[scope] || {};
+      const cmd = map[combo];
+      if (!cmd) continue;
 
       const handler =
-        (this.handlers[scope] || {})[cmd] || // 先找当前作用域
-        (this.handlers["global"] || {})[cmd]; // 再找 global
+        (this.handlers[scope] || {})[cmd] ||
+        (this.handlers["global"] || {})[cmd];
 
       if (!handler) {
         if (cmd === "focusNextField") {
-          // 内置：下一个输入
-          e.preventDefault(); // 阻止默认
-          this.focusNextPrev(+1); // 跳转
-          return; // 返回
+          e.preventDefault();
+          this.focusNextPrev(+1);
+          return;
         }
         if (cmd === "focusPrevField") {
-          // 内置：上一个输入
-          e.preventDefault(); // 阻止默认
-          this.focusNextPrev(-1); // 跳转
-          return; // 返回
+          e.preventDefault();
+          this.focusNextPrev(-1);
+          return;
         }
-        // 说明：openHotkeySettings/openHotkeyHelp 必须由外部 handlers 负责打开弹窗（App.vue链路）
         continue;
       }
 
       e.preventDefault();
       try {
-        handler(e, { scope, cmd, combo }); // 调用处理器
+        handler(e, { scope, cmd, combo });
       } catch (err) {
         console.error(`[HotkeyService] handler-error cmd=${cmd}`, err);
       }

@@ -1,21 +1,6 @@
 # backend/services/data_recipes/profile.py
 # ==============================
-# 说明：current_profile 任务配方（档案）
-#
-# 对应 Task：
-#   type='current_profile', scope='symbol'
-#
-# Job 列表（重构后）：
-#   1) sync_profile
-#
-# 特别说明：
-#   - 档案使用 AsyncWriter 写入 symbol_profile；
-#   - sync_profile Job 内部负责：
-#       * 调用 check_info_updated_today 判断是否需要更新；
-#       * 根据 force_fetch / 缺口结果决定是否调用 profile_sync.fetch_profile_snapshot；
-#       * 写入 symbol_profile；
-#   - 在 emit_task_done 之前调用 _writer.flush()，
-#     确保 task_done 发出后档案数据已落库，可立即安全查询。
+# current_profile 任务配方（统一状态/错误码/SSE协议版）
 # ==============================
 
 from __future__ import annotations
@@ -23,7 +8,7 @@ from __future__ import annotations
 from typing import Dict, Any
 
 from backend.services.task_model import Task
-from backend.services.task_events import emit_job_done, emit_task_done
+from backend.services.task_events import emit_job_finished, emit_task_finished
 from backend.services.data_recipes.common import bool_param
 from backend.services import profile_sync
 from backend.db.async_writer import get_async_writer
@@ -35,18 +20,11 @@ _writer = get_async_writer()
 
 
 async def run_current_profile(task: Task) -> Dict[str, Any]:
-    """
-    current_profile 任务配方（Task：type='current_profile', scope='symbol'）
-
-    Job 列表：
-      1) sync_profile
-    """
     trace_id = task.trace_id
     symbol = (task.symbol or "").strip()
     force_fetch = bool_param(task, "force_fetch", False)
 
-    job_types = ["sync_profile"]
-    job_count = len(job_types)
+    job_type = "sync_profile"
     jobs_status: Dict[str, str] = {}
 
     log_event(
@@ -66,102 +44,118 @@ async def run_current_profile(task: Task) -> Dict[str, Any]:
         },
     )
 
-    job_type = "sync_profile"
-    job_index = 1
     rows_written = 0
     updated = False
 
-    # ---- Job: sync_profile ----
     try:
         need_sync = True
         if not force_fetch:
-            need_sync = check_info_updated_today(
-                symbol=symbol,
-                data_type_id="current_profile",
-            )
+            need_sync = check_info_updated_today(symbol=symbol, data_type_id="current_profile")
 
         if not need_sync:
             jobs_status[job_type] = "success"
-            emit_job_done(
+            emit_job_finished(
                 task,
                 job_type=job_type,
-                job_index=job_index,
-                job_count=job_count,
+                job_index=1,
+                job_count=1,
                 status="success",
                 result={
                     "rows": 0,
-                    "message": "档案已在今日更新，本次未执行同步",
+                    "message": "档案无需同步（本地已最新）",
+                    "error_code": None,
+                    "error_message": None,
+                    "details": None,
+                    "extra": {"need_sync": False},
                 },
             )
         else:
             snapshot = await profile_sync.fetch_profile_snapshot(symbol)
             if not snapshot:
                 jobs_status[job_type] = "failed"
-                emit_job_done(
+                emit_job_finished(
                     task,
                     job_type=job_type,
-                    job_index=job_index,
-                    job_count=job_count,
+                    job_index=1,
+                    job_count=1,
                     status="failed",
                     result={
                         "rows": 0,
-                        "message": "档案拉取失败或为空",
-                        "error_code": "PROFILE_SYNC_ERROR",
-                        "error_message": "snapshot is empty",
+                        "message": "档案同步失败：远端返回空/无有效数据",
+                        "error_code": "REMOTE_EMPTY",
+                        "error_message": "profile snapshot is empty",
+                        "details": "profile_sync returned None/empty snapshot",
+                        "extra": {"symbol": symbol, "need_sync": True},
                     },
                 )
             else:
-                # 异步写入 symbol_profile
                 await _writer.write_profile(snapshot)
                 rows_written = 1
                 updated = True
                 jobs_status[job_type] = "success"
-                emit_job_done(
+                emit_job_finished(
                     task,
                     job_type=job_type,
-                    job_index=job_index,
-                    job_count=job_count,
+                    job_index=1,
+                    job_count=1,
                     status="success",
                     result={
                         "rows": rows_written,
                         "message": "档案已同步至最新",
                         "error_code": None,
                         "error_message": None,
+                        "details": None,
+                        "extra": {"need_sync": True, "symbol": symbol},
                     },
                 )
 
     except Exception as e:
         jobs_status[job_type] = "failed"
-        emit_job_done(
+        emit_job_finished(
             task,
             job_type=job_type,
-            job_index=job_index,
-            job_count=job_count,
+            job_index=1,
+            job_count=1,
             status="failed",
             result={
                 "rows": 0,
-                "message": f"档案同步异常：{e}",
-                "error_code": "PROFILE_SYNC_ERROR",
+                "message": "档案同步失败：内部异常",
+                "error_code": "INTERNAL_ERROR",
                 "error_message": str(e),
+                "details": "exception in current_profile recipe",
+                "extra": {"exception_type": type(e).__name__},
             },
         )
         _LOG.error("[current_profile配方] 同步异常: %s", e, exc_info=True)
 
-    # 确保档案写入已全部落库，再发 task_done
     await _writer.flush()
 
-    emit_task_done(
+    st = jobs_status.get(job_type)
+    if st == "success":
+        summary_msg = "current_profile 成功"
+        summary_code = None
+        summary_err = None
+    else:
+        summary_msg = "current_profile 失败"
+        summary_code = "INTERNAL_ERROR"
+        summary_err = "see job result"
+
+    emit_task_finished(
         task,
         jobs=jobs_status,
         completion_policy="all_required",
         summary={
             "total_rows": rows_written,
-            "message": "current_profile 任务完成",
+            "message": summary_msg,
+            "error_code": summary_code,
+            "error_message": summary_err,
+            "details": None,
+            "extra": {"symbol": symbol, "updated": updated},
         },
     )
 
     return {
-        "updated": updated and jobs_status.get("sync_profile") == "success",
+        "updated": updated and jobs_status.get(job_type) == "success",
         "source_id": "SSE_SZSE",
         "rows": rows_written,
     }

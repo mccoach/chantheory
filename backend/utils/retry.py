@@ -4,17 +4,7 @@
 # - (NEW) 增加对特定网络异常的捕获，并触发日志和SSE告警事件。
 #
 # 改动（Schema统一）：
-#   - system_alert 事件统一为：
-#       {
-#         "type": "system_alert",
-#         "level": "error" | "critical" | ...,
-#         "code": "ANTISPIDER_TRIGGERED" | ...,
-#         "message": "...",
-#         "details": "...",
-#         "source": "retry",
-#         "trace_id": null | "...",
-#         "timestamp": "ISO8601"
-#       }
+#   - system_alert 事件统一由 backend.utils.alerts.emit_system_alert 发布，避免重复拼 schema。
 # ==============================
 
 from __future__ import annotations
@@ -29,9 +19,9 @@ except ImportError:
     httpx = None
 
 from backend.utils.logger import get_logger, log_event
-from backend.utils.events import publish as publish_event
 from backend.settings import settings
-from backend.utils.time import now_iso
+
+from backend.utils.alerts import emit_system_alert
 
 _LOG = get_logger("retry")
 
@@ -57,7 +47,7 @@ def retry_call(
         except Exception as e:
             last_exc = e
 
-            # (NEW) 检查是否为疑似反爬虫的特定网络异常
+            # 检查是否为疑似反爬虫的特定网络异常
             is_antispider_error = False
             if httpx and isinstance(e, (httpx.RemoteProtocolError, httpx.ConnectError)):
                 is_antispider_error = True
@@ -73,17 +63,15 @@ def retry_call(
                     message="Potential anti-spider mechanism triggered. Connection closed by remote host.",
                     extra={"error_message": str(e)}
                 )
-                # 推送SSE告警事件
-                publish_event({
-                    "type": "system_alert",
-                    "level": "error",
-                    "code": "ANTISPIDER_TRIGGERED",
-                    "message": "网络请求被远程主机关闭，可能触发了数据源反爬虫策略，数据同步将受影响。",
-                    "details": str(e),
-                    "source": "retry",
-                    "trace_id": None,
-                    "timestamp": now_iso(),
-                })
+                # 推送SSE告警事件（统一出口）
+                emit_system_alert(
+                    level="error",
+                    code="ANTISPIDER_TRIGGERED",
+                    message="网络请求被远程主机关闭，可能触发了数据源反爬虫策略，数据同步将受影响。",
+                    details=str(e),
+                    source="retry",
+                    trace_id=None,
+                )
 
             if i >= max_attempts:
                 break

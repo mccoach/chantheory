@@ -48,7 +48,7 @@ export function detectContinuityBarriers(candles, basePct, env = {}) {
 
   const thr = Math.max(
     0,
-    Number(CONTINUITY_BARRIER?.basePct ?? basePct ?? 0.2)
+    Number(CONTINUITY_BARRIER?.basePct ?? basePct)
   );
 
   const ipoYmdRaw = Number(env?.ipoYmd);

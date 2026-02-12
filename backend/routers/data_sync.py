@@ -2,30 +2,20 @@
 # ==============================
 # 数据同步API（Task/Job/SSE 版）
 #
-# 改动要点：
-#   - 一次 HTTP 请求 = 一个 Task（type 唯一，不再有 includes 列表）；
-#   - 不再使用 DataRequirementParser / TaskGroup；
-#   - 仅负责：
-#       * 从请求体构造 Task（create_task）；
-#       * 将 Task 入队 AsyncPriorityQueue；
-#       * 立即返回 task_id，实际执行由 UnifiedSyncExecutor 完成；
-#   - Job 拆解与 SSE(job_done/task_done) 由各 run_* 配方内部负责。
+# After Hours Bulk v2.1.2 (project edition)
+#   - 删旧换新：移除旧 /api/ensure-data/bulk（v1.*）入口
+#   - 新增：
+#       POST /api/ensure-data/bulk/start
+#       GET  /api/ensure-data/bulk/status
+#       GET  /api/ensure-data/bulk/status/active
+#       POST /api/ensure-data/bulk/cancel
+#       POST /api/ensure-data/bulk/resume
+#       POST /api/ensure-data/bulk/retry-failed
+#       GET  /api/ensure-data/bulk/failures
 #
-# ==============================
-# V8.1 - 新增盘后批量入队接口：POST /api/ensure-data/bulk
-#
-# V8.2 - After Hours Bulk v1.1（契约落地版）
-#   - bulk 变为“批次真相源在后端”的入口：
-#       * 新增 payload.batch（batch_id/client_instance_id/...）
-#       * 幂等/冲突语义：
-#           - batch 不存在：创建并入队
-#           - batch 已存在且 running：幂等（不重复入队），返回快照
-#           - batch 已存在且 finished：409（detail 内含 code/message/trace_id）
-#       * 新增查询接口：
-#           - GET /api/ensure-data/bulk/status
-#           - GET /api/ensure-data/bulk/status/latest
-#           - GET /api/ensure-data/bulk/failures
-#   - 错误响应结构：非2xx一律 { "detail": {code,message,trace_id} }
+# 关键契约：
+#   - 所有 bulk 业务失败必须 HTTP 200，返回顶层 ok=false envelope（不使用 FastAPI detail）
+#   - 查询类（status/failures）not found 或隔离不匹配：ok=true, batch/items为空（不泄露）
 # ==============================
 
 from __future__ import annotations
@@ -33,49 +23,44 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Dict, Any, Optional, Literal, List
-from fastapi import APIRouter, Request, HTTPException, Query
+from fastapi import APIRouter, Request, Query
 from pydantic import BaseModel, Field
 
-from backend.settings import settings
 from backend.services.task_model import create_task
 from backend.services.priority_queue import get_priority_queue
 from backend.utils.logger import get_logger, log_event
+from backend.settings import settings
 
-# After Hours Bulk v1.1 DB
+from backend.services.server_identity import get_backend_instance_id
+from backend.services.bulk_scheduler import enqueue_batch, tick as bulk_tick
+
 from backend.db.bulk_batches import (
-    get_batch,
-    get_batch_state,
-    create_batch_if_not_exists,
-    get_latest_batch,
-    list_failures,
+    start_batch_idempotent,
+    get_batch_snapshot_for_client,
+    get_active_batch_for_client,
+    list_queued_batches_for_client,
+    get_queue_position,
+    enter_stopping,
+    apply_stopping_sweep,
+    resume_batch,
+    retry_failed_reset,
+    list_failed_tasks,
 )
 
 _LOG = get_logger("data_sync")
 router = APIRouter(prefix="/api", tags=["data_sync"])
 
+# ==============================
+# 非 bulk：原 ensure-data Task 入队接口保留
+# ==============================
 
 class EnsureDataParams(BaseModel):
-    """
-    任务参数：
-      - force_fetch : 是否强制刷新（忽略缺口/updated_at 判断）
-      - start_date  : 可选起始日期（保留扩展）
-      - end_date    : 可选结束日期（保留扩展）
-    """
     force_fetch: bool = False
     start_date: Optional[str] = None
     end_date: Optional[str] = None
 
 
 class EnsureDataRequest(BaseModel):
-    """
-    一次请求 = 一个 Task
-      - type  : 'current_kline' / 'symbol_index' / 'trade_calendar' / 'current_factors' / 'current_profile'
-      - scope : 'symbol' / 'global'
-      - symbol: scope='symbol' 时需要
-      - freq  : current_kline 时需要
-      - adjust: current_kline 的复权方式
-      - params: 任务参数（含 force_fetch）
-    """
     type: Literal[
         "trade_calendar",
         "symbol_index",
@@ -83,72 +68,18 @@ class EnsureDataRequest(BaseModel):
         "current_factors",
         "current_profile",
     ] = Field(..., description="任务类型")
-    scope: Literal["symbol", "global"] = Field(
-        ...,
-        description="任务作用范围：单标的 / 全局",
-    )
-    symbol: Optional[str] = Field(
-        None,
-        description="标的代码（scope='symbol' 时建议必填）",
-    )
-    freq: Optional[str] = Field(
-        None,
-        description="频率，仅 current_kline 有意义，如 '1d','5m','1w','1M'",
-    )
-    adjust: Optional[str] = Field(
-        "none",
-        description="复权方式：none/qfq/hfq，仅 current_kline 有意义",
-    )
-    params: EnsureDataParams = Field(
-        default_factory=EnsureDataParams,
-        description="任务参数（force_fetch/start_date/end_date 等）",
-    )
+    scope: Literal["symbol", "global"] = Field(..., description="任务作用范围：单标的 / 全局")
+    symbol: Optional[str] = Field(None, description="标的代码")
+    freq: Optional[str] = Field(None, description="频率")
+    adjust: Optional[str] = Field("none", description="复权方式：none/qfq/hfq")
+    params: EnsureDataParams = Field(default_factory=EnsureDataParams)
 
 
 @router.post("/ensure-data")
-async def ensure_data(
-    request: Request,
-    payload: EnsureDataRequest,
-) -> Dict[str, Any]:
-    """
-    声明式数据需求入口（一次请求 = 一个 Task）
-
-    示例请求体：
-    {
-      "type": "current_kline",
-      "scope": "symbol",
-      "symbol": "510300",
-      "freq": "5m",
-      "adjust": "qfq",
-      "params": {
-        "force_fetch": false
-      }
-    }
-    """
+async def ensure_data(request: Request, payload: EnsureDataRequest) -> Dict[str, Any]:
     trace_id = request.headers.get("x-trace-id")
 
-    log_event(
-        logger=_LOG,
-        service="data_sync",
-        level="INFO",
-        file=__file__,
-        func="ensure_data",
-        line=0,
-        trace_id=trace_id,
-        event="api.ensure_data.start",
-        message="收到数据需求声明",
-        extra={
-            "type": payload.type,
-            "scope": payload.scope,
-            "symbol": payload.symbol,
-            "freq": payload.freq,
-            "adjust": payload.adjust,
-            "params": payload.params.dict(),
-        },
-    )
-
     try:
-        # 1. 从请求体构造 Task
         task = create_task(
             type=payload.type,
             scope=payload.scope,
@@ -159,546 +90,526 @@ async def ensure_data(
             params=payload.params.dict(),
             source="api/ensure-data",
         )
-
-        # 2. 将 Task 入队，等待执行器处理（异步后台）
         queue = get_priority_queue()
         await queue.enqueue(task)
-
-        log_event(
-            logger=_LOG,
-            service="data_sync",
-            level="INFO",
-            file=__file__,
-            func="ensure_data",
-            line=0,
-            trace_id=trace_id,
-            event="api.ensure_data.done",
-            message="Task 已入队等待执行",
-            extra={
-                "task_id": task.task_id,
-                "type": task.type,
-                "scope": task.scope,
-            },
-        )
-
         return {
             "ok": True,
             "task_id": task.task_id,
             "message": "任务已创建，后台处理中",
             "trace_id": trace_id,
         }
-
     except Exception as e:
-        log_event(
-            logger=_LOG,
-            service="data_sync",
-            level="ERROR",
-            file=__file__,
-            func="ensure_data",
-            line=0,
-            trace_id=trace_id,
-            event="api.ensure_data.error",
-            message=f"处理需求失败: {e}",
-            extra={"error": str(e)},
-        )
         return {
             "ok": False,
             "error": str(e),
             "trace_id": trace_id,
         }
 
-
-# ==============================================================================
-# After Hours Bulk: /api/ensure-data/bulk  (v1.1)
-# ==============================================================================
-
-class EnsureDataBulkBatch(BaseModel):
-    batch_id: str = Field(..., description="前端生成的批次ID，全局唯一")
-    client_instance_id: str = Field(..., description="前端生成的浏览器实例ID(UUID)，用于 latest 过滤")
-    started_at: Optional[str] = Field(None, description="前端记录的开始时间（ISO8601）")
-    selected_symbols: Optional[int] = Field(None, description="选中的标的数（展示字段）")
-    planned_total_tasks: Optional[int] = Field(None, description="计划任务总数（展示字段，通常jobs.length）")
-
-
-class EnsureDataBulkJob(BaseModel):
-    job_id: str = Field(..., description="客户端相关ID（批次内唯一），后端不解析，仅回传")
-    type: str = Field(..., description="任务类型，如 current_kline/current_factors 等")
-    scope: str = Field(..., description="任务作用范围：symbol/global")
-    symbol: Optional[str] = Field(None, description="标的代码")
-    freq: Optional[str] = Field(None, description="频率，仅 current_kline 有意义")
-    adjust: Optional[str] = Field("none", description="复权方式：none/qfq/hfq")
-    params: Dict[str, Any] = Field(default_factory=dict, description="任务参数对象，可为空 {}")
-
-
-class EnsureDataBulkRequest(BaseModel):
-    purpose: str = Field(..., description="用途标记，盘后任务固定为 after_hours（当前仅用作优先级策略）")
-    batch: EnsureDataBulkBatch = Field(..., description="批次信息（v1.1新增）")
-    force_fetch: bool = Field(False, description="批次默认 force_fetch（job 可在 params.force_fetch 覆盖）")
-    priority: Optional[int] = Field(None, description="可选：覆盖本批所有任务优先级（调试/应急）")
-    jobs: List[EnsureDataBulkJob] = Field(..., description="任务列表")
-    client_meta: Optional[Dict[str, Any]] = Field(None, description="仅用于日志排错，不参与业务逻辑")
-
-
-def _make_reason(code: str, message: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    r: Dict[str, Any] = {"code": code, "message": message}
-    if details:
-        r["details"] = details
-    return r
-
-
-def _resolve_bulk_priority(purpose: str, override_priority: Optional[int]) -> Optional[int]:
-    """
-    解析 bulk 的优先级策略：
-      - override_priority 非空 → 直接使用
-      - purpose == 'after_hours' → settings.after_hours_priority
-      - 其他 → None（表示使用 create_task 的默认优先级）
-    """
-    if override_priority is not None:
-        try:
-            return int(override_priority)
-        except Exception:
-            # 覆盖值无法转 int：回退为 None，避免整个批次失败
-            return None
-
-    if str(purpose or "").strip() == "after_hours":
-        return int(settings.after_hours_priority)
-
-    return None
-
+# ==============================
+# Bulk v2.1.2
+# ==============================
 
 _BATCH_ID_RE = re.compile(r"^[A-Za-z0-9._:\-]{1,64}$")
 
 
-def _validate_batch_fields(batch_id: str, client_instance_id: str, trace_id: Optional[str]) -> None:
-    """
-    v1.1 强制校验：
-      - batch_id: [A-Za-z0-9._:-], len<=64
-      - client_instance_id: 同样规则与长度（避免写入异常/污染latest）
-    非法一律抛 HTTPException(400) 且 detail 结构固定：{code,message,trace_id}
-    """
-    bid = str(batch_id or "").strip()
-    cid = str(client_instance_id or "").strip()
-
-    if not bid or not _BATCH_ID_RE.match(bid):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "BATCH_ID_INVALID",
-                "message": "invalid batch_id",
-                "trace_id": trace_id,
-            },
-        )
-
-    if not cid or not _BATCH_ID_RE.match(cid) or len(cid) > 64:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "CLIENT_INSTANCE_ID_INVALID",
-                "message": "invalid client_instance_id",
-                "trace_id": trace_id,
-            },
-        )
-
-
-@router.post("/ensure-data/bulk")
-async def ensure_data_bulk(request: Request, payload: EnsureDataBulkRequest) -> Dict[str, Any]:
-    """
-    盘后批量入队接口（After Hours Bulk v1.1）
-
-    关键契约：
-      - 批次真相源在后端（bulk_batches）
-      - 幂等/冲突语义（写死）：
-          * batch_id 不存在：创建并入队
-          * batch_id 存在且 running：幂等（不重复入队），返回快照（200）
-          * batch_id 存在且 finished：409（detail.code=BATCH_ID_CONFLICT_FINISHED）
-      - rejected 不进入 progress.total（total=accepted_tasks）
-      - 响应在成功(200)时回显 batch 快照
-    """
-    trace_id = request.headers.get("x-trace-id")
-
-    max_jobs = int(settings.bulk_max_jobs)
-
-    batch_id = str(payload.batch.batch_id or "").strip()
-    client_instance_id = str(payload.batch.client_instance_id or "").strip()
-
-    _validate_batch_fields(batch_id, client_instance_id, trace_id)
-
-    log_event(
-        logger=_LOG,
-        service="data_sync",
-        level="INFO",
-        file=__file__,
-        func="ensure_data_bulk",
-        line=0,
-        trace_id=trace_id,
-        event="api.ensure_data.bulk.start",
-        message="收到 bulk 数据需求声明",
-        extra={
-            "purpose": payload.purpose,
-            "batch_id": batch_id,
-            "client_instance_id": client_instance_id,
-            "force_fetch": payload.force_fetch,
-            "priority": payload.priority,
-            "jobs": len(payload.jobs or []),
-            "max_jobs": max_jobs,
-            "client_meta": payload.client_meta or {},
-        },
-    )
-
-    # 建议值提示：不拒绝，只记日志
-    try:
-        if payload.jobs is not None and len(payload.jobs) > max_jobs:
-            log_event(
-                logger=_LOG,
-                service="data_sync",
-                level="WARN",
-                file=__file__,
-                func="ensure_data_bulk",
-                line=0,
-                trace_id=trace_id,
-                event="api.ensure_data.bulk.hint.too_many_jobs",
-                message="bulk jobs 数量超过建议 max_jobs（不拒绝，仅提示）",
-                extra={
-                    "jobs": len(payload.jobs),
-                    "max_jobs": max_jobs,
-                },
-            )
-    except Exception:
-        pass
-
-    # ---- batch 幂等/冲突语义（先查 state）----
-    existing_state = await asyncio.to_thread(get_batch_state, batch_id)
-    if existing_state == "finished":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "BATCH_ID_CONFLICT_FINISHED",
-                "message": "batch_id already exists and is finished; please generate a new batch_id",
-                "trace_id": trace_id,
-            },
-        )
-
-    # running 幂等：直接回显快照，不重复入队
-    if existing_state == "running":
-        snap = await asyncio.to_thread(get_batch, batch_id)
-        return {
-            "ok": True,
-            "accepted": int(snap.get("accepted_tasks") or 0) if snap else 0,
-            "rejected": int(snap.get("rejected_tasks") or 0) if snap else 0,
-            "max_jobs": max_jobs,
-            "items": [],
-            "batch": snap,
-            "trace_id": trace_id,
-        }
-
-    # ---- 不存在：开始创建批次，并入队任务 ----
-    queue = get_priority_queue()
-
-    purpose = str(payload.purpose or "").strip()
-    bulk_force_fetch = bool(payload.force_fetch)
-    bulk_priority = _resolve_bulk_priority(purpose, payload.priority)
-
-    accepted = 0
-    rejected = 0
-    items: List[Dict[str, Any]] = []
-
-    seen_job_ids: set[str] = set()
-    YIELD_EVERY = 500
-
-    # 先按规则构建 Task（但在写 batch 之前我们需要知道 accepted/rejected 计数）
-    tasks_to_enqueue = []
-
-    for idx, job in enumerate(payload.jobs or []):
-        job_id = job.job_id
-
-        if not isinstance(job_id, str) or not job_id.strip():
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="invalid_job_id",
-                    message="job_id must be a non-empty string",
-                ),
-            })
-            continue
-
-        job_id = job_id.strip()
-
-        if job_id in seen_job_ids:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="duplicate_job_id",
-                    message="job_id must be unique within the same bulk request",
-                    details={"job_id": job_id},
-                ),
-            })
-            continue
-
-        seen_job_ids.add(job_id)
-
-        params = dict(job.params or {})
-        if "force_fetch" not in params:
-            params["force_fetch"] = bulk_force_fetch
-
-        task_type = str(job.type or "").strip()
-        task_scope = str(job.scope or "").strip()
-        symbol = (str(job.symbol).strip() if job.symbol is not None else None)
-        freq = (str(job.freq).strip() if job.freq is not None else None)
-        adjust = str(job.adjust or "none").strip().lower()
-
-        if not task_type:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="missing_field",
-                    message="missing required field: type",
-                    details={"field": "type"},
-                ),
-            })
-            continue
-
-        if not task_scope:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="missing_field",
-                    message="missing required field: scope",
-                    details={"field": "scope"},
-                ),
-            })
-            continue
-
-        if task_scope == "symbol" and not symbol:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="missing_field",
-                    message="missing required field: symbol (scope='symbol')",
-                    details={"field": "symbol"},
-                ),
-            })
-            continue
-
-        if task_type == "current_kline" and not freq:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="missing_field",
-                    message="missing required field: freq (type='current_kline')",
-                    details={"field": "freq"},
-                ),
-            })
-            continue
-
-        try:
-            task = create_task(
-                type=task_type,
-                scope=task_scope,
-                symbol=symbol,
-                freq=freq,
-                adjust=adjust,
-                trace_id=trace_id,
-                params=params,
-                source="api/ensure-data/bulk",
-                priority=bulk_priority,
-            )
-            # v1.1：绑定 batch 元信息到 task.metadata（用于 task_done 时更新真相源）
-            task.metadata["batch_id"] = batch_id
-            task.metadata["client_instance_id"] = client_instance_id
-            task.metadata["batch_purpose"] = purpose
-
-            tasks_to_enqueue.append((job_id, task))
-            accepted += 1
-            items.append({
-                "job_id": job_id,
-                "status": "accepted",
-                "task_id": task.task_id,
-                "reason": None,
-            })
-        except Exception as e:
-            rejected += 1
-            items.append({
-                "job_id": job_id,
-                "status": "rejected",
-                "task_id": None,
-                "reason": _make_reason(
-                    code="enqueue_failed",
-                    message=f"failed to build task: {e}",
-                ),
-            })
-
-        if (idx + 1) % YIELD_EVERY == 0:
-            await asyncio.sleep(0)
-
-    # 先创建 batch 记录（不存在才创建；若并发创建，这里以 DB 原子性为准）
-    mode, batch_snapshot = await asyncio.to_thread(
-        create_batch_if_not_exists,
-        batch_id=batch_id,
-        client_instance_id=client_instance_id,
-        purpose=purpose,
-        started_at=payload.batch.started_at,
-        selected_symbols=payload.batch.selected_symbols,
-        planned_total_tasks=payload.batch.planned_total_tasks,
-        accepted_tasks=accepted,
-        rejected_tasks=rejected,
-    )
-
-    # 若 mode == existing（极端并发）：
-    # - 仍按 v1.1 幂等，不重复入队（避免重复执行）
-    if mode == "existing":
-        # 若已存在但不是 running/finished（理论不会出现），按快照回显
-        return {
-            "ok": True,
-            "accepted": int(batch_snapshot.get("accepted_tasks") or 0),
-            "rejected": int(batch_snapshot.get("rejected_tasks") or 0),
-            "max_jobs": max_jobs,
-            "items": [],
-            "batch": batch_snapshot,
-            "trace_id": trace_id,
-        }
-
-    # 新建成功：入队 accepted 的 task
-    for _, task in tasks_to_enqueue:
-        await queue.enqueue(task)
-
-    log_event(
-        logger=_LOG,
-        service="data_sync",
-        level="INFO",
-        file=__file__,
-        func="ensure_data_bulk",
-        line=0,
-        trace_id=trace_id,
-        event="api.ensure_data.bulk.done",
-        message="bulk Task 入队完成",
-        extra={
-            "batch_id": batch_id,
-            "accepted": accepted,
-            "rejected": rejected,
-            "max_jobs": max_jobs,
-        },
-    )
-
-    return {
+def _ok(
+    *,
+    trace_id: Optional[str],
+    batch: Optional[Dict[str, Any]],
+    active_batch: Optional[Dict[str, Any]] = None,
+    queue_position: Optional[int] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    resp: Dict[str, Any] = {
         "ok": True,
-        "accepted": accepted,
-        "rejected": rejected,
-        "max_jobs": max_jobs,
-        "items": items,
-        "batch": batch_snapshot,
+        "backend_instance_id": get_backend_instance_id(),
+        "batch": batch,
+        "trace_id": trace_id,
+    }
+    if active_batch is not None:
+        resp["active_batch"] = active_batch
+    if queue_position is not None:
+        resp["queue_position"] = queue_position
+    else:
+        resp["queue_position"] = None
+    if extra:
+        resp.update(extra)
+    return resp
+
+
+def _fail(
+    *,
+    trace_id: Optional[str],
+    code: str,
+    message: str,
+    batch: Optional[Dict[str, Any]] = None,
+    active_batch: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "code": code,
+        "message": message,
+        "backend_instance_id": get_backend_instance_id(),
+        "batch": batch,
+        "active_batch": active_batch,
         "trace_id": trace_id,
     }
 
 
-# ==============================================================================
-# After Hours Bulk v1.1 - 快照查询
-# ==============================================================================
+def _get_client_instance_id(request: Request) -> str:
+    return str(request.headers.get("x-client-instance-id") or "").strip()
+
+
+def _validate_client_instance_id(cid: str) -> bool:
+    return bool(cid) and bool(_BATCH_ID_RE.match(cid)) and len(cid) <= 64
+
+
+def _validate_batch_id(bid: str) -> bool:
+    return bool(bid) and bool(_BATCH_ID_RE.match(bid)) and len(bid) <= 64
+
+
+class BulkSubmitPolicy(BaseModel):
+    when_active_exists: Literal["replace", "enqueue", "abort"] = "enqueue"
+
+
+class BulkBatchInfo(BaseModel):
+    batch_id: str
+    client_instance_id: str
+    started_at: Optional[str] = None
+    selected_symbols: Optional[int] = None
+    planned_total_tasks: Optional[int] = None
+
+
+class BulkTaskItem(BaseModel):
+    client_task_key: str
+    type: str
+    scope: str
+    symbol: Optional[str] = None
+    freq: Optional[str] = None
+    adjust: Optional[str] = "none"
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BulkStartRequest(BaseModel):
+    purpose: Literal["after_hours"] = "after_hours"
+    batch: BulkBatchInfo
+    force_fetch: bool = False
+    priority: Optional[int] = None
+    bulk_tasks: List[BulkTaskItem]
+    submit_policy: BulkSubmitPolicy = Field(default_factory=BulkSubmitPolicy)
+
+
+@router.post("/ensure-data/bulk/start")
+async def bulk_start(request: Request, payload: BulkStartRequest) -> Dict[str, Any]:
+    trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
+
+    if not _validate_client_instance_id(header_cid):
+        return _fail(
+            trace_id=trace_id,
+            code="VALIDATION_ERROR",
+            message="missing or invalid x-client-instance-id header",
+            batch=None,
+            active_batch=None,
+        )
+
+    body_cid = str(payload.batch.client_instance_id or "").strip()
+    if header_cid != body_cid:
+        return _fail(
+            trace_id=trace_id,
+            code="CLIENT_INSTANCE_MISMATCH",
+            message="x-client-instance-id header does not match body.batch.client_instance_id",
+            batch=None,
+            active_batch=None,
+        )
+
+    bid = str(payload.batch.batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return _fail(
+            trace_id=trace_id,
+            code="VALIDATION_ERROR",
+            message="invalid batch_id",
+            batch=None,
+            active_batch=None,
+        )
+
+    # bulk_tasks 基本校验：必须非空 + client_task_key 唯一
+    tasks = payload.bulk_tasks or []
+    if not tasks:
+        return _fail(
+            trace_id=trace_id,
+            code="VALIDATION_ERROR",
+            message="bulk_tasks must not be empty",
+            batch=None,
+            active_batch=None,
+        )
+
+    seen = set()
+    for t in tasks:
+        ckey = str(t.client_task_key or "").strip()
+        if not ckey:
+            return _fail(
+                trace_id=trace_id,
+                code="VALIDATION_ERROR",
+                message="client_task_key must be non-empty",
+                batch=None,
+                active_batch=None,
+            )
+        if ckey in seen:
+            return _fail(
+                trace_id=trace_id,
+                code="VALIDATION_ERROR",
+                message=f"duplicate client_task_key in request: {ckey}",
+                batch=None,
+                active_batch=None,
+            )
+        seen.add(ckey)
+
+    # 组装 DB 所需结构
+    bulk_tasks_list = [t.dict() for t in tasks]
+
+    try:
+        res = await asyncio.to_thread(
+            start_batch_idempotent,
+            purpose=payload.purpose,
+            batch=payload.batch.dict(),
+            submit_policy=payload.submit_policy.dict(),
+            bulk_tasks=bulk_tasks_list,
+        )
+    except Exception as e:
+        return _fail(
+            trace_id=trace_id,
+            code="INTERNAL",
+            message=f"start failed: {e}",
+            batch=None,
+            active_batch=None,
+        )
+
+    if res.get("mode") == "aborted":
+        return _fail(
+            trace_id=trace_id,
+            code="ACTIVE_EXISTS",
+            message="active batch exists, submission aborted",
+            batch=None,
+            active_batch=res.get("active_batch"),
+        )
+
+    batch_snap = res.get("batch")
+    active_snap = res.get("active_batch")
+    qp = res.get("queue_position")
+
+    # 若新批次直接 running，则 enqueue 其 tasks
+    if res.get("need_enqueue") and batch_snap and batch_snap.get("state") == "running":
+        try:
+            await enqueue_batch(
+                batch_id=batch_snap["batch_id"],
+                client_instance_id=header_cid,
+                trace_id=trace_id,
+            )
+        except Exception as e:
+            # enqueue 失败算 INTERNAL，但批次已创建；返回 ok=false 会让前端困惑
+            # 最短路径：返回 ok=true，让前端 watchdog/status 继续拉真相源
+            log_event(
+                logger=_LOG,
+                service="data_sync",
+                level="ERROR",
+                file=__file__,
+                func="bulk_start",
+                line=0,
+                trace_id=trace_id,
+                event="bulk.start.enqueue_fail",
+                message="enqueue_batch failed",
+                extra={"batch_id": bid, "error": str(e)},
+            )
+
+    # queued 批次必须返回 queue_position；running 则 null
+    if batch_snap and str(batch_snap.get("state")).lower() == "queued":
+        qp = await asyncio.to_thread(get_queue_position, bid, header_cid, "after_hours")
+
+    return _ok(
+        trace_id=trace_id,
+        batch=batch_snap,
+        active_batch=active_snap,
+        queue_position=qp if batch_snap and batch_snap.get("state") == "queued" else None,
+    )
+
 
 @router.get("/ensure-data/bulk/status")
-async def ensure_data_bulk_status(
+async def bulk_status(
     request: Request,
     batch_id: str = Query(..., description="批次ID"),
 ) -> Dict[str, Any]:
     trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
+
+    if not _validate_client_instance_id(header_cid):
+        # 查询类：不泄露，按 ok=true batch=null
+        return _ok(trace_id=trace_id, batch=None, active_batch=None, queue_position=None)
+
     bid = str(batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return _ok(trace_id=trace_id, batch=None, active_batch=None, queue_position=None)
 
-    if not bid:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "BATCH_ID_INVALID",
-                "message": "invalid batch_id",
-                "trace_id": trace_id,
-            },
-        )
+    snap = await asyncio.to_thread(get_batch_snapshot_for_client, bid, header_cid)
+    if not snap:
+        return _ok(trace_id=trace_id, batch=None, active_batch=None, queue_position=None)
 
-    batch = await asyncio.to_thread(get_batch, bid)
-    return {
-        "ok": True,
-        "batch": batch,
-        "trace_id": trace_id,
-    }
+    qp = None
+    if str(snap.get("state")).lower() == "queued":
+        qp = await asyncio.to_thread(get_queue_position, bid, header_cid, "after_hours")
+
+    return _ok(trace_id=trace_id, batch=snap, active_batch=None, queue_position=qp)
 
 
-@router.get("/ensure-data/bulk/status/latest")
-async def ensure_data_bulk_status_latest(
+@router.get("/ensure-data/bulk/status/active")
+async def bulk_status_active(
     request: Request,
-    purpose: Optional[str] = Query(None, description="用途标记，如 after_hours"),
-    state: Optional[Literal["running", "finished"]] = Query(None, description="批次状态过滤"),
-    client_instance_id: Optional[str] = Query(None, description="可选过滤，降低误拾取概率"),
+    purpose: Optional[str] = Query("after_hours", description="用途标记"),
 ) -> Dict[str, Any]:
     trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
 
-    pur = str(purpose).strip() if purpose is not None else None
-    st = str(state).strip() if state is not None else None
-    cid = str(client_instance_id).strip() if client_instance_id is not None else None
+    if not _validate_client_instance_id(header_cid):
+        return {
+            "ok": True,
+            "backend_instance_id": get_backend_instance_id(),
+            "active_batch": None,
+            "queued_batches": [],
+            "trace_id": trace_id,
+        }
 
-    if cid:
-        # 同 batch 规则做最小校验（不强制必须传）
-        if not _BATCH_ID_RE.match(cid) or len(cid) > 64:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "CLIENT_INSTANCE_ID_INVALID",
-                    "message": "invalid client_instance_id",
-                    "trace_id": trace_id,
-                },
-            )
+    pur = str(purpose or "after_hours").strip()
+    if pur != "after_hours":
+        pur = "after_hours"
 
-    batch = await asyncio.to_thread(
-        get_latest_batch,
-        purpose=pur,
-        state=st,
-        client_instance_id=cid,
-    )
+    active = await asyncio.to_thread(get_active_batch_for_client, header_cid, pur)
+    queued = await asyncio.to_thread(list_queued_batches_for_client, header_cid, pur)
+
+    queued_items = []
+    for idx, b in enumerate(queued, start=1):
+        # queued item schema（FINAL++ 必须字段集合）
+        queued_items.append({
+            "batch_id": b["batch_id"],
+            "client_instance_id": b["client_instance_id"],
+            "purpose": b["purpose"],
+            "state": b["state"],
+            "started_at": b.get("started_at"),
+            "server_received_at": b.get("server_received_at"),
+            "queue_ts": b.get("queue_ts"),
+            "queue_position": idx,
+            "progress": b.get("progress"),
+        })
 
     return {
         "ok": True,
-        "batch": batch,
+        "backend_instance_id": get_backend_instance_id(),
+        "active_batch": active,
+        "queued_batches": queued_items,
         "trace_id": trace_id,
     }
+
+
+class BulkOpRequest(BaseModel):
+    batch_id: str
+
+
+@router.post("/ensure-data/bulk/cancel")
+async def bulk_cancel(request: Request, payload: BulkOpRequest) -> Dict[str, Any]:
+    trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
+
+    if not _validate_client_instance_id(header_cid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid client_instance_id", batch=None, active_batch=None)
+
+    bid = str(payload.batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid batch_id", batch=None, active_batch=None)
+
+    snap0 = await asyncio.to_thread(get_batch_snapshot_for_client, bid, header_cid)
+    if not snap0:
+        active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+        return _fail(trace_id=trace_id, code="NOT_FOUND", message="batch not found", batch=None, active_batch=active)
+
+    # 进入 stopping 并 sweep
+    snap1 = await asyncio.to_thread(enter_stopping, batch_id=bid, client_instance_id=header_cid)
+    snap2 = await asyncio.to_thread(apply_stopping_sweep, batch_id=bid, client_instance_id=header_cid)
+
+    # cancel 可能让批次结束态，触发 tick
+    try:
+        await bulk_tick(client_instance_id=header_cid, trace_id=trace_id)
+    except Exception:
+        pass
+
+    active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+    return _ok(trace_id=trace_id, batch=snap2 or snap1 or snap0, active_batch=active, queue_position=None)
+
+
+@router.post("/ensure-data/bulk/resume")
+async def bulk_resume(request: Request, payload: BulkOpRequest) -> Dict[str, Any]:
+    trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
+
+    if not _validate_client_instance_id(header_cid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid client_instance_id", batch=None, active_batch=None)
+
+    bid = str(payload.batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid batch_id", batch=None, active_batch=None)
+
+    snap0 = await asyncio.to_thread(get_batch_snapshot_for_client, bid, header_cid)
+    if not snap0:
+        active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+        return _fail(trace_id=trace_id, code="NOT_FOUND", message="batch not found", batch=None, active_batch=active)
+
+    snap, err = await asyncio.to_thread(resume_batch, batch_id=bid, client_instance_id=header_cid)
+    if err == "BAD_STATE":
+        return _fail(
+            trace_id=trace_id,
+            code="BAD_STATE",
+            message="resume only allowed in paused",
+            batch=snap0,
+            active_batch=await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours"),
+        )
+    if err == "NOT_FOUND":
+        active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+        return _fail(trace_id=trace_id, code="NOT_FOUND", message="batch not found", batch=None, active_batch=active)
+
+    # resume 后入队其 queued tasks
+    if snap and str(snap.get("state")).lower() == "running":
+        try:
+            await enqueue_batch(batch_id=bid, client_instance_id=header_cid, trace_id=trace_id)
+        except Exception as e:
+            log_event(
+                logger=_LOG,
+                service="data_sync",
+                level="ERROR",
+                file=__file__,
+                func="bulk_resume",
+                line=0,
+                trace_id=trace_id,
+                event="bulk.resume.enqueue_fail",
+                message="enqueue_batch failed",
+                extra={"batch_id": bid, "error": str(e)},
+            )
+
+    return _ok(trace_id=trace_id, batch=snap or snap0, active_batch=None, queue_position=None)
+
+
+@router.post("/ensure-data/bulk/retry-failed")
+async def bulk_retry_failed(request: Request, payload: BulkOpRequest) -> Dict[str, Any]:
+    trace_id = request.headers.get("x-trace-id")
+    header_cid = _get_client_instance_id(request)
+
+    if not _validate_client_instance_id(header_cid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid client_instance_id", batch=None, active_batch=None)
+
+    bid = str(payload.batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return _fail(trace_id=trace_id, code="VALIDATION_ERROR", message="invalid batch_id", batch=None, active_batch=None)
+
+    snap0 = await asyncio.to_thread(get_batch_snapshot_for_client, bid, header_cid)
+    if not snap0:
+        active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+        return _fail(trace_id=trace_id, code="NOT_FOUND", message="batch not found", batch=None, active_batch=active)
+
+    active = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+    has_active = bool(active and str(active.get("state")).lower() in ("running", "paused", "stopping"))
+
+    snap, err = await asyncio.to_thread(
+        retry_failed_reset,
+        batch_id=bid,
+        client_instance_id=header_cid,
+        has_active=has_active,
+    )
+    if err == "NOT_FOUND":
+        active2 = await asyncio.to_thread(get_active_batch_for_client, header_cid, "after_hours")
+        return _fail(trace_id=trace_id, code="NOT_FOUND", message="batch not found", batch=None, active_batch=active2)
+
+    # 若没有 active，则本批会变 running，需要 enqueue
+    if snap and str(snap.get("state")).lower() == "running":
+        try:
+            await enqueue_batch(batch_id=bid, client_instance_id=header_cid, trace_id=trace_id)
+        except Exception as e:
+            log_event(
+                logger=_LOG,
+                service="data_sync",
+                level="ERROR",
+                file=__file__,
+                func="bulk_retry_failed",
+                line=0,
+                trace_id=trace_id,
+                event="bulk.retry_failed.enqueue_fail",
+                message="enqueue_batch failed",
+                extra={"batch_id": bid, "error": str(e)},
+            )
+
+    qp = None
+    if snap and str(snap.get("state")).lower() == "queued":
+        qp = await asyncio.to_thread(get_queue_position, bid, header_cid, "after_hours")
+
+    return _ok(
+        trace_id=trace_id,
+        batch=snap or snap0,
+        active_batch=active,
+        queue_position=qp if snap and snap.get("state") == "queued" else None,
+    )
 
 
 @router.get("/ensure-data/bulk/failures")
-async def ensure_data_bulk_failures(
+async def bulk_failures(
     request: Request,
     batch_id: str = Query(..., description="批次ID"),
     offset: int = Query(0, ge=0, description="分页偏移"),
     limit: int = Query(200, ge=1, le=1000, description="分页大小"),
 ) -> Dict[str, Any]:
+    """
+    查询失败明细（A语义）：
+      - not found / 隔离不匹配 => ok=true, total_failed=0, items=[]
+    """
     trace_id = request.headers.get("x-trace-id")
-    bid = str(batch_id or "").strip()
+    header_cid = _get_client_instance_id(request)
 
-    if not bid:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "BATCH_ID_INVALID",
-                "message": "invalid batch_id",
-                "trace_id": trace_id,
-            },
-        )
+    # 查询类不泄露：header 无效直接空返回
+    if not _validate_client_instance_id(header_cid):
+        return {
+            "ok": True,
+            "backend_instance_id": get_backend_instance_id(),
+            "batch_id": str(batch_id or "").strip(),
+            "total_failed": 0,
+            "offset": int(offset),
+            "limit": int(limit),
+            "items": [],
+            "trace_id": trace_id,
+        }
+
+    bid = str(batch_id or "").strip()
+    if not _validate_batch_id(bid):
+        return {
+            "ok": True,
+            "backend_instance_id": get_backend_instance_id(),
+            "batch_id": bid,
+            "total_failed": 0,
+            "offset": int(offset),
+            "limit": int(limit),
+            "items": [],
+            "trace_id": trace_id,
+        }
+
+    snap = await asyncio.to_thread(get_batch_snapshot_for_client, bid, header_cid)
+    if not snap:
+        return {
+            "ok": True,
+            "backend_instance_id": get_backend_instance_id(),
+            "batch_id": bid,
+            "total_failed": 0,
+            "offset": int(offset),
+            "limit": int(limit),
+            "items": [],
+            "trace_id": trace_id,
+        }
 
     total_failed, items = await asyncio.to_thread(
-        list_failures,
+        list_failed_tasks,
         batch_id=bid,
         offset=int(offset),
         limit=int(limit),
@@ -706,8 +617,11 @@ async def ensure_data_bulk_failures(
 
     return {
         "ok": True,
+        "backend_instance_id": get_backend_instance_id(),
         "batch_id": bid,
         "total_failed": total_failed,
+        "offset": int(offset),
+        "limit": int(limit),
         "items": items,
         "trace_id": trace_id,
     }

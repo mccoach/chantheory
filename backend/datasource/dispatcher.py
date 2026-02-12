@@ -32,6 +32,9 @@
 #         "trace_id": null,
 #         "timestamp": "ISO8601"
 #       }
+#
+# V5.1 - 告警统一出口：
+#   - system_alert 统一由 backend.utils.alerts.emit_system_alert 发布，避免多处重复拼 schema。
 # ==============================
 
 from __future__ import annotations
@@ -42,7 +45,9 @@ import inspect
 from backend.utils.logger import get_logger, log_event
 from backend.datasource.registry import get_methods_for_category
 from backend.utils.error_classifier import classify_fetch_error, ErrorType
-from backend.utils.time import now_iso
+
+# 告警统一出口
+from backend.utils.alerts import emit_system_alert
 
 _LOG = get_logger("dispatcher")
 
@@ -171,12 +176,8 @@ async def fetch(
                 event="fetch.success",
                 message=f"Method {method.id} succeeded",
                 extra={
-                    "method_id":
-                    method.id,
-                    "data_rows":
-                    len(raw_data)
-                    if isinstance(raw_data, pd.DataFrame)
-                    else "N/A",
+                    "method_id": method.id,
+                    "data_rows": len(raw_data) if isinstance(raw_data, pd.DataFrame) else "N/A",
                 },
                 file=__file__,
                 func="fetch",
@@ -231,19 +232,20 @@ async def fetch(
                 trace_id=None,
             )
 
-            # 发布系统级告警事件（Schema统一）
-            from backend.utils.events import publish as publish_event
-
-            publish_event({
-                "type": "system_alert",
-                "level": "critical",
-                "code": "ANTISPIDER_TRIGGERED",
-                "message": f"数据源 {method.provider} 的方法 {method.id} 疑似触发反爬虫机制",
-                "details": error_message,
-                "source": f"dispatcher.{method.provider}",
-                "trace_id": None,
-                "timestamp": now_iso(),
-            })
+            # 发布系统级告警事件（统一出口）
+            emit_system_alert(
+                level="critical",
+                code="ANTISPIDER_TRIGGERED",
+                message=f"数据源 {method.provider} 的方法 {method.id} 疑似触发反爬虫机制",
+                details=error_message,
+                source=f"dispatcher.{method.provider}",
+                trace_id=None,
+                extra={
+                    "method_id": method.id,
+                    "provider": method.provider,
+                    "category": category,
+                },
+            )
 
             last_error = exception_caught
             last_error_type = error_type

@@ -1,9 +1,8 @@
 # backend/db/__init__.py
 # ==============================
-# V3.0 - 删除废弃的 tasks 模块导出
-#
-# V3.1 - After Hours Bulk v1.1
-#   - 新增 bulk_batches / bulk_failures 的 DB 导出
+# V4.0 - After Hours Bulk v2.1.2 (project edition)
+#   - bulk 真相源：bulk_batches + bulk_tasks
+#   - 不再导出 bulk_failures/bulk_task_done（你已手动删除表）
 # ==============================
 
 from backend.db.connection import get_conn, close_all_connections
@@ -49,15 +48,25 @@ from backend.db.calendar import (
     select_trading_days_in_range,
 )
 
-# After Hours Bulk v1.1
+# bulk v2.1.2
 from backend.db.bulk_batches import (
-    get_batch,
-    get_batch_state,
-    create_batch_if_not_exists,
-    get_latest_batch,
-    update_progress_on_task_done,
-    upsert_failure_once,
-    list_failures,
+    get_batch_snapshot,
+    get_batch_snapshot_for_client,
+    get_active_batch_for_client,
+    list_queued_batches_for_client,
+    get_queue_position,
+    start_batch_idempotent,
+    list_queued_tasks_for_batch,
+    mark_task_running,
+    finalize_task_terminal,
+    enter_stopping,
+    apply_stopping_sweep,
+    resume_batch,
+    retry_failed_reset,
+    tick_pick_next_queued,
+    list_failed_tasks,
+    recover_incomplete_batches_to_paused,
+    gc_delete_terminal_tasks,
 )
 
 __all__ = [
@@ -97,12 +106,22 @@ __all__ = [
     "get_recent_trading_days",
     "select_trading_days_in_range",
 
-    # After Hours Bulk v1.1
-    "get_batch",
-    "get_batch_state",
-    "create_batch_if_not_exists",
-    "get_latest_batch",
-    "update_progress_on_task_done",
-    "upsert_failure_once",
-    "list_failures",
+    # bulk
+    "get_batch_snapshot",
+    "get_batch_snapshot_for_client",
+    "get_active_batch_for_client",
+    "list_queued_batches_for_client",
+    "get_queue_position",
+    "start_batch_idempotent",
+    "list_queued_tasks_for_batch",
+    "mark_task_running",
+    "finalize_task_terminal",
+    "enter_stopping",
+    "apply_stopping_sweep",
+    "resume_batch",
+    "retry_failed_reset",
+    "tick_pick_next_queued",
+    "list_failed_tasks",
+    "recover_incomplete_batches_to_paused",
+    "gc_delete_terminal_tasks",
 ]

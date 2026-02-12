@@ -1,48 +1,42 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useTradeCalendar.js
 // ==============================
 // 说明：交易日历前端缓存与查询（单例 composable）
-// 职责：
-//   - 启动时从后端加载 trade_calendar 快照；
-//   - 在内存中按“全局交易日序列”缓存（DB 中仅存交易日，故直接将所有 items 按 date 排序即得序列）；
-//   - 提供 YYYYMMDD → 交易日索引 的查询与“是否在前 N 个交易日内”的判断。
+//
+// V2.0 - NEW: ensureReady（唯一编排链路）
+// 背景约定：所有任务由前端发起，后端收到请求先做缺口判断，必要时远端拉取落库后通知前端。
+// 目标：将 App.vue 中“declare + wait + ensureLoaded”两段逻辑收敛到本模块，形成唯一工作路径。
+// 失败策略：失败只返回结果（ok=false），不 throw、不 alert、不做额外副作用。
 // ==============================
 
 import { ref, readonly } from "vue";
 import { fetchTradeCalendarSnapshot } from "@/services/tradeCalendarService";
+import { declareTradeCalendar } from "@/services/ensureDataAPI";
+import { waitTasksDone } from "@/composables/useTaskWaiter";
 
 const ready = ref(false);
 const loading = ref(false);
 const error = ref("");
 
-// 全局交易日序列（忽略 market 维度，假定全为 CN）
+// 全局交易日序列
 let _dates = [];
 let _indexByDate = new Map();
 
 let _singleton = null;
 
-/**
- * 从后端快照构建全局交易日索引
- * @param {Array<{date:number,market:string,is_trading_day:number}>} items
- */
 function buildMarketIndex(items) {
   _dates = [];
   _indexByDate = new Map();
 
   for (const row of items || []) {
     const date = Number(row?.date);
-    // DB 仅存交易日，理论上每条都应视为有效；加上 >0 校验更稳健
     if (!Number.isFinite(date) || date <= 0) continue;
     _dates.push(date);
   }
 
-  // 按日期升序排序，确保索引能够正确反映时间先后
   _dates.sort((a, b) => a - b);
   _dates.forEach((d, idx) => _indexByDate.set(d, idx));
 }
 
-/**
- * 保证交易日历已加载（幂等）
- */
 async function ensureLoaded() {
   if (ready.value || loading.value) return;
   loading.value = true;
@@ -61,9 +55,40 @@ async function ensureLoaded() {
 }
 
 /**
- * 获取指定日期（YYYYMMDD）的“交易日索引”（全局）
- * - 若该日期不在表中（即非交易日或未收录），返回 -1。
+ * 唯一入口：确保 trade_calendar 已就绪
+ * - force_fetch=false：后端缺口判断，无缺口则直接使用 DB
+ * - force_fetch=true：强制远端拉取（如你未来需要）
+ *
+ * 失败策略：返回 {ok:false}，不 throw、不做额外副作用
  */
+async function ensureReady({ force_fetch = false, timeoutMs = 60000 } = {}) {
+  // 幂等：已 ready 且不要求强制刷新 => 直接成功
+  if (ready.value === true && force_fetch !== true) {
+    return { ok: true };
+  }
+
+  // 1) 声明任务（后端缺口判断/必要时拉取）
+  try {
+    const t = await declareTradeCalendar({ force_fetch: !!force_fetch });
+    const tid = t?.task_id ? String(t.task_id) : null;
+    if (tid) {
+      await waitTasksDone({ taskIds: [tid], timeoutMs: Math.max(1000, Number(timeoutMs || 60000)) });
+    }
+  } catch (e) {
+    console.error("[useTradeCalendar] declare/wait failed", e);
+    return { ok: false, message: e?.message || "declare/wait failed" };
+  }
+
+  // 2) 拉取快照并加载到内存索引
+  try {
+    await ensureLoaded();
+    return { ok: ready.value === true };
+  } catch (e) {
+    // ensureLoaded 内部不 throw，这里只是兜底
+    return { ok: false, message: e?.message || "ensureLoaded failed" };
+  }
+}
+
 function getTradingIndex(ymd) {
   const d = Number(ymd);
   if (!Number.isFinite(d)) return -1;
@@ -71,11 +96,6 @@ function getTradingIndex(ymd) {
   return typeof idx === "number" ? idx : -1;
 }
 
-/**
- * 判断 endYmd 是否处于 “自 startYmd 起的前 n 个交易日” 之内（全局）
- * - 依赖：startYmd 和 endYmd 都必须是有效交易日（能查到索引）。
- * - 逻辑：0 <= (idxEnd - idxStart) < n
- */
 function isWithinNTradingDays({ startYmd, endYmd, n }) {
   const s = Number(startYmd);
   const e = Number(endYmd);
@@ -85,17 +105,13 @@ function isWithinNTradingDays({ startYmd, endYmd, n }) {
 
   const sIdx = getTradingIndex(s);
   const eIdx = getTradingIndex(e);
-  
-  // 若 IPO 日或当前 K 线日期不在交易日历中（数据缺失或非交易日），视为“无法判断”，返回 false（不豁免）
+
   if (sIdx < 0 || eIdx < 0) return false;
 
   const delta = eIdx - sIdx;
   return delta >= 0 && delta < limit;
 }
 
-/**
- * 单例导出
- */
 export function useTradeCalendar() {
   if (_singleton) return _singleton;
 
@@ -103,7 +119,12 @@ export function useTradeCalendar() {
     ready: readonly(ready),
     loading: readonly(loading),
     error: readonly(error),
+
+    // loaders
     ensureLoaded,
+    ensureReady,
+
+    // query
     getTradingIndex,
     isWithinNTradingDays,
   };

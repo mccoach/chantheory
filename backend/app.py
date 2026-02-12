@@ -1,17 +1,12 @@
 # backend/app.py
 # ==============================
 # FastAPI 应用入口（Task/Job/SSE 版）
-#
-# 改动：
-#   - 启动时的交易日历同步不再直接调用旧配方签名；
-#   - 统一构造 Task(type='trade_calendar', scope='global') 并调用 run_trade_calendar(Task)；
-#   - Task 内部会发 job_done / task_done 事件，与手动触发保持完全一致；
-#   - 其余逻辑保持不变（异步写入器 + 执行器 + SSE 桥接）。
 # ==============================
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any, Optional
@@ -28,22 +23,24 @@ from backend.routers.data_sync import router as data_sync_router
 from backend.routers.factors import router as factors_router
 from backend.routers.profile import router as profile_router
 from backend.routers.trade_calendar import router as trade_calendar_router
+from backend.routers.server_identity import router as server_identity_router
+
 from backend.services.unified_sync_executor import get_sync_executor
 from backend.db.async_writer import get_async_writer
 from backend.utils.logger import get_logger
 from backend.utils.events import (
     subscribe as subscribe_event,
     unsubscribe as unsubscribe_event,
+    publish as publish_event,
 )
 from backend.utils.sse_manager import get_sse_manager
 
-# 新增：Task 工具与日历配方
-from backend.services.task_model import create_task
-from backend.services.data_recipes import run_trade_calendar
+from backend.services.server_identity import init_backend_instance_id
+from backend.db.bulk_batches import recover_incomplete_batches_to_paused, gc_delete_terminal_tasks
 
 _LOG = get_logger("app")
 
-app = FastAPI(title="ChanTheory API", version="8.0.0")
+app = FastAPI(title="ChanTheory API", version="8.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,24 +53,14 @@ app.add_middleware(
 executor = get_sync_executor()
 writer = get_async_writer()
 
-# ===== 领域事件 → SSE 桥接（统一出口）=====
-
 _EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_RUNTIME_METRICS_TASK: Optional[asyncio.Task] = None
 
 
 def _forward_event_to_sse(event: Dict[str, Any]) -> None:
-    """
-    领域事件总线 → SSE 广播桥接器
-
-    职责：
-      - 将 utils.events.publish(...) 发布的所有事件，
-        通过全局事件循环异步转发到 SSEManager.broadcast。
-      - 保持单向依赖：业务模块只关心 publish，SSE 作为观察者。
-    """
     global _EVENT_LOOP
     loop = _EVENT_LOOP
     if loop is None:
-        # 应用尚未准备好或已关闭，静默丢弃事件（避免在关闭阶段抛异常）
         return
 
     manager = get_sse_manager()
@@ -84,92 +71,105 @@ def _forward_event_to_sse(event: Dict[str, Any]) -> None:
     try:
         loop.call_soon_threadsafe(asyncio.create_task, _broadcast())
     except RuntimeError:
-        # 事件循环已关闭或异常，忽略推送（应用正在退出）
         return
+
+
+async def _runtime_metrics_loop() -> None:
+    last: Dict[str, Any] = {}
+
+    try:
+        interval = float(getattr(settings, "runtime_metrics_interval_seconds", 1.0) or 1.0)
+        if interval <= 0:
+            interval = 1.0
+    except Exception:
+        interval = 1.0
+
+    while True:
+        try:
+            thread_count = int(threading.active_count())
+            payload = {
+                "type": "runtime.metrics",
+                "timestamp": datetime.now().isoformat(),
+                "metrics": {
+                    "thread_count": thread_count,
+                    "executor_running": bool(executor.running),
+                    "queue_size": int(executor.queue.size()),
+                    "writer_queue_size": int(writer.queue.qsize()),
+                },
+            }
+
+            if payload["metrics"] != last:
+                publish_event(payload)
+                last = dict(payload["metrics"])
+
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(interval)
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    """应用启动：初始化数据库 → 启动写入器 → 启动执行器"""
-
     global _EVENT_LOOP
     _EVENT_LOOP = asyncio.get_running_loop()
     subscribe_event(_forward_event_to_sse)
 
+    beid = init_backend_instance_id()
+    _LOG.info("backend_instance_id=%s", beid)
+
     _LOG.info("应用启动：开始初始化")
 
-    # 1. 初始化数据库（仅创建 Schema，不做任何业务级同步）
     ensure_initialized()
 
-    # 2. 启动异步写入器
+    try:
+        n = await asyncio.to_thread(recover_incomplete_batches_to_paused, purpose="after_hours")
+        if n:
+            _LOG.info("[bulk] recover paused: %s batches", n)
+    except Exception as e:
+        _LOG.error("[bulk] recover failed: %s", e, exc_info=True)
+
+    try:
+        days = int(getattr(settings, "after_hours_tasks_retention_days", 2))
+        deleted = await asyncio.to_thread(
+            gc_delete_terminal_tasks,
+            retention_days=days,
+            purpose="after_hours",
+        )
+        if deleted:
+            _LOG.info("[bulk] GC deleted bulk_tasks rows=%s (retention_days=%s)", deleted, days)
+    except Exception as e:
+        _LOG.error("[bulk] GC failed: %s", e, exc_info=True)
+
     await writer.start()
 
-    # 3. 启动执行器（Task/Job 执行完全由前端通过 /api/ensure-data 显式触发）
     asyncio.create_task(executor.start())
+
+    global _RUNTIME_METRICS_TASK
+    _RUNTIME_METRICS_TASK = asyncio.create_task(_runtime_metrics_loop())
 
     _LOG.info("应用启动完成")
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    """应用关闭时：停止写入器 → 停止执行器"""
     _LOG.info("应用关闭：停止服务")
 
-    # 先注销事件桥接（避免关闭阶段仍有事件尝试推送）
     unsubscribe_event(_forward_event_to_sse)
     global _EVENT_LOOP
     _EVENT_LOOP = None
 
-    # 1. 先停止写入器（确保数据落盘）
+    global _RUNTIME_METRICS_TASK
+    if _RUNTIME_METRICS_TASK:
+        try:
+            _RUNTIME_METRICS_TASK.cancel()
+            await _RUNTIME_METRICS_TASK
+        except Exception:
+            pass
+        _RUNTIME_METRICS_TASK = None
+
     await writer.stop()
-
-    # 2. 再停止执行器
     await executor.stop()
-
-
-async def sync_trade_calendar_on_startup() -> None:
-    """
-    启动阶段的交易日历同步（Task/Job/SSE 版 · 已不再在 on_startup 中自动调用）
-
-    说明：
-      - 该辅助函数保留用于运维/调试场景下的手工调用；
-      - 正式流程中，交易日历同步应通过前端显式调用：
-          POST /api/ensure-data
-          {
-            "type": "trade_calendar",
-            "scope": "global",
-            "symbol": null,
-            "freq": null,
-            "adjust": "none",
-            "params": { "force_fetch": false }
-          }
-        由 UnifiedSyncExecutor 调用 run_trade_calendar(Task) 完成。
-    """
-    _LOG.info("[启动] 交易日历 Task：检查并同步交易日历缺口")
-
-    try:
-        # trace_id 标记为 'startup'，source='startup'
-        task = create_task(
-            type="trade_calendar",
-            scope="global",
-            symbol=None,
-            freq=None,
-            adjust="none",
-            trace_id="startup",
-            params={"force_fetch": False},
-            source="startup",
-        )
-        result = await run_trade_calendar(task)
-        updated = bool(result.get("updated"))
-        rows = result.get("rows")
-
-        if updated:
-            _LOG.info(f"[启动] 交易日历已更新，rows={rows}")
-        else:
-            _LOG.info("[启动] 交易日历已完备，无需更新")
-
-    except Exception as e:
-        _LOG.error(f"[启动] 交易日历同步失败: {e}", exc_info=True)
 
 
 @app.get("/api/ping")
@@ -186,10 +186,10 @@ def health() -> Dict[str, Any]:
         "executor_running": executor.running,
         "queue_size": executor.queue.size(),
         "writer_queue_size": writer.queue.qsize(),
+        "thread_count": int(threading.active_count()),
     }
 
 
-# 路由注册
 app.include_router(candles_router)
 app.include_router(symbols_router)
 app.include_router(user_config_router)
@@ -199,6 +199,7 @@ app.include_router(data_sync_router)
 app.include_router(factors_router)
 app.include_router(profile_router)
 app.include_router(trade_calendar_router)
+app.include_router(server_identity_router)
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,10 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
-<!-- V10.2 - 新增：footer-left 支持 props 透传（方案D）
-       - 规则：
-         * 内容组件可 defineExpose({ dialogFooterLeft: Component, dialogFooterLeftProps: Object|Ref })
-         * App.vue 读取 props 并通过 v-bind 透传（向后兼容：无 props 则不传）
-       - 优势：数据流显式、组件完全解耦、符合 Vue 最佳实践
+<!-- V11.0 - REFACTOR: 启动阶段任务链路拉直（SymbolIndex/TradeCalendar）
+     - 交易日历：改为 useTradeCalendar().ensureReady()（唯一工作路径）
+     - 标的索引：改为 useSymbolIndex().ensureIndexReady({mode:'startup'})（唯一工作路径）
+     - 删除启动阶段重复的 ensureIndexFresh/declareSymbolIndex 双段绕路编排
 -->
 <template>
   <div v-if="!backendReady" class="loading-screen">
@@ -37,7 +36,6 @@
         />
       </template>
 
-      <!-- 关键升级：支持 props 透传 -->
       <template #footer-left>
         <component 
           v-if="footerLeftComp" 
@@ -57,15 +55,8 @@ import { useViewRenderHub } from "./composables/viewRenderHub";
 import { useDialogManager } from "./composables/useDialogManager";
 import { useExportController } from "./composables/useExportController";
 import { useEventStream } from "@/composables/useEventStream";
-import { ensureIndexFresh } from "./composables/useSymbolIndex";
 import { useWatchlist } from "./composables/useWatchlist";
 import { waitBackendAlive } from "./utils/backendReady";
-
-import {
-  declareTradeCalendar,
-  declareSymbolIndex,
-} from "@/services/ensureDataAPI";
-import { waitTasksDone } from "@/composables/useTaskWaiter";
 
 import {
   registerGlobalHandlers,
@@ -80,6 +71,7 @@ import MainChartPanel from "./components/features/MainChartPanel.vue";
 import TechPanels from "./components/features/TechPanels.vue";
 import ModalDialog from "./components/ui/ModalDialog.vue";
 import { useTradeCalendar } from "@/composables/useTradeCalendar";
+import { useSymbolIndex } from "@/composables/useSymbolIndex";
 
 const backendReady = ref(false);
 
@@ -102,7 +94,6 @@ provide("exportController", exportCtl);
 const activeDialog = computed(() => dialogManager.activeDialog.value);
 const dialogBodyRef = ref(null);
 
-// footer-left：组件 + props（新契约）
 const footerLeftComp = computed(() => {
   const body = dialogBodyRef.value;
   const comp = body && typeof body === "object" ? body.dialogFooterLeft : null;
@@ -112,12 +103,11 @@ const footerLeftComp = computed(() => {
 const footerLeftProps = computed(() => {
   const body = dialogBodyRef.value;
   const props = body && typeof body === "object" ? body.dialogFooterLeftProps : null;
-  
-  // 支持 ref/computed（自动解包 .value）
+
   if (props && typeof props === "object" && "value" in props) {
     return props.value || {};
   }
-  
+
   return props && typeof props === "object" ? props : {};
 });
 
@@ -145,18 +135,12 @@ function handleTabChange(key) {
   }
 }
 
-// footerActions 统一分发（纯粹单通道：只按 action.key 路由）
-// 规则：
-//   1) key==='close'：由壳层执行关闭（内置动作）
-//   2) 其它 key：从内容组件暴露的 dialogActions 字典中取 handler 执行
-//   3) 找不到 handler：DEV warn，PROD 静默
 function handleFooterAction(action) {
   try {
     const act = action && typeof action === "object" ? action : {};
     const key = String(act.key || "").trim();
     if (!key) return;
 
-    // 内置动作：关闭
     if (key === "close") {
       handleModalClose();
       return;
@@ -164,7 +148,6 @@ function handleFooterAction(action) {
 
     const body = dialogBodyRef.value;
 
-    // 内容组件契约：defineExpose({ dialogActions: { [key]: fn } })
     const actionMap = body && typeof body === "object" ? body.dialogActions : null;
     const fn = actionMap && typeof actionMap === "object" ? actionMap[key] : null;
 
@@ -190,7 +173,6 @@ function handleFooterAction(action) {
   }
 }
 
-// 弹窗打开/关闭时管理快捷键作用域
 watch(activeDialog, (newDialog, oldDialog) => {
   if (newDialog && !oldDialog) {
     pushDialogScope({
@@ -217,10 +199,6 @@ onMounted(async () => {
   registerModalSettingsHandlers({
     hotkeys,
     onClose: handleModalClose,
-    // 重要：保存快捷键走 footerActions 的"保存并关闭"按钮语义。
-    // 为保持现有快捷键行为回归，这里将 modal:settings 的 saveSettings 映射为：
-    //   - 如果当前弹窗存在 footerActions 且其中包含 key='save' 的动作，则触发它；
-    //   - 否则保持无动作（避免壳层猜测业务实现）。
     onSave: () => {
       try {
         const acts = activeDialog.value?.footerActions || [];
@@ -243,7 +221,7 @@ onMounted(async () => {
 
   console.log(`${nowTs()} [App] backend-ready, start-app`);
 
-  // 建立 SSE 连接
+  // 建立 SSE 连接（单例）
   const { connect, connected } = useEventStream();
   connect();
 
@@ -262,47 +240,27 @@ onMounted(async () => {
 
   console.log(`${nowTs()} [App] sse-connected`);
 
-  // ===== 启动被动任务指令集 =====
+  // ===== 启动被动任务指令集（拉直版）=====
 
-  // 1) 交易日历：仅由前端声明，后端不再自发
-  try {
-    const t = await declareTradeCalendar({ force_fetch: false });
-    const tid = t?.task_id ? String(t.task_id) : null;
-    if (tid) {
-      await waitTasksDone({ taskIds: [tid], timeoutMs: 60000 });
-    }
-    console.log(`${nowTs()} [App] trade_calendar-ready`);
-  } catch (e) {
-    console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
-  }
-
-  // 前端加载 trade_calendar 快照并常驻内存
+  // 1) 交易日历：唯一入口 ensureReady（declare+wait+load snapshot）
   try {
     const tc = useTradeCalendar();
-    await tc.ensureLoaded();
-    if (tc.ready.value) {
-      console.log(`${nowTs()} [App] trade_calendar-snapshot-loaded`);
-    } else {
-      console.warn(`${nowTs()} [App] trade_calendar-snapshot-not-ready (ensureLoaded failed)`);
-    }
+    const r = await tc.ensureReady({ force_fetch: false, timeoutMs: 60000 });
+    if (r?.ok) console.log(`${nowTs()} [App] trade_calendar-ready`);
+    else console.warn(`${nowTs()} [App] trade_calendar-not-ready`);
   } catch (e) {
-    console.error(`${nowTs()} [App] trade_calendar-snapshot-load-failed`, e);
+    console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
   }
 
   // 2) 当前标的行情（K+因子+档案）
   await vm.reload({ force_refresh: false, with_profile: true });
 
-  // 3) 标的索引：
-  await ensureIndexFresh(false);
-
+  // 3) 标的索引：唯一入口 ensureIndexReady(mode=startup)
   try {
-    const t = await declareSymbolIndex({ force_fetch: false });
-    const tid = t?.task_id ? String(t.task_id) : null;
-    if (tid) {
-      await waitTasksDone({ taskIds: [tid], timeoutMs: 60000 });
-      await ensureIndexFresh(false);
-    }
-    console.log(`${nowTs()} [App] symbol_index-ready`);
+    const si = useSymbolIndex();
+    const r = await si.ensureIndexReady({ mode: "startup" });
+    if (r?.ok) console.log(`${nowTs()} [App] symbol_index-ready`);
+    else console.warn(`${nowTs()} [App] symbol_index-not-ready`);
   } catch (e) {
     console.error(`${nowTs()} [App] symbol_index-init-failed`, e);
   }

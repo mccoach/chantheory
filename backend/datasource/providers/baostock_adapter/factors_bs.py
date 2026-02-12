@@ -26,7 +26,7 @@ from typing import Optional
 
 import pandas as pd
 
-from backend.utils.async_limiter import limit_async_network_io
+from backend.utils.async_limiter import limit_provider_network_io
 from backend.utils.logger import get_logger
 from backend.utils.common import prefix_symbol_with_market
 
@@ -121,7 +121,7 @@ def _query_adjust_factor_sync(
             pass
 
 
-@limit_async_network_io
+@limit_provider_network_io("baostock")
 async def get_raw_adj_factors_bs(
     symbol: str,
     start_date: str = "1990-01-01",

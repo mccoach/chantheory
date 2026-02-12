@@ -1,60 +1,18 @@
 # backend/db/schema.py
 # ==============================
-# V4.0 - 精简版（candles_raw 带 adjust 维度 · 无迁移逻辑）
+# V5.1 - After Hours Bulk + skipped 支持（真相源扩展）
 #
 # 说明：
-#   - 假定数据库从零初始化，不考虑任何历史表结构和数据迁移。
-#   - 仅定义当前业务所需的 6 张核心表：
-#       1. candles_raw   - K线原始数据（带 adjust）
-#       2. adj_factors   - 复权因子
-#       3. symbol_index  - 标的索引（主表）
-#       4. symbol_profile- 标的档案（外键 → symbol_index）
-#       5. user_watchlist- 用户自选股（外键 → symbol_index）
-#       6. trade_calendar- 交易日历
-#
-#   - 其中 candles_raw 的设计为最终版：
-#       * 字段：
-#           symbol, freq, ts, open, high, low, close,
-#           volume, amount, turnover_rate,
-#           source, fetched_at,
-#           adjust ('none' | 'qfq' | 'hfq')
-#       * 主键：
-#           (symbol, freq, ts, adjust)
-#
-# V4.1 - After Hours Bulk v1.1 (新增批次真相源表)
-#   - 新增两张表（不影响原6张表的既有职责）：
-#       7. bulk_batches  - 盘后批量批次快照（进度真相源）
-#       8. bulk_failures - 批次失败明细（分页查询）
-#   - 注意：本项目假定“从零初始化”，无迁移逻辑。
-#
-# V4.2 - After Hours Bulk v1.1 (新增 task_done 去重表)
-#   - 新增：
-#       9. bulk_task_done - 批次内 task_done 去重表（防止重复统计导致 done>total）
+#   - 增加 bulk_batches.progress_skipped
+#   - bulk_tasks.status 逻辑上允许 'skipped'（SQLite不做枚举约束）
 # ==============================
 
 from __future__ import annotations
 
 from backend.db.connection import get_conn
 
+
 def init_schema() -> None:
-    """
-    初始化数据库Schema（V3.0 - 精简版）
-
-    核心表（6个）：
-    1. candles_raw - K线原始数据
-    2. adj_factors - 复权因子
-    3. symbol_index - 标的索引（主表）
-    4. symbol_profile - 标的档案（外键 → symbol_index）
-    5. user_watchlist - 用户自选股（外键 → symbol_index）
-    6. trade_calendar - 交易日历
-
-    V4.1 追加：
-    7. bulk_batches  - 盘后批量批次快照
-    8. bulk_failures - 批次失败明细
-
-    V4.2 追加：
-    9. bulk_task_done - task_done 去重表
-    """
     conn = get_conn()
     cur = conn.cursor()
 
@@ -147,7 +105,7 @@ def init_schema() -> None:
       ON symbol_profile(region);
     """)
 
-    # ===== 表5：用户自选股（V3.0: 增加级联外键）=====
+    # ===== 表5：用户自选股 =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS user_watchlist (
       symbol     TEXT PRIMARY KEY,
@@ -177,24 +135,29 @@ def init_schema() -> None:
     """)
 
     # ======================================================================
-    # 表7：盘后批量批次快照（After Hours Bulk v1.1 真相源）
+    # 表7：bulk_batches（盘后批次真相源 v2.1.2）
     # ======================================================================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS bulk_batches (
       batch_id           TEXT PRIMARY KEY,
-      client_instance_id TEXT,
+      client_instance_id TEXT NOT NULL,
       purpose            TEXT NOT NULL,
 
       started_at         TEXT,
       server_received_at TEXT NOT NULL,
 
+      -- FIFO 排队真相源
+      queue_ts           TEXT NOT NULL,
+
+      -- 展示字段（不参与逻辑）
       selected_symbols   INTEGER,
       planned_total_tasks INTEGER,
 
       accepted_tasks     INTEGER NOT NULL DEFAULT 0,
       rejected_tasks     INTEGER NOT NULL DEFAULT 0,
 
-      state              TEXT NOT NULL,  -- 'running' | 'finished'
+      -- queued|running|paused|stopping|failed|success|cancelled
+      state              TEXT NOT NULL,
 
       progress_version   INTEGER NOT NULL DEFAULT 1,
       progress_updated_at TEXT NOT NULL,
@@ -202,73 +165,67 @@ def init_schema() -> None:
       progress_done      INTEGER NOT NULL DEFAULT 0,
       progress_success   INTEGER NOT NULL DEFAULT 0,
       progress_failed    INTEGER NOT NULL DEFAULT 0,
+      progress_cancelled INTEGER NOT NULL DEFAULT 0,
+      progress_skipped   INTEGER NOT NULL DEFAULT 0,
       progress_total     INTEGER NOT NULL DEFAULT 0
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_batches_latest
-      ON bulk_batches(purpose, state, server_received_at);
+    CREATE INDEX IF NOT EXISTS idx_bulk_batches_client_state_queue
+      ON bulk_batches(client_instance_id, purpose, state, queue_ts);
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_batches_client
-      ON bulk_batches(client_instance_id, purpose, state, server_received_at);
+    CREATE INDEX IF NOT EXISTS idx_bulk_batches_client_latest
+      ON bulk_batches(client_instance_id, purpose, server_received_at);
     """)
 
     # ======================================================================
-    # 表8：批次失败明细（After Hours Bulk v1.1）
+    # 表8：bulk_tasks（批次任务清单真相源 v2.1.2）
     # ======================================================================
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS bulk_failures (
-      id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      batch_id      TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS bulk_tasks (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
 
-      task_id       TEXT NOT NULL,
-      task_type     TEXT,
-      symbol        TEXT,
-      freq          TEXT,
-      adjust        TEXT,
+      batch_id         TEXT NOT NULL,
+      client_task_key  TEXT NOT NULL,
 
-      overall_status TEXT NOT NULL,  -- 'failed' | 'partial_fail'
+      type             TEXT NOT NULL,
+      scope            TEXT NOT NULL,
+      symbol           TEXT,
+      freq             TEXT,
+      adjust           TEXT,
 
-      error_code    TEXT,
-      error_message TEXT,
+      params_json      TEXT NOT NULL,
 
-      timestamp     TEXT NOT NULL,
+      -- queued|running|success|failed|cancelled
+      status           TEXT NOT NULL,
 
-      UNIQUE(batch_id, task_id)
+      attempts         INTEGER NOT NULL DEFAULT 0,
+
+      last_error_code    TEXT,
+      last_error_message TEXT,
+
+      last_task_id      TEXT,
+
+      updated_at       TEXT NOT NULL,
+
+      UNIQUE(batch_id, client_task_key),
+      FOREIGN KEY (batch_id) REFERENCES bulk_batches (batch_id)
+        ON DELETE CASCADE
+        ON UPDATE CASCADE
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_failures_batch
-      ON bulk_failures(batch_id, id);
+    CREATE INDEX IF NOT EXISTS idx_bulk_tasks_batch_status
+      ON bulk_tasks(batch_id, status, id);
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_failures_batch_task
-      ON bulk_failures(batch_id, task_id);
-    """)
-
-    # ======================================================================
-    # 表9：批次内 task_done 去重表（After Hours Bulk v1.1）
-    # 说明：
-    #   - 用于保证同一 (batch_id, task_id) 只统计一次，防止重复统计导致 done>total；
-    #   - 去重逻辑在业务层实现：插入成功→可计数；冲突→忽略计数。
-    # ======================================================================
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS bulk_task_done (
-      batch_id  TEXT NOT NULL,
-      task_id   TEXT NOT NULL,
-      counted_at TEXT NOT NULL,
-      PRIMARY KEY (batch_id, task_id)
-    );
-    """)
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_task_done_batch
-      ON bulk_task_done(batch_id, counted_at);
+    CREATE INDEX IF NOT EXISTS idx_bulk_tasks_batch_key
+      ON bulk_tasks(batch_id, client_task_key);
     """)
 
     conn.commit()
 
 
 def ensure_initialized() -> None:
-    """确保数据库已初始化（幂等操作）"""
     init_schema()

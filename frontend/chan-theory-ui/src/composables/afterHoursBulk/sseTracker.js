@@ -1,14 +1,15 @@
 // src/composables/afterHoursBulk/sseTracker.js
 // ==============================
-// AfterHoursBulk 模块：SSE task_done 跟踪器（契约 v1.1）
+// V2.0 - BREAKING: SSE 契约对齐（bulk.batch.snapshot）
 //
-// v1.1 核心要求：真相源在后端
+// 要点：
+// - SSE event：bulk.batch.snapshot（通过现有 /api/events/stream 推送）
+// - payload：{ type, backend_instance_id, batch }
 // - SSE 仅作为“增量快照推送”通道
-// - 前端不再通过 SSE 自行累加 done/failed
 // - 统一走 version gate：只接受 progress.version 更大的 batch 快照
 // ==============================
 
-export function createSseTaskDoneTracker({ state, eventStream, onBatchSnapshot }) {
+export function createSseBatchSnapshotTracker({ state, eventStream, onBatchSnapshot }) {
   if (!state) throw new Error("[AfterHoursBulk] state is required");
   if (!eventStream || typeof eventStream.subscribe !== "function") {
     throw new Error("[AfterHoursBulk] eventStream.subscribe is required");
@@ -29,8 +30,13 @@ export function createSseTaskDoneTracker({ state, eventStream, onBatchSnapshot }
   function start() {
     stop();
 
-    _unsub = eventStream.subscribe("task_done", (data) => {
+    _unsub = eventStream.subscribe("bulk.batch.snapshot", (data) => {
       try {
+        if (!data || data.type !== "bulk.batch.snapshot") return;
+
+        const be = data?.backend_instance_id;
+        if (be) state.backendInstanceId.value = String(be);
+
         const b = data?.batch;
         if (!b || typeof b !== "object") return;
 
@@ -38,10 +44,10 @@ export function createSseTaskDoneTracker({ state, eventStream, onBatchSnapshot }
         const activeBatchId = active?.batch_id ? String(active.batch_id) : "";
         const batchId = b?.batch_id ? String(b.batch_id) : "";
 
-        if (!activeBatchId || !batchId) return;
-        if (batchId !== activeBatchId) return;
+        // 只消费当前 activeBatch 的快照，避免串批次污染
+        if (activeBatchId && batchId !== activeBatchId) return;
 
-        onBatchSnapshot(b, { source: "sse_task_done" });
+        onBatchSnapshot(b, { source: "sse_bulk.batch.snapshot" });
       } catch {}
     });
   }

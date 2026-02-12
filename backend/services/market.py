@@ -174,14 +174,6 @@ def df_to_candles_list(df: pd.DataFrame) -> list:
         if col not in df.columns:
             _LOG.warning(f"[格式转换] 缺少列: {col}")
             return []
-    
-    # 诊断日志（临时调试）
-    sample_ts = df['ts'].iloc[0] if len(df) > 0 else None
-    _LOG.info(
-        f"[格式转换] 样本数据: "
-        f"ts={sample_ts} (类型={type(sample_ts)}), "
-        f"open={df['open'].iloc[0]}"
-    )
 
     return df[required_cols].rename(columns={
         'ts': 'ts',

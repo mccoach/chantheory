@@ -1,48 +1,94 @@
 # backend/services/task_events.py
 # ==============================
-# 说明：Task / Job 事件工具
+# Task / Job 事件工具（统一状态码/错误码/SSE协议版）
 #
-# 职责：
-#   - 提供 emit_job_done / emit_task_done 两个统一出口；
-#   - 按共识文档构造 job_done / task_done SSE 事件；
-#   - 通过 utils.events.publish 转发到全局事件总线 → SSE。
-#
-# V1.1 - After Hours Bulk（批次真相源在后端）
-#   - 若 task.metadata 含 batch_id：
-#       * 以 task_done 为触发点更新批次进度（真相源）
-#       * 失败时写入失败明细（真相源）
-#       * 将最新 batch 快照写入 task_done 事件的 'batch' 字段
-#   - 普通（非 bulk）任务：不携带 batch 字段，避免污染。
+# 本轮关键修复：
+#   - Bulk 真相源写库（bulk_tasks.last_error_code/message）必须落最准确错误：
+#       * 以 task.finished.summary.extra.primary_error 为唯一首选来源
+#       * 不再使用 summary 内“占位错误”（如 INTERNAL_ERROR/see job result）
 # ==============================
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
-from datetime import datetime
-
+from typing import Dict, Any, Optional, Tuple
 from backend.services.task_model import Task
 from backend.utils.events import publish as publish_event
 from backend.utils.time import now_iso
 from backend.utils.logger import get_logger
 
-# After Hours Bulk v1.1 DB
-from backend.db.bulk_batches import (
-    update_progress_on_task_done,
-    upsert_failure_once,
-    get_batch,
+from backend.db.bulk_batches import finalize_task_terminal
+from backend.services.bulk_events import emit_bulk_batch_snapshot
+from backend.services.bulk_scheduler import (
+    tick as bulk_tick,
+    refill_inflight as bulk_refill_inflight,
 )
 
 _LOG = get_logger("task_events")
 
 
-def _safe_status(value: str) -> str:
+_ALLOWED_JOB_STATUS = {"success", "failed", "cancelled", "skipped"}
+_ALLOWED_TASK_STATUS = {"success", "failed", "cancelled", "skipped", "partial_fail"}
+
+
+def _safe_job_status(value: str) -> str:
     v = (value or "").strip().lower()
-    if v not in ("success", "failed"):
-        return "failed"
-    return v
+    return v if v in _ALLOWED_JOB_STATUS else "failed"
 
 
-def emit_job_done(
+def _safe_task_status(value: str) -> str:
+    v = (value or "").strip().lower()
+    return v if v in _ALLOWED_TASK_STATUS else "failed"
+
+
+def _extract_error_fields(obj: Dict[str, Any] | None) -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return None, None, None, {}
+
+    code = obj.get("error_code")
+    if code is not None:
+        code = str(code).strip() or None
+
+    msg = obj.get("error_message")
+    if msg is not None:
+        msg = str(msg)
+
+    details = obj.get("details")
+    if details is not None:
+        details = str(details)
+
+    extra = obj.get("extra") if isinstance(obj.get("extra"), dict) else {}
+    return code, msg, details, extra
+
+
+def _extract_primary_error_from_summary_extra(summary: Dict[str, Any] | None) -> Tuple[Optional[str], Optional[str]]:
+    """
+    方案A：从 task.finished.summary.extra.primary_error 提取真相源要写入的错误信息。
+
+    返回：
+      (error_code, error_message)
+    """
+    if not isinstance(summary, dict):
+        return None, None
+    extra = summary.get("extra") if isinstance(summary.get("extra"), dict) else {}
+    pe = extra.get("primary_error") if isinstance(extra.get("primary_error"), dict) else {}
+
+    code = pe.get("error_code")
+    if code is not None:
+        code = str(code).strip() or None
+
+    msg = pe.get("error_message")
+    if msg is not None:
+        msg = str(msg).strip() or None
+
+    # 如果 primary_error 没给 message，允许用 details 兜底
+    if not msg:
+        det = pe.get("details")
+        msg = str(det).strip() if det else None
+
+    return code, msg
+
+
+def emit_job_finished(
     task: Task,
     *,
     job_type: str,
@@ -51,23 +97,14 @@ def emit_job_done(
     status: str,
     result: Dict[str, Any] | None = None,
 ) -> None:
-    """
-    发送 job_done 事件（Job 层）。
-
-    参数：
-      - task       : Task 对象
-      - job_type   : 'gap_check'/'sync_kline'/'sync_sh_stock'/...
-      - job_index  : 当前 Job 在该 Task 中的顺序（从1开始）
-      - job_count  : 该 Task 中 Job 总数
-      - status     : 'success'/'failed'
-      - result     : 结果 dict，结构自由扩展：
-                       { 'rows': int, 'message': str, 'error_code': str, 'error_message': str, ... }
-    """
-    st = _safe_status(status)
+    st = _safe_job_status(status)
     res = dict(result or {})
 
+    code, err_msg, details, extra = _extract_error_fields(res)
+
     event = {
-        "type": "job_done",
+        "type": "task.job.finished",
+        "timestamp": now_iso(),
 
         "trace_id": task.trace_id,
         "task_id": task.task_id,
@@ -78,113 +115,80 @@ def emit_job_done(
         "adjust": task.adjust,
         "class": task.cls,
 
-        "job_type": job_type,
+        "job_type": str(job_type),
         "job_index": int(job_index),
         "job_count": int(job_count),
 
         "status": st,
+
         "result": {
             "rows": res.get("rows"),
             "message": res.get("message"),
-            "error_code": res.get("error_code"),
-            "error_message": res.get("error_message"),
-            # 其余字段原样透传在 'extra' 中，避免 schema 爆炸
-            "extra": {k: v for k, v in res.items()
-                      if k not in ("rows", "message", "error_code", "error_message")}
-            if res else {},
+            "error_code": code,
+            "error_message": err_msg,
+            "details": details,
+            "extra": extra or {},
         },
-
-        "timestamp": now_iso(),
     }
 
     publish_event(event)
 
     _LOG.info(
-        "[SSE] job_done task=%s job_type=%s idx=%s/%s status=%s rows=%s msg=%s",
+        "[SSE] task.job.finished task=%s job_type=%s idx=%s/%s status=%s error_code=%s",
         task.task_id,
         job_type,
         job_index,
         job_count,
         st,
-        event["result"]["rows"],
-        event["result"]["message"],
+        code,
     )
 
 
-def _summarize_overall_status(status_list: list[str]) -> str:
-    """
-    汇总整体状态：
-      - 全 success         → 'success'
-      - 既有 success 又有 failed → 'partial_fail'
-      - 全 failed          → 'failed'
-    """
-    if not status_list:
+def _summarize_overall_status(job_status_map: Dict[str, str]) -> str:
+    if not job_status_map:
         return "failed"
 
-    succ = sum(1 for s in status_list if s == "success")
-    fail = sum(1 for s in status_list if s == "failed")
+    statuses = [str(s).strip().lower() for s in job_status_map.values()]
+    statuses = [_safe_job_status(s) for s in statuses]
 
-    if succ and not fail:
-        return "success"
-    if succ and fail:
+    if any(s == "cancelled" for s in statuses):
+        return "cancelled"
+
+    succ = sum(1 for s in statuses if s == "success")
+    fail = sum(1 for s in statuses if s == "failed")
+    skip = sum(1 for s in statuses if s == "skipped")
+
+    if skip and not succ and not fail:
+        return "skipped"
+    if fail and succ:
         return "partial_fail"
-    return "failed"
+    if fail and not succ:
+        return "failed"
+    return "success"
 
 
-def _extract_failure_from_task_done_summary(summary: Dict[str, Any] | None) -> tuple[Optional[str], Optional[str]]:
-    """
-    从 task_done.summary 中尽力提取 error_code / error_message（用于 failures 明细）。
-    当前 schema：
-      summary: { total_rows, message, extra:{...} }
-    v1.1 要求失败明细包含 error_code/error_message。
-    由于各配方的 task_done summary 不保证包含 error_code，我们采取“尽量提取”：
-      - 优先 summary.extra.error_code / error_message
-      - 其次用 summary.message 作为 error_message 兜底
-    """
-    if not isinstance(summary, dict):
-        return None, None
-
-    extra = summary.get("extra") if isinstance(summary.get("extra"), dict) else {}
-    code = extra.get("error_code") or None
-    msg = extra.get("error_message") or None
-
-    if not msg:
-        m = summary.get("message")
-        msg = str(m) if m is not None else None
-
-    return (str(code) if code else None, str(msg) if msg else None)
-
-
-def emit_task_done(
+def emit_task_finished(
     task: Task,
     *,
     jobs: Dict[str, str],
     completion_policy: str,
     summary: Dict[str, Any] | None = None,
 ) -> None:
-    """
-    发送 task_done 事件（Task 层）。
-
-    参数：
-      - task             : Task 对象
-      - jobs             : { job_type: status }，status ∈ {'success','failed'}
-      - completion_policy: 'all_required' / 'best_effort'
-      - summary          : { 'total_rows': int, 'message': str, ... }
-    """
-    # 归一化 job 状态
     norm_jobs: Dict[str, str] = {}
     for k, v in (jobs or {}).items():
-        norm_jobs[str(k)] = _safe_status(str(v))
+        norm_jobs[str(k)] = _safe_job_status(str(v))
 
-    overall_status = _summarize_overall_status(list(norm_jobs.values()))
+    overall_status = _safe_task_status(_summarize_overall_status(norm_jobs))
     cp = (completion_policy or "all_required").strip()
     if cp not in ("all_required", "best_effort"):
         cp = "all_required"
 
     summ = dict(summary or {})
+    code, err_msg, details, extra = _extract_error_fields(summ)
 
     event: Dict[str, Any] = {
-        "type": "task_done",
+        "type": "task.finished",
+        "timestamp": now_iso(),
 
         "trace_id": task.trace_id,
         "task_id": task.task_id,
@@ -202,66 +206,96 @@ def emit_task_done(
         "summary": {
             "total_rows": summ.get("total_rows"),
             "message": summ.get("message"),
-            # 其余字段统一放到 extra
-            "extra": {k: v for k, v in summ.items()
-                      if k not in ("total_rows", "message")}
-            if summ else {},
+            "error_code": code,
+            "error_message": err_msg,
+            "details": details,
+            "extra": extra or {},  # 必含 primary_error（由配方提供）
         },
-
-        "timestamp": now_iso(),
     }
-
-    # ======================================================================
-    # After Hours Bulk v1.1: task_done 携带 batch 快照（真相源在后端）
-    # 触发点：task_done（而非 job_done），避免前端乱序/重复统计
-    # ======================================================================
-    try:
-        md = task.metadata or {}
-        batch_id = md.get("batch_id")
-        if isinstance(batch_id, str) and batch_id.strip():
-            bid = batch_id.strip()
-
-            # 1) 更新批次进度（partial_fail 计失败）
-            batch_snapshot = update_progress_on_task_done(
-                batch_id=bid,
-                overall_status=overall_status,
-            )
-
-            # 2) 若失败，写 failures 明细（按 batch_id+task_id 幂等）
-            if overall_status in ("failed", "partial_fail"):
-                code, msg = _extract_failure_from_task_done_summary(event.get("summary"))
-                upsert_failure_once(
-                    batch_id=bid,
-                    task_id=task.task_id,
-                    task_type=task.type,
-                    symbol=task.symbol,
-                    freq=task.freq,
-                    adjust=task.adjust,
-                    overall_status=overall_status,
-                    error_code=code,
-                    error_message=msg,
-                    timestamp=event.get("timestamp") or now_iso(),
-                )
-
-            # 3) event 携带 batch 快照（进度真相源）
-            # 若更新失败（例如批次被清理），尽力回退读取
-            if not batch_snapshot:
-                batch_snapshot = get_batch(bid)
-            if batch_snapshot:
-                event["batch"] = batch_snapshot
-
-    except Exception as e:
-        # 绝不让批次统计问题阻断 task_done 的发布（但要有日志可查）
-        _LOG.error("[Bulk] attach batch snapshot failed: %s", e, exc_info=True)
 
     publish_event(event)
 
     _LOG.info(
-        "[SSE] task_done task=%s type=%s scope=%s status=%s policy=%s summary=%s",
+        "[SSE] task.finished task=%s type=%s scope=%s status=%s error_code=%s",
         task.task_id,
         task.type,
         task.scope,
         overall_status,
-        cp,
-        event["summary"],
+        code,
     )
+
+    # ==============================
+    # After Hours Bulk hook
+    # ==============================
+    try:
+        md = task.metadata or {}
+        batch_id = md.get("batch_id")
+        client_task_key = md.get("client_task_key")
+        client_instance_id = md.get("client_instance_id")
+
+        if isinstance(batch_id, str) and batch_id.strip() and isinstance(client_task_key, str) and client_task_key.strip():
+            bid = batch_id.strip()
+            ckey = client_task_key.strip()
+
+            if overall_status == "success":
+                term = "success"
+            elif overall_status == "cancelled":
+                term = "cancelled"
+            elif overall_status == "skipped":
+                term = "skipped"
+            else:
+                term = "failed"
+
+            # ===== NEW: 真相源错误信息从 primary_error 取 =====
+            pe_code, pe_msg = _extract_primary_error_from_summary_extra(event.get("summary"))
+
+            # 防御性回退：若 primary_error 缺失，再回退到 summary.error_code/error_message
+            if not pe_code and code:
+                pe_code = code
+            if not pe_msg and err_msg:
+                pe_msg = err_msg
+            if not pe_msg and isinstance(summ, dict) and summ.get("message"):
+                pe_msg = str(summ.get("message"))
+
+            snap = finalize_task_terminal(
+                batch_id=bid,
+                client_task_key=ckey,
+                terminal_status=term,
+                error_code=pe_code,
+                error_message=pe_msg,
+            )
+
+            if snap:
+                emit_bulk_batch_snapshot(snap)
+
+                st = str(snap.get("state") or "").strip().lower()
+
+                if st in ("failed", "success", "cancelled") and isinstance(client_instance_id, str) and client_instance_id.strip():
+                    awaitable = bulk_tick(
+                        client_instance_id=client_instance_id.strip(),
+                        trace_id=task.trace_id,
+                    )
+                    try:
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(awaitable)
+                    except Exception:
+                        pass
+
+                if st == "running" and isinstance(client_instance_id, str) and client_instance_id.strip():
+                    awaitable2 = bulk_refill_inflight(
+                        batch_id=bid,
+                        client_instance_id=client_instance_id.strip(),
+                        trace_id=task.trace_id,
+                    )
+                    try:
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            loop.create_task(awaitable2)
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        _LOG.error("[Bulk] task.finished hook failed: %s", e, exc_info=True)

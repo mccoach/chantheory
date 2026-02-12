@@ -110,7 +110,7 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import httpx
 
-from backend.utils.async_limiter import limit_async_network_io
+from backend.utils.async_limiter import limit_provider_network_io
 from backend.utils.async_retry import async_retry_call
 from backend.utils.logger import get_logger
 from backend.utils.common import ak_symbol_with_prefix, get_symbol_market_from_db
@@ -304,7 +304,7 @@ def _parse_kline_records(records: List[Dict[str, Any]]) -> pd.DataFrame:
 # ==============================================================================
 
 
-@limit_async_network_io
+@limit_provider_network_io("sina")
 async def get_kline_sina(
     symbol: str,
     freq: str,
