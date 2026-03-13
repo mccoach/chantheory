@@ -1,8 +1,10 @@
 # backend/db/__init__.py
 # ==============================
-# V4.0 - After Hours Bulk v2.1.2 (project edition)
-#   - bulk 真相源：bulk_batches + bulk_tasks
-#   - 不再导出 bulk_failures/bulk_task_done（你已手动删除表）
+# DB 模块导出接口
+#
+# 本轮改动（symbol_index 专项）：
+#   - symbol_index 已切换为联合主键版
+#   - 其他表保持现状
 # ==============================
 
 from backend.db.connection import get_conn, close_all_connections

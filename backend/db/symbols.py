@@ -1,38 +1,16 @@
 # backend/db/symbols.py
 # ==============================
-# 说明：标的元数据表操作模块（新语义版）
+# 说明：标的元数据表操作模块（symbol_index 专项重构版）
 #
-# 字段设计（symbol_index）：
-#   - symbol (TEXT, PK): 标的代码（不带市场前缀，如 '600000', '159001'）
-#   - name   (TEXT):     标的名称（股票简称 / 基金扩展简称）
-#   - market (TEXT):     市场代码：'SH' / 'SZ'
-#   - class  (TEXT):     标的类型：'stock' / 'fund'
-#   - type   (TEXT):     标的类别：
-#                          股票：'A' / 'B' / '科创'
-#                          基金：'ETF' / 'LOF' / '实时申赎货币' / '基础设施公募REITs' / 其他原始类别
-#                          指数暂不纳入本次规范（后续可扩展 'index'）
-#   - board  (TEXT):     交易板块：
-#                          股票：'主板' / '科创板' / '创业板'
-#                          基金：NULL
-#   - listing_date (INT): 上市日期，YYYYMMDD 整数
-#   - updated_at   (TEXT): 更新时间，ISO8601 字符串
+# 本轮目标：
+#   - 仅围绕 symbol_index 完成新结构改造
+#   - 新结构：
+#       symbol + market 联合主键
+#       字段：symbol, market, name, class, type, listing_date, updated_at
 #
-# 字段设计（symbol_profile）由 db/schema.py 定义：
-#   - symbol       (TEXT, PK)
-#   - total_shares (REAL): 总股本/总份额，单位：万股/万份，保留两位小数
-#   - float_shares (REAL): 流通股本/份额，单位：万股/万份，保留两位小数
-#   - total_value  (REAL): 总市值，单位：亿元，保留两位小数
-#   - nego_value   (REAL): 流通市值，单位：亿元，保留两位小数
-#   - pe_static    (REAL): 静态市盈率，倍，保留两位小数
-#   - industry     (TEXT): 行业名称
-#   - region       (TEXT): 地区（省级）
-#   - concepts     (TEXT): 概念标签 JSON 字符串
-#   - updated_at   (TEXT): 更新时间，ISO8601
-#
-# 关键原则：
-#   - 不再兼容任何“旧格式 tuple”入参；
-#   - 不再在本模块内“按代码猜测 market/class/type/board”，所有含义字段必须在上游标准化阶段给出；
-#   - 保持本模块职责为“纯粹的 DB upsert/select”。
+# 注意：
+#   - 本轮严格控制范围，不扩散到 symbol_profile 的联合主键重构
+#   - symbol_profile 相关函数先保持现状
 # ==============================
 
 from __future__ import annotations
@@ -49,20 +27,17 @@ from backend.db.connection import get_conn, get_write_lock
 
 def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
     """
-    批量插入或更新标的索引（新语义版，仅接受字典格式）。
+    批量插入或更新标的索引（联合主键版）
 
-    约束：
-      - 不再接受 tuple 形式的旧格式入参；
-      - 调用方必须显式提供字段：
-          symbol, name, market, class, type, board, listing_date（可为 None）, updated_at（可省略）
-
-    Args:
-        rows: 一个可迭代对象，其中每个元素都是 dict，至少包含 'symbol' 和 'name'。
-
-    Returns:
-        int: 影响的行数
+    期望字段：
+      - symbol
+      - market
+      - name
+      - class
+      - type
+      - listing_date
+      - updated_at（调用方可省略，由本函数统一覆盖）
     """
-    # 关键修复：仅接受 dict，不再兼容旧 tuple 格式
     rows = list(rows or [])
     if not rows:
         return 0
@@ -78,7 +53,6 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
             market,
             class,
             type,
-            board,
             listing_date,
             updated_at
         )
@@ -88,16 +62,13 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
             :market,
             :class,
             :type,
-            :board,
             :listing_date,
             :updated_at
         )
-        ON CONFLICT(symbol) DO UPDATE SET
+        ON CONFLICT(symbol, market) DO UPDATE SET
           name         = excluded.name,
-          market       = excluded.market,
           class        = excluded.class,
           type         = excluded.type,
-          board        = excluded.board,
           listing_date = COALESCE(excluded.listing_date, symbol_index.listing_date),
           updated_at   = excluded.updated_at;
         """
@@ -111,15 +82,33 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
                     f"upsert_symbol_index expects dict rows, got {type(row).__name__}"
                 )
 
+            symbol = str(row.get("symbol") or "").strip()
+            name = str(row.get("name") or "").strip()
+            market = str(row.get("market") or "").strip().upper()
+
+            if not symbol:
+                raise ValueError("upsert_symbol_index: symbol is required")
+            if market not in ("SH", "SZ", "BJ"):
+                raise ValueError(f"upsert_symbol_index: invalid market={market!r}")
+            if not name:
+                raise ValueError("upsert_symbol_index: name is required")
+
+            listing_date = row.get("listing_date")
+            if listing_date in ("", None):
+                listing_date = None
+            else:
+                try:
+                    listing_date = int(listing_date)
+                except Exception:
+                    listing_date = None
+
             prepared.append({
-                "symbol": row.get("symbol"),
-                "name": row.get("name"),
-                "market": row.get("market"),
+                "symbol": symbol,
+                "name": name,
+                "market": market,
                 "class": row.get("class"),
                 "type": row.get("type"),
-                "board": row.get("board"),
-                "listing_date": row.get("listing_date"),
-                # updated_at：无条件覆盖为 now，忽略调用方传入的任何值
+                "listing_date": listing_date,
                 "updated_at": now,
             })
 
@@ -130,23 +119,20 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
 
 def select_symbol_index(
     symbol: Optional[str] = None,
+    market: Optional[str] = None,
     type_filter: Optional[str] = None,
     market_filter: Optional[str] = None,
     class_filter: Optional[str] = None,
-    board_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    查询标的索引（新语义版）。
+    查询标的索引（联合主键版）
 
     过滤维度：
-      - symbol: 精确匹配单一标的
-      - type_filter: 标的类别过滤（'A'/'B'/'科创'/'ETF'/'LOF'/...）
-      - market_filter: 市场过滤（'SH'/'SZ'）
-      - class_filter: 标的类型过滤（'stock'/'fund'）
-      - board_filter: 交易板块过滤（'主板'/'科创板'/'创业板'）
-
-    Returns:
-        List[Dict[str, Any]]: 标的索引列表
+      - symbol: 精确匹配代码
+      - market: 精确匹配市场
+      - type_filter: 细分类
+      - market_filter: 市场（与 market 二选一即可，保留兼容调用语义）
+      - class_filter: 大类
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -158,21 +144,18 @@ def select_symbol_index(
         where_clauses.append("symbol = ?")
         params.append(symbol)
 
+    actual_market = market if market is not None else market_filter
+    if actual_market:
+        where_clauses.append("market = ?")
+        params.append(str(actual_market).strip().upper())
+
     if type_filter:
         where_clauses.append("type = ?")
         params.append(type_filter)
 
-    if market_filter:
-        where_clauses.append("market = ?")
-        params.append(market_filter)
-
     if class_filter:
         where_clauses.append("class = ?")
         params.append(class_filter)
-
-    if board_filter:
-        where_clauses.append("board = ?")
-        params.append(board_filter)
 
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
     sql = f"""
@@ -182,12 +165,11 @@ def select_symbol_index(
         market,
         class,
         type,
-        board,
         listing_date,
         updated_at
     FROM symbol_index
     WHERE {where_sql}
-    ORDER BY symbol ASC;
+    ORDER BY market ASC, symbol ASC;
     """
 
     cur.execute(sql, params)
@@ -195,9 +177,9 @@ def select_symbol_index(
     return [dict(r) for r in rows]
 
 
-def get_listing_date(symbol: str) -> Optional[int]:
+def get_listing_date(symbol: str, market: str) -> Optional[int]:
     """
-    获取指定标的的上市日期，仅从 symbol_index 表查询。
+    获取指定标的（symbol + market）的上市日期。
 
     Returns:
         Optional[int]: 上市日期（YYYYMMDD），不存在则返回 None
@@ -205,8 +187,8 @@ def get_listing_date(symbol: str) -> Optional[int]:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT listing_date FROM symbol_index WHERE symbol=?;",
-        (symbol,)
+        "SELECT listing_date FROM symbol_index WHERE symbol=? AND market=?;",
+        (symbol, str(market).strip().upper()),
     )
     result = cur.fetchone()
     return result[0] if result and result[0] else None

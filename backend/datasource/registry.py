@@ -1,29 +1,17 @@
 # backend/datasource/registry.py
 # ==============================
-# V10.1 - 精简 + K线统一归口版（无 akshare 依赖）
+# 数据源方法目录 V11.0
+#
+# 本轮改动（symbol_index 专项）：
+#   - 标的列表主数据源已从交易所官网爬取切换为 TDX 本地文件解析
+#   - symbol list category 改为按市场分三类：
+#       * symbol_list_sh
+#       * symbol_list_sz
+#       * symbol_list_bj
 #
 # 说明：
-#   - 为了彻底去除业务对 akshare 的依赖，本文件不再引用 akshare_adapter。
-#   - 注册的类别包括：
-#       1) 标的列表：
-#           * stock_list_sh  : 上交所股票列表（SSE）
-#           * stock_list_sz  : 深交所股票列表（SZSE）
-#           * fund_list_sh   : 上交所场内基金列表（SSE）
-#           * fund_list_sz   : 深交所场内基金列表（SZSE）
-#       2) 静态与衍生数据（Baostock）：
-#           * adj_factor     : 股票前/后复权因子
-#           * trade_calendar : 交易日历
-#       3) 行情 K 线（东财 / 新浪）：
-#           * stock_daily_bars    : A股日K线（东财，不复权/复权由 fqt 控制）
-#           * stock_weekly_bars   : A股周K线（东财）
-#           * stock_monthly_bars  : A股月K线（东财）
-#           * stock_minutely_bars : A股分钟K线（新浪 quotes 通道）
-#           * fund_bars           : 场内基金日/周/月K线（东财）
-#           * fund_minutely_bars  : 场内基金分钟K线（新浪 quotes 通道）
-#
-#   - 所有类别均通过 dispatcher.fetch(...) 使用，避免直接依赖具体适配器。
-#   - 注意：id 中刻意避免使用 "_em" / "_tx" 字样，防止 normalize_bars_df
-#           中对 volume 的“手→股”逻辑被误触发。
+#   - 其他 provider（SSE/SZSE/Baostock/EastMoney/Sina）仍保留给其他业务使用
+#   - 本轮只移除 symbol_index 主链路对旧官网列表方案的依赖
 # ==============================
 
 from __future__ import annotations
@@ -36,6 +24,7 @@ from .providers import szse_adapter
 from .providers import baostock_adapter as bs
 from .providers import eastmoney_adapter
 from .providers import sina_adapter
+from .providers import tdx_local_adapter
 
 
 # --- 1. 方法描述符 (标准化的弹药规格) ---
@@ -60,55 +49,40 @@ class MethodDescriptor:
 
 _ALL_METHODS: List[MethodDescriptor] = [
     # ==========================================================================
-    # 类别: 标的资产列表（只用 SSE/SZSE）
+    # 类别: 标的资产列表（主数据源已切换为 TDX 本地文件）
     # ==========================================================================
 
-    # --- A股：上交所股票列表（SSE JSONP）---
     MethodDescriptor(
-        id="sse.get_stock_list_sh_sse",
-        name="上交所-A股列表 (SSE JSONP)",
-        provider="sse",
-        category="stock_list_sh",
-        callable=sse_adapter.get_stock_list_sh_sse,
+        id="tdx_local.symbol_list_sh",
+        name="通达信本地-上交所全量标的列表",
+        provider="tdx_local",
+        category="symbol_list_sh",
+        callable=tdx_local_adapter.get_symbol_list_sh_tdx,
         priority=10,
-        tags=("stock", "list", "sh", "official", "sse"),
-        description="从上交所 JSONP 接口获取沪市股票列表（含主板/科创板）",
+        tags=("local", "tdx", "symbol", "list", "sh"),
+        description="解析 hq_cache/shs.tnf，并左连接 base.dbf 的 listing_date",
     ),
 
-    # --- A股：深交所股票列表（SZSE JSON/XLSX）---
     MethodDescriptor(
-        id="szse.get_stock_list_sz_szse",
-        name="深交所-A股列表 (SZSE JSON/XLSX)",
-        provider="szse",
-        category="stock_list_sz",
-        callable=szse_adapter.get_stock_list_sz_szse,
+        id="tdx_local.symbol_list_sz",
+        name="通达信本地-深交所全量标的列表",
+        provider="tdx_local",
+        category="symbol_list_sz",
+        callable=tdx_local_adapter.get_symbol_list_sz_tdx,
         priority=10,
-        tags=("stock", "list", "sz", "official", "szse"),
-        description="从深交所接口获取深市股票列表",
+        tags=("local", "tdx", "symbol", "list", "sz"),
+        description="解析 hq_cache/szs.tnf，并左连接 base.dbf 的 listing_date",
     ),
 
-    # --- 基金：上交所场内基金列表（SSE JSONP）---
     MethodDescriptor(
-        id="sse.get_fund_list_sh_sse",
-        name="上交所-场内基金列表 (SSE JSONP)",
-        provider="sse",
-        category="fund_list_sh",
-        callable=sse_adapter.get_fund_list_sh_sse,
+        id="tdx_local.symbol_list_bj",
+        name="通达信本地-北交所全量标的列表",
+        provider="tdx_local",
+        category="symbol_list_bj",
+        callable=tdx_local_adapter.get_symbol_list_bj_tdx,
         priority=10,
-        tags=("fund", "list", "sh", "official", "sse"),
-        description="从上交所 ETF 子站获取场内基金列表",
-    ),
-
-    # --- 基金：深交所场内基金列表（SZSE JSON/XLSX）---
-    MethodDescriptor(
-        id="szse.get_fund_list_sz_szse",
-        name="深交所-场内基金列表 (SZSE JSON/XLSX)",
-        provider="szse",
-        category="fund_list_sz",
-        callable=szse_adapter.get_fund_list_sz_szse,
-        priority=10,
-        tags=("fund", "list", "sz", "official", "szse"),
-        description="从深交所基金子站获取场内基金列表",
+        tags=("local", "tdx", "symbol", "list", "bj"),
+        description="解析 hq_cache/bjs.tnf，并左连接 base.dbf 的 listing_date（匹配不到则为空）",
     ),
 
     # ==========================================================================

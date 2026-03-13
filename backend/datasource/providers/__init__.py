@@ -1,15 +1,11 @@
 # backend/datasource/providers/__init__.py
 # ==============================
-# providers 模块导出接口（V2.0 - 去除 akshare 直接依赖）
+# providers 模块导出接口
 #
 # 说明：
-#   - 不再在模块导入阶段加载 akshare_adapter，以便后续完全卸载 akshare 库。
-#   - 当前对外仅导出：
-#       * sse_adapter
-#       * szse_adapter
-#       * baostock_adapter
-#       * eastmoney_adapter
-#       * sina_adapter
+#   - listing / symbol_index 主数据源已统一切换为 TDX 本地文件解析（tdx_local_adapter）
+#   - SSE / SZSE 保留其单标的远程能力（档案/统计等）
+#   - 其他 provider（baostock/eastmoney/sina）仍服务于 K线 / 因子 / 日历等业务
 # ==============================
 
 from __future__ import annotations
@@ -19,6 +15,7 @@ from backend.datasource.providers import szse_adapter
 from backend.datasource.providers import baostock_adapter
 from backend.datasource.providers import eastmoney_adapter
 from backend.datasource.providers import sina_adapter
+from backend.datasource.providers import tdx_local_adapter
 
 __all__ = [
     "sse_adapter",
@@ -26,4 +23,5 @@ __all__ = [
     "baostock_adapter",
     "eastmoney_adapter",
     "sina_adapter",
+    "tdx_local_adapter",
 ]

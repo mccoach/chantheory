@@ -1,10 +1,13 @@
 # backend/db/schema.py
 # ==============================
-# V5.1 - After Hours Bulk + skipped 支持（真相源扩展）
+# Schema 初始化
 #
-# 说明：
-#   - 增加 bulk_batches.progress_skipped
-#   - bulk_tasks.status 逻辑上允许 'skipped'（SQLite不做枚举约束）
+# 本轮改动（symbol_index 专项）：
+#   - 仅重建 symbol_index 结构：
+#       * 联合主键 (symbol, market)
+#       * 去掉 board
+#       * 保留 listing_date
+#   - 其他表结构本轮保持原状（严格控制范围）
 # ==============================
 
 from __future__ import annotations
@@ -56,22 +59,26 @@ def init_schema() -> None:
       ON adj_factors(symbol, date);
     """)
 
-    # ===== 表3：标的索引（主表）=====
+    # ===== 表3：标的索引（本轮重建新结构）=====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_index (
-      symbol       TEXT PRIMARY KEY,
+      symbol       TEXT NOT NULL,
       name         TEXT NOT NULL,
-      market       TEXT,
+      market       TEXT NOT NULL,
       class        TEXT,
       type         TEXT,
-      board        TEXT,
       listing_date INTEGER,
-      updated_at   TEXT NOT NULL
+      updated_at   TEXT NOT NULL,
+      PRIMARY KEY (symbol, market)
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_symbol_index_type_market
-      ON symbol_index(type, market);
+    CREATE INDEX IF NOT EXISTS idx_symbol_index_market_class
+      ON symbol_index(market, class);
+    """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_symbol_index_market_type
+      ON symbol_index(market, type);
     """)
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_symbol_index_listing

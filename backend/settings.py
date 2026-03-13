@@ -17,6 +17,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR: Path = Path(os.getenv("CHAN_DATA_DIR", PROJECT_ROOT / "var"))
 DEFAULT_DB_PATH: Path = DEFAULT_DATA_DIR / "data.sqlite"
 DEFAULT_CONFIG_PATH: Path = DEFAULT_DATA_DIR / "config.json"
+DEFAULT_TDX_HQ_CACHE_DIR: Path = Path(r"D:\TDX_new\T0002\hq_cache")
 
 
 @dataclass
@@ -49,6 +50,14 @@ class Settings:
 
     # user_config_path：用户配置文件路径（config.json）
     user_config_path: Path = DEFAULT_CONFIG_PATH
+
+    # NEW：通达信本地行情缓存目录（symbol_index 唯一数据源）
+    # 目录下当前使用的文件：
+    #   - shs.tnf
+    #   - szs.tnf
+    #   - bjs.tnf
+    #   - base.dbf
+    tdx_hq_cache_dir: Path = DEFAULT_TDX_HQ_CACHE_DIR
 
     # ==========================================================
     # 三、网络与重试（影响“稳定性”与“速度”）
@@ -164,7 +173,7 @@ class Settings:
     log_debug_trace_ids: List[str] = None
 
     # log_summary：是否开启摘要模式（True 更省日志体积）
-    log_summary: bool = True
+    log_summary: bool = False
 
     # log_include_request：日志是否包含请求详情
     log_include_request: bool = False
@@ -190,6 +199,7 @@ class Settings:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = Path(self.db_path).resolve()
         self.user_config_path = Path(self.user_config_path).resolve()
+        self.tdx_hq_cache_dir = Path(self.tdx_hq_cache_dir).resolve()
 
         # trace_id 白名单解析
         raw_trace_ids = str(self.log_debug_trace_ids_raw or "").strip()

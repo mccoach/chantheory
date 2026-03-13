@@ -1,7 +1,14 @@
 # backend/services/data_recipes/symbol.py
 # ==============================
 # 标的列表任务配方（symbol_index）
-# 统一状态/错误码/SSE协议版
+#
+# 本轮改动：
+#   - 主数据源已切换为 TDX 本地文件解析
+#   - 配方改为三市场并列：
+#       * sync_sh_symbols
+#       * sync_sz_symbols
+#       * sync_bj_symbols
+#   - 不再做缺口判断，始终执行三市场全量同步
 # ==============================
 
 from __future__ import annotations
@@ -10,21 +17,16 @@ from typing import Dict, Any
 
 from backend.services.task_model import Task
 from backend.services.task_events import emit_job_finished, emit_task_finished
-from backend.services.data_recipes.common import bool_param
-from backend.services.normalizer import normalize_symbol_list_df
-from backend.services.sync_helper import fetch_normalize_save
+from backend.services.sync_helper import fetch_normalize_save_symbol_index
 from backend.utils.logger import get_logger, log_event
-from backend.db.connection import get_conn
-from backend.utils.time import today_ymd, to_yyyymmdd_from_iso
 
 _LOG = get_logger("data_recipes.symbol")
 
 
 async def run_symbol_index(task: Task) -> Dict[str, Any]:
     trace_id = task.trace_id
-    force_fetch = bool_param(task, "force_fetch", False)
 
-    job_types = ["sync_sh_stock", "sync_sz_stock", "sync_sh_fund", "sync_sz_fund"]
+    job_types = ["sync_sh_symbols", "sync_sz_symbols", "sync_bj_symbols"]
     jobs_status: Dict[str, str] = {}
     total_rows = 0
 
@@ -37,67 +39,21 @@ async def run_symbol_index(task: Task) -> Dict[str, Any]:
         line=0,
         trace_id=trace_id,
         event="symbol_index.start",
-        message="运行标的列表配方",
-        extra={"task_id": task.task_id, "force_fetch": force_fetch},
+        message="运行标的列表配方（TDX本地版）",
+        extra={"task_id": task.task_id},
     )
 
-    conn = get_conn()
-
-    def _subset_has_gap(market: str, cls: str) -> bool:
-        if force_fetch:
-            return True
-
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT MAX(updated_at) FROM symbol_index WHERE market=? AND class=?;",
-            (market, cls),
-        )
-        result = cur.fetchone()
-        if not result or not result[0]:
-            return True
-
-        try:
-            updated_ymd = to_yyyymmdd_from_iso(result[0])
-        except Exception:
-            return True
-
-        return updated_ymd < today_ymd()
-
-    exchange_jobs = [
-        ("sync_sh_stock", "上交所股票", "stock_list_sh", "sse_sh_stock", "SH", "stock"),
-        ("sync_sz_stock", "深交所股票", "stock_list_sz", "szse_sz_stock", "SZ", "stock"),
-        ("sync_sh_fund", "上交所基金", "fund_list_sh", "sse_sh_fund", "SH", "fund"),
-        ("sync_sz_fund", "深交所基金", "fund_list_sz", "szse_sz_fund", "SZ", "fund"),
+    market_jobs = [
+        ("sync_sh_symbols", "上交所标的", "symbol_list_sh", "tdx_sh_symbols", "SH"),
+        ("sync_sz_symbols", "深交所标的", "symbol_list_sz", "tdx_sz_symbols", "SZ"),
+        ("sync_bj_symbols", "北交所标的", "symbol_list_bj", "tdx_bj_symbols", "BJ"),
     ]
 
     idx = 1
-    for job_type, display_name, category, source_tag, market, cls in exchange_jobs:
-        has_gap = _subset_has_gap(market, cls)
-
-        if not has_gap:
-            jobs_status[job_type] = "success"
-            emit_job_finished(
-                task,
-                job_type=job_type,
-                job_index=idx,
-                job_count=len(job_types),
-                status="success",
-                result={
-                    "rows": 0,
-                    "message": f"{display_name} 无需同步（本地已最新）",
-                    "error_code": None,
-                    "error_message": None,
-                    "details": None,
-                    "extra": {"market": market, "class": cls, "need_sync": False},
-                },
-            )
-            idx += 1
-            continue
-
+    for job_type, display_name, category, source_tag, market in market_jobs:
         try:
-            res = await fetch_normalize_save(
+            res = await fetch_normalize_save_symbol_index(
                 category=category,
-                normalizer=normalize_symbol_list_df,
                 display_name=display_name,
                 source_tag=source_tag,
             )
@@ -138,7 +94,7 @@ async def run_symbol_index(task: Task) -> Dict[str, Any]:
                 "error_code": code,
                 "error_message": emsg,
                 "details": details,
-                "extra": {"market": market, "class": cls, "category": category, "source_tag": source_tag},
+                "extra": {"market": market, "category": category, "source_tag": source_tag},
             },
         )
         idx += 1
@@ -178,6 +134,6 @@ async def run_symbol_index(task: Task) -> Dict[str, Any]:
 
     return {
         "updated": total_rows > 0,
-        "source_id": "SSE_SZSE",
+        "source_id": "TDX_LOCAL",
         "rows": total_rows,
     }
