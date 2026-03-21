@@ -1,11 +1,18 @@
 # backend/db/candles.py
 # ==============================
-# 说明：K线数据表操作模块（V2.0 - 带 adjust 维度）
-# - 职责：candles_raw 表的所有CRUD操作
-# - 改动：
-#     * 所有读写均增加 adjust 维度：
-#         - adjust: 'none' | 'qfq' | 'hfq'
-#     * 主键为 (symbol, freq, ts, adjust)
+# 说明：K线数据表操作模块（V3.0 - 联合键修正版）
+#
+# 职责：
+#   - candles_raw 表的所有 CRUD 操作
+#
+# 本次重构：
+#   - 补入 market 维度
+#   - 删除 adjust 维度
+#   - 主键改为 (market, symbol, freq, ts)
+#
+# 设计原则：
+#   - candles_raw 只存原始不复权K线真相源
+#   - 复权应由读取层 / 派生层完成，不在底表做多版本膨胀
 # ==============================
 
 from __future__ import annotations
@@ -13,57 +20,67 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from backend.db.connection import get_conn
-from backend.utils.time import query_range_ms, to_yyyymmdd  # 标准导入
 
 
 def upsert_candles_raw(records: List[Dict[str, Any]]) -> int:
     """
-    批量插入或更新K线数据（带 adjust 维度）。
-    
+    批量插入或更新 K 线数据（联合键修正版）。
+
     Args:
         records: 字典列表，每个字典至少包含：
-                 symbol, freq, ts, open, high, low, close, volume, source
+                 market, symbol, freq, ts,
+                 open, high, low, close, volume, source
                  可选：
-                 amount, turnover_rate, fetched_at, adjust('none'|'qfq'|'hfq')
-    
+                 amount, turnover_rate
+
     Returns:
         int: 影响的行数
     """
     if not records:
         return 0
-    
+
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.now().isoformat()
-    
+
     prepared: List[Dict[str, Any]] = []
     for rec in records:
-        # 默认字段填充
-        rec = dict(rec)  # 复制一份，避免修改调用方对象
+        r = dict(rec)
 
-        # updated_at 语义：该记录“本次写入/更新”的时间
-        # 无论调用方是否传入、值为何，统一覆盖为 now
-        rec["updated_at"] = now
+        market = str(r.get("market") or "").strip().upper()
+        symbol = str(r.get("symbol") or "").strip()
+        freq = str(r.get("freq") or "").strip()
 
-        rec["amount"] = rec.get("amount")
-        rec["turnover_rate"] = rec.get("turnover_rate")
-        rec["adjust"] = rec.get("adjust", "none") or "none"
-        prepared.append(rec)
-    
+        if market not in ("SH", "SZ", "BJ"):
+            raise ValueError(f"upsert_candles_raw: invalid market={market!r}")
+        if not symbol:
+            raise ValueError("upsert_candles_raw: symbol is required")
+        if not freq:
+            raise ValueError("upsert_candles_raw: freq is required")
+
+        r["market"] = market
+        r["symbol"] = symbol
+        r["freq"] = freq
+        r["updated_at"] = now
+        r["amount"] = r.get("amount")
+        r["turnover_rate"] = r.get("turnover_rate")
+
+        prepared.append(r)
+
     sql = """
     INSERT INTO candles_raw (
-        symbol, freq, ts,
+        market, symbol, freq, ts,
         open, high, low, close,
         volume, amount, turnover_rate,
-        source, updated_at, adjust
+        source, updated_at
     )
     VALUES (
-        :symbol, :freq, :ts,
+        :market, :symbol, :freq, :ts,
         :open, :high, :low, :close,
         :volume, :amount, :turnover_rate,
-        :source, :updated_at, :adjust
+        :source, :updated_at
     )
-    ON CONFLICT(symbol, freq, ts, adjust) DO UPDATE SET
+    ON CONFLICT(market, symbol, freq, ts) DO UPDATE SET
         open=excluded.open,
         high=excluded.high,
         low=excluded.low,
@@ -74,106 +91,87 @@ def upsert_candles_raw(records: List[Dict[str, Any]]) -> int:
         source=excluded.source,
         updated_at=excluded.updated_at;
     """
-    
+
     cur.executemany(sql, prepared)
     conn.commit()
     return cur.rowcount
 
 
 def select_candles_raw(
+    market: str,
     symbol: str,
     freq: str,
     start_ts: Optional[int] = None,
     end_ts: Optional[int] = None,
     limit: Optional[int] = None,
     offset: int = 0,
-    adjust: str = "none",
 ) -> List[Dict[str, Any]]:
     """
-    查询原始K线数据（带 adjust 维度）
-    
-    时间戳语义规范：
-      - start_ts/end_ts: 查询范围（毫秒时间戳）
-      - 数据库中的 ts: K线收盘时刻
-    
-    推荐用法：
-      # 查询某日范围
-      from backend.utils.time import query_range_ms
-      start_ts, end_ts = query_range_ms(20241101, 20241103)
-      candles = select_candles_raw(symbol, freq, start_ts, end_ts, adjust='none')
-    
+    查询原始 K 线数据（联合键修正版）。
+
     Args:
+        market: 市场（SH/SZ/BJ）
         symbol: 标的代码
         freq: 频率
         start_ts: 起始时间戳（>=，包含边界）
         end_ts: 结束时间戳（<=，包含边界）
         limit: 返回条数限制
         offset: 偏移量
-        adjust: 复权标记：'none' | 'qfq' | 'hfq'
-    
+
     Returns:
-        List[Dict]: K线记录列表
+        List[Dict]: K 线记录列表
     """
     conn = get_conn()
     cur = conn.cursor()
-    
-    where_clauses = ["symbol=?", "freq=?", "adjust=?"]
-    params: List[Any] = [symbol, freq, adjust]
-    
+
+    market_u = str(market or "").strip().upper()
+
+    where_clauses = ["market=?", "symbol=?", "freq=?"]
+    params: List[Any] = [market_u, symbol, freq]
+
     if start_ts is not None:
         where_clauses.append("ts>=?")
         params.append(start_ts)
-    
+
     if end_ts is not None:
         where_clauses.append("ts<=?")
         params.append(end_ts)
-    
+
     where_sql = " AND ".join(where_clauses)
     limit_sql = f"LIMIT {int(limit)}" if limit else ""
     offset_sql = f"OFFSET {int(offset)}" if offset > 0 else ""
-    
+
     sql = f"""
     SELECT * FROM candles_raw
     WHERE {where_sql}
     ORDER BY ts ASC
     {limit_sql} {offset_sql};
     """
-    
+
     cur.execute(sql, params)
     rows = cur.fetchall()
-    
     return [dict(r) for r in rows]
 
 
 def get_latest_ts_from_raw(
+    market: str,
     symbol: str,
     freq: str,
-    adjust: str = "none",
 ) -> Optional[int]:
     """
-    获取指定标的+频率+adjust 的最新时间戳
-    
-    返回语义：
-      最新K线的收盘时刻（毫秒时间戳）
-    
-    用途：
-      缺口判断时对比本地最新数据
-    
-    Args:
-        symbol: 标的代码
-        freq: 频率
-        adjust: 复权标记：'none' | 'qfq' | 'hfq'
-    
+    获取指定 market+symbol+freq 的最新时间戳。
+
     Returns:
-        Optional[int]: 最新时间戳，无数据返回None
+        Optional[int]: 最新 K 线收盘时刻（毫秒时间戳）
     """
     conn = get_conn()
     cur = conn.cursor()
-    
+
+    market_u = str(market or "").strip().upper()
     cur.execute(
-        "SELECT MAX(ts) FROM candles_raw WHERE symbol=? AND freq=? AND adjust=?;",
-        (symbol, freq, adjust),
+        "SELECT MAX(ts) FROM candles_raw WHERE market=? AND symbol=? AND freq=?;",
+        (market_u, symbol, freq),
     )
-    
+
     result = cur.fetchone()
     return result[0] if result and result[0] else None

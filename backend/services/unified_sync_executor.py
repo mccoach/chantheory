@@ -1,6 +1,18 @@
 # backend/services/unified_sync_executor.py
 # ==============================
-# 执行器（primary_error 对齐版）
+# 执行器（去除 old bulk 耦合版）
+#
+# 当前支持：
+#   - trade_calendar
+#   - symbol_index
+#   - profile_snapshot
+#   - current_kline
+#   - current_factors
+#   - watchlist_update
+#
+# 本轮改动：
+#   - 彻底移除 old bulk 相关逻辑
+#   - local-import 不走本执行器
 # ==============================
 
 from __future__ import annotations
@@ -14,19 +26,15 @@ from backend.services.task_model import Task
 from backend.services.data_recipes import (
     run_trade_calendar,
     run_symbol_index,
+    run_profile_snapshot,
     run_current_kline,
     run_current_factors,
-    run_current_profile,
     run_watchlist_update,
 )
 from backend.db.async_writer import get_async_writer
 from backend.utils.logger import get_logger
 
 from backend.services.task_events import emit_task_finished, emit_job_finished
-from backend.db.bulk_batches import (
-    get_batch_state_for_client,
-    finalize_task_terminal,
-)
 
 _LOG = get_logger("sync_executor")
 
@@ -124,12 +132,12 @@ class UnifiedSyncExecutor:
             return await run_trade_calendar(task)
         if task.type == "symbol_index":
             return await run_symbol_index(task)
+        if task.type == "profile_snapshot":
+            return await run_profile_snapshot(task)
         if task.type == "current_kline":
             return await run_current_kline(task)
         if task.type == "current_factors":
             return await run_current_factors(task)
-        if task.type == "current_profile":
-            return await run_current_profile(task)
         if task.type == "watchlist_update":
             return await run_watchlist_update(task)
         return None
@@ -176,77 +184,11 @@ class UnifiedSyncExecutor:
         except Exception as e:
             _LOG.error("[执行器] fallback task.finished failed: %s", e, exc_info=True)
 
-    async def _bulk_precheck_cancel_if_stopping(self, task: Task) -> bool:
-        md = task.metadata or {}
-        batch_id = md.get("batch_id")
-        client_task_key = md.get("client_task_key")
-        client_instance_id = md.get("client_instance_id")
-
-        if not (isinstance(batch_id, str) and batch_id.strip() and isinstance(client_task_key, str) and client_task_key.strip()):
-            return False
-        if not (isinstance(client_instance_id, str) and client_instance_id.strip()):
-            return False
-
-        bid = batch_id.strip()
-        ckey = client_task_key.strip()
-        cid = client_instance_id.strip()
-
-        st = await asyncio.to_thread(get_batch_state_for_client, batch_id=bid, client_instance_id=cid)
-        if st != "stopping":
-            return False
-
-        await asyncio.to_thread(
-            finalize_task_terminal,
-            batch_id=bid,
-            client_task_key=ckey,
-            terminal_status="cancelled",
-            error_code="USER_CANCELLED",
-            error_message="cancelled by user (batch stopping)",
-        )
-
-        pe = _primary_error(
-            error_code="USER_CANCELLED",
-            error_message="cancelled by user",
-            details="batch state is stopping; task cancelled before execution",
-            extra={"batch_id": bid, "client_task_key": ckey, "batch_state": st},
-        )
-
-        emit_job_finished(
-            task,
-            job_type="executor_bulk_precheck",
-            job_index=1,
-            job_count=1,
-            status="cancelled",
-            result={
-                "rows": 0,
-                "message": "任务已取消（用户终止下载）",
-                **pe,
-            },
-        )
-        emit_task_finished(
-            task,
-            jobs={"executor_bulk_precheck": "cancelled"},
-            completion_policy="all_required",
-            summary={
-                "total_rows": 0,
-                "message": "任务已取消（用户终止下载）",
-                **pe,
-                "extra": {"primary_error": pe, "batch_id": bid, "client_task_key": ckey, "batch_state": st},
-            },
-        )
-        return True
-
     async def _execute_task(self, task: Task, worker_id: int = 0) -> None:
         _LOG.info(
             "[执行器] worker-%s execute task_id=%s type=%s scope=%s symbol=%s freq=%s adjust=%s class=%s",
             worker_id, task.task_id, task.type, task.scope, task.symbol, task.freq, task.adjust, task.cls,
         )
-
-        try:
-            if await self._bulk_precheck_cancel_if_stopping(task):
-                return
-        except Exception as e:
-            _LOG.error("[执行器] bulk precheck error: %s", e, exc_info=True)
 
         timeout_s = float(getattr(settings, "task_timeout_seconds", 30.0) or 30.0)
 

@@ -1,6 +1,9 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\SymbolSearch.vue -->
 <!-- 说明：封装输入框、联想建议和历史记录的展示。 -->
-<!-- FINAL FIX: 重新引入 watchlist prop，并用它来计算传递给 SymbolListItem 的 is-starred 状态。 -->
+<!-- V4.0 - BREAKING: 双主键语义封口
+     - 选中语义继续使用完整 item（symbol + market）
+     - 内部统一使用 identityKey，禁止散落 symbol-only key 拼接
+-->
 <template>
   <div class="search-wrapper">
     <input
@@ -19,13 +22,13 @@
     <DropdownContainer :show="showSuggestions" ref="suggestWrapRef">
       <SymbolListItem
         v-for="(item, i) in suggestions"
-        :key="item.symbol + '_' + i"
+        :key="itemKey(item, i)"
         :symbol="item.symbol"
         :name="item.name"
         :market="item.market"
         :type="item.type"
         :active="i === activeIndex"
-        :is-starred="watchlist.has(item.symbol)"
+        :is-starred="watchlist.has(identityKey(item.symbol, item.market))"
         @select="onSelect"
         @toggle-star="onToggleStar"
       />
@@ -34,18 +37,18 @@
 
     <DropdownContainer :show="showHistory" ref="historyWrapRef">
       <SymbolListItem
-        v-for="(h, i) in history"
-        :key="h.symbol + '_' + i"
+        v-for="(h, i) in historyResolved"
+        :key="itemKey(h, i)"
         :symbol="h.symbol"
-        :name="findBySymbol(h.symbol)?.name || ''"
-        :market="findBySymbol(h.symbol)?.market || ''"
-        :type="findBySymbol(h.symbol)?.type || ''"
+        :name="h.name || ''"
+        :market="h.market || ''"
+        :type="h.type || ''"
         :active="i === activeIndex"
-        :is-starred="watchlist.has(h.symbol)"
+        :is-starred="watchlist.has(identityKey(h.symbol, h.market))"
         @select="onSelect"
         @toggle-star="onToggleStar"
       />
-      <div v-if="!history.length" class="no-data">暂无历史记录</div>
+      <div v-if="!historyResolved.length" class="no-data">暂无历史记录</div>
     </DropdownContainer>
 
     <div v-if="invalidHint" class="hint">{{ invalidHint }}</div>
@@ -58,13 +61,25 @@ import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import DropdownContainer from "./DropdownContainer.vue";
 import SymbolListItem from "./SymbolListItem.vue";
 
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function identityKey(symbol, market) {
+  return `${asStr(market).toUpperCase()}:${asStr(symbol)}`;
+}
+
+function itemKey(item, i) {
+  return `${identityKey(item?.symbol, item?.market)}_${i}`;
+}
+
 const props = defineProps({
   modelValue: { type: String, default: "" },
   placeholder: { type: String, default: "" },
   invalidHint: { type: String, default: "" },
   suggestions: { type: Array, default: () => [] },
   history: { type: Array, default: () => [] },
-  watchlist: { type: Set, default: () => new Set() }, // NEW: 重新接收 watchlist Set
+  watchlist: { type: Set, default: () => new Set() },
   showSuggestions: { type: Boolean, default: false },
   showHistory: { type: Boolean, default: false },
 });
@@ -88,12 +103,32 @@ const suggestWrapRef = ref(null);
 const historyWrapRef = ref(null);
 const activeIndex = ref(-1);
 
+const historyResolved = computed(() => {
+  const arr = Array.isArray(props.history) ? props.history : [];
+  return arr
+    .map((h) => {
+      const sym = asStr(h?.symbol);
+      const mk = asStr(h?.market).toUpperCase();
+      if (!sym || !mk) return null;
+
+      return (
+        findBySymbol(sym, mk) || {
+          symbol: sym,
+          market: mk,
+          name: "",
+          type: "",
+        }
+      );
+    })
+    .filter(Boolean);
+});
+
 const currentActiveList = computed(() => {
   if (props.showSuggestions) {
-    return props.suggestions;
+    return Array.isArray(props.suggestions) ? props.suggestions : [];
   }
   if (props.showHistory) {
-    return props.history.map(h => findBySymbol(h.symbol)).filter(Boolean);
+    return historyResolved.value;
   }
   return [];
 });
@@ -106,12 +141,12 @@ function onInput(event) {
   emit("update:modelValue", event.target.value);
 }
 
-function onSelect(symbol) {
-  emit("selectSymbol", findBySymbol(symbol));
+function onSelect(item) {
+  emit("selectSymbol", item);
 }
 
-function onToggleStar(symbol) {
-  emit("toggleStar", findBySymbol(symbol));
+function onToggleStar(item) {
+  emit("toggleStar", item);
 }
 
 function onKeydown(e) {
@@ -128,7 +163,7 @@ function onKeydown(e) {
   } else if (e.key === "Enter") {
     e.preventDefault();
     if (activeIndex.value >= 0 && activeIndex.value < list.length) {
-      onSelect(list[activeIndex.value].symbol);
+      onSelect(list[activeIndex.value]);
     } else {
       inputRef.value?.blur();
     }

@@ -1,14 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\WatchlistMenu.vue -->
 <!-- ==============================
-说明：自选池下拉菜单（V2.0 - 极速版）
-改动：
-  - 删除 open() 中的 wl.refresh() 调用（核心优化）
-  - 删除 watch(wl.items) 监听器（不需要响应式同步）
-  - 删除 onMounted 中的 refresh() 调用（App.vue已预加载）
-  - applyFavoritesDiff() 中删除最后的 refresh() 调用
-效果：
-  - 菜单打开延迟从 300ms 降至 <5ms（减少98%）
-  - 减少90%的网络请求（5秒缓存）
+说明：自选池下拉菜单
+V4.0 - BREAKING: UI 层双主键语义彻底化
+- 选中语义升级为完整 identity（symbol + market）
+- 内部统一使用 identityKey，禁止 symbol-only 思维残留
+- 本轮不改 watchlist 后端契约，只清理前端 UI 层 identity 表达
 ============================== -->
 <template>
   <div class="watchlist-wrapper">
@@ -34,13 +30,13 @@
 
     <DropdownContainer :show="isOpen" ref="favoritesWrapRef">
       <SymbolListItem
-        v-for="(sym, i) in favoritesDisplay"
-        :key="sym + '_' + i"
-        :symbol="sym"
-        :name="findBySymbol(sym)?.name || ''"
-        :market="findBySymbol(sym)?.market || ''"
-        :type="findBySymbol(sym)?.type || ''"
-        :is-starred="isFavStarOn(sym)"
+        v-for="(it, i) in favoritesDisplay"
+        :key="itemKey(it, i)"
+        :symbol="it.symbol"
+        :name="it.name || ''"
+        :market="it.market || ''"
+        :type="it.type || ''"
+        :is-starred="isFavStarOn(it)"
         star-title="从自选中移除/撤销移除（关闭菜单后生效）"
         @select="onSelect"
         @toggle-star="toggleFavStage"
@@ -70,38 +66,63 @@ const isOpen = ref(false);
 const favInitialSet = ref(new Set());
 const favStagedSet = ref(new Set());
 
-const favoritesDisplay = computed(() => {
-  return Array.from(favInitialSet.value).sort((a, b) => a.localeCompare(b));
-});
-
-// ===== 删除：watch(wl.items) 监听器 =====
-// 原因：open() 时已直接使用最新数据，无需响应式同步
-
-function isFavStarOn(sym) {
-  return favStagedSet.value.has(String(sym || "").trim());
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
 }
 
-function toggleFavStage(sym) {
-  const s = String(sym || "").trim();
-  if (!s) return;
+function makeIdentityKey(symbol, market) {
+  return `${asStr(market).toUpperCase()}:${asStr(symbol)}`;
+}
+
+function itemKey(item, i) {
+  return `${makeIdentityKey(item?.symbol, item?.market)}_${i}`;
+}
+
+const favoritesDisplay = computed(() => {
+  const initial = Array.from(favInitialSet.value);
+  return initial
+    .map((k) => {
+      const [market, symbol] = String(k || "").split(":");
+      if (!market || !symbol) return null;
+      return (
+        findBySymbol(symbol, market) || {
+          symbol,
+          market,
+          name: "",
+          type: "",
+        }
+      );
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ka = makeIdentityKey(a.symbol, a.market);
+      const kb = makeIdentityKey(b.symbol, b.market);
+      return ka.localeCompare(kb);
+    });
+});
+
+function isFavStarOn(item) {
+  const key = makeIdentityKey(item?.symbol, item?.market);
+  return favStagedSet.value.has(key);
+}
+
+function toggleFavStage(item) {
+  const key = makeIdentityKey(item?.symbol, item?.market);
+  if (!key || key === ":") return;
   const next = new Set(favStagedSet.value);
-  if (next.has(s)) next.delete(s);
-  else next.add(s);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
   favStagedSet.value = next;
 }
 
-// ===== 核心修改：删除冗余网络请求 =====
 function open() {
-  // 直接使用本地数据（已经是最新的）
-  // 原因：
-  //   1. App.vue启动时已调用 wl.refresh()
-  //   2. addOne/removeOne 会立即更新 wl.items.value
-  //   3. 无需再次网络请求
   const nowArr = Array.isArray(wl.items.value) ? wl.items.value : [];
-  const itemsSet = new Set(nowArr
-    .map(x => String((x && x.symbol) || "").trim())
-    .filter(Boolean));
-  
+  const itemsSet = new Set(
+    nowArr
+      .map((x) => makeIdentityKey(x?.symbol, x?.market))
+      .filter((k) => k && k !== ":")
+  );
+
   favInitialSet.value = itemsSet;
   favStagedSet.value = new Set(favInitialSet.value);
   isOpen.value = true;
@@ -128,7 +149,7 @@ function toggleFavoritesMenu() {
 async function applyFavoritesDiff() {
   const toRemove = [];
   const toAdd = [];
-  
+
   for (const s of favInitialSet.value) {
     if (!favStagedSet.value.has(s)) toRemove.push(s);
   }
@@ -137,22 +158,22 @@ async function applyFavoritesDiff() {
   }
 
   if (toAdd.length > 0 || toRemove.length > 0) {
-    const addJobs = toAdd.map((s) => wl.addOne(s).catch(() => {}));
-    const rmJobs = toRemove.map((s) => wl.removeOne(s).catch(() => {}));
+    const addJobs = toAdd.map((key) => {
+      const [market, symbol] = key.split(":");
+      return wl.addOne({ symbol, market }).catch(() => {});
+    });
+    const rmJobs = toRemove.map((key) => {
+      const [market, symbol] = key.split(":");
+      return wl.removeOne({ symbol, market }).catch(() => {});
+    });
     await Promise.all([...addJobs, ...rmJobs]);
-    
-    // ===== 删除：不需要调用 refresh() =====
-    // 原因：addOne/removeOne 内部已更新 wl.items.value
   }
 }
 
-function onSelect(symbol) {
-  emit("selectSymbol", findBySymbol(symbol));
+function onSelect(item) {
+  emit("selectSymbol", item);
   close(true);
 }
-
-// ===== 删除：onMounted 中的 refresh() 调用 =====
-// 原因：App.vue 启动时已预加载
 </script>
 
 <style scoped>

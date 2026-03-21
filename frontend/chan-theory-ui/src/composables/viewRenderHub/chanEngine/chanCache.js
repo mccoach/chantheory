@@ -3,6 +3,10 @@
 // Chan 结构编排与缓存（includeMemo + derivedMemo）
 // 迁移自原 useViewRenderHub：_calculateChanStructures 及 key/memo 逻辑。
 // 重要：此模块不持有单例；由 index 的 state/pipeline 创建一次并复用。
+//
+// 本轮修正（双主键清扫）：
+// - IPO 元信息解析必须使用 (symbol, market) 双主键
+// - 不再接受 symbol-only 兜底，避免多市场同代码误命中
 // ==============================
 
 import {
@@ -28,8 +32,8 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
     return `${len}|${first}|${last}`;
   }
 
-  function makeIncludeKey({ candlesKey, anchorPolicy, ipoYmd }) {
-    return `${candlesKey}|ap=${anchorPolicy}|ipo=${ipoYmd ?? "null"}`;
+  function makeIncludeKey({ candlesKey, anchorPolicy, ipoYmd, symbol, market }) {
+    return `${candlesKey}|sym=${symbol || ""}|mkt=${market || ""}|ap=${anchorPolicy}|ipo=${ipoYmd ?? "null"}`;
   }
 
   function makeDerivedKey({ includeKey, frMinTick, frMinPct, frMinCond }) {
@@ -38,16 +42,23 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
 
   function resolveSymbolMetaForCurrent(_candles) {
     let sym = "";
+    let mk = "";
+
     try {
       sym = String(settings?.preferences?.lastSymbol || "").trim();
+      mk = String(settings?.preferences?.lastMarket || "").trim().toUpperCase();
     } catch {
       sym = "";
+      mk = "";
     }
-    if (!sym) return { symbol: "", ipoYmd: null };
+
+    if (!sym || !mk) {
+      return { symbol: "", market: "", ipoYmd: null };
+    }
 
     let ipoYmd = null;
     try {
-      const entry = symbolIndex.findBySymbol(sym);
+      const entry = symbolIndex.findBySymbol(sym, mk);
       if (entry) {
         const raw = entry.listingDate != null ? entry.listingDate : entry.listing_date;
         if (raw != null) {
@@ -57,7 +68,7 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
       }
     } catch {}
 
-    return { symbol: sym, ipoYmd };
+    return { symbol: sym, market: mk, ipoYmd };
   }
 
   function emptyChanStruct() {
@@ -84,7 +95,7 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
       return emptyChanStruct();
     }
 
-    const { ipoYmd } = resolveSymbolMetaForCurrent(candles);
+    const { symbol, market, ipoYmd } = resolveSymbolMetaForCurrent(candles);
 
     const anchorPolicy =
       settings.chanTheory.chanSettings.anchorPolicy || CHAN_DEFAULTS.anchorPolicy;
@@ -95,8 +106,13 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
 
     const candlesKey = makeCandlesKey(candles);
 
-    // ===== L1 include memo =====
-    const includeKey = makeIncludeKey({ candlesKey, anchorPolicy, ipoYmd });
+    const includeKey = makeIncludeKey({
+      candlesKey,
+      symbol,
+      market,
+      anchorPolicy,
+      ipoYmd,
+    });
 
     let includeRes = null;
     if (includeMemo.key === includeKey && includeMemo.value) {
@@ -107,7 +123,6 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
       includeMemo.key = includeKey;
       includeMemo.value = includeRes;
 
-      // include 变更会导致 derived 全部失效（最简清理）
       derivedMemo.key = null;
       derivedMemo.value = null;
     }
@@ -116,7 +131,6 @@ export function createChanCacheEngine({ settings, symbolIndex }) {
     const mapOrigToReduced = includeRes?.mapOrigToReduced || [];
     const meta = includeRes?.meta || null;
 
-    // ===== L2 derived memo =====
     const derivedKey = makeDerivedKey({
       includeKey,
       frMinTick,

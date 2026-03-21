@@ -1,16 +1,29 @@
 // src/composables/useMarketView.js
 // ==============================
-// V17.6 - CHANGED: 页面请求在“提交任务”阶段也按 class 分流
-//   - stock：无论页面 adjust/freq，只提交 current_kline(adjust=none) + current_factors
-//   - non-stock：按页面 adjust 提交 current_kline；不提交 current_factors，且不读取 factors
+// V23.0 - useMarketView 回归单文件 + 保留唯一当前标的加载链
+//
+// 本轮目标：
+//   1) 撤销前一轮不必要的伪拆包，回归单文件实现；
+//   2) 保留唯一当前标的加载链：
+//        setSymbolIdentity()
+//          -> code/market 变化
+//          -> watch([code, market])
+//          -> reload()
+//   3) 删除“恢复身份后再显式 reload”的重复业务路径（由 App/useAppStartup 配合完成）；
+//   4) 严格双主键：symbol + market 任一缺失都不进入主加载流程；
+//   5) 不改变既有公开 API，保证现有页面调用方式回归。
+//
+// 说明：
+//   - 本文件当前虽然体量较大，但本轮不再做形式主义拆包；
+//   - 这里的 reload 主流程与 state/watch/public API 强耦合，强拆会增加理解与维护成本；
+//   - 因此本轮按“极简、直接、去重复”的原则保留单文件实现。
 // ==============================
 
-import { ref, watch, computed, toRef } from "vue";
+import { ref, watch, computed } from "vue";
 import { fetchCandles } from "@/services/marketService";
 import {
   declareCurrentKline,
   declareCurrentFactors,
-  declareCurrentProfile,
 } from "@/services/ensureDataAPI";
 import { waitTasksDone } from "@/composables/useTaskWaiter";
 import { fetchFactors } from "@/services/factorsAPI";
@@ -20,6 +33,7 @@ import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/viewRenderHub";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
+import { useProfileSnapshot } from "@/composables/useProfileSnapshot";
 import { fetchProfile } from "@/services/profileService";
 
 let _abortCtl = null;
@@ -31,15 +45,48 @@ function ts() {
   return new Date().toISOString();
 }
 
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function asMarket(x) {
+  return asStr(x).toUpperCase();
+}
+
+function normalizeIdentity(input = {}) {
+  return {
+    symbol: asStr(input.symbol),
+    market: asMarket(input.market),
+  };
+}
+
+function isValidIdentity(input = {}) {
+  const id = normalizeIdentity(input);
+  return !!(id.symbol && id.market);
+}
+
 export function useMarketView(options = {}) {
   const autoStart = options?.autoStart !== false;
   const settings = useUserSettings();
   const renderHub = useViewRenderHub();
-  const { findBySymbol } = useSymbolIndex();
+  const symbolIndex = useSymbolIndex();
+  const profileSnapshot = useProfileSnapshot();
 
-  const code = ref(settings.preferences.lastSymbol || "");
+  const initialIdentity = settings.getLastSymbolIdentity
+    ? settings.getLastSymbolIdentity()
+    : {
+        symbol: settings.preferences.lastSymbol || "",
+        market: settings.preferences.lastMarket || "",
+      };
+
+  const normalizedInitialIdentity = normalizeIdentity(initialIdentity);
+
+  // BREAKING: 当前标的身份严格升级为双主键
+  const code = ref(normalizedInitialIdentity.symbol);
+  const market = ref(normalizedInitialIdentity.market);
+
   const freq = ref(settings.preferences.freq || "1d");
-  const adjust = toRef(settings.preferences, "adjust");
+  const adjust = ref(settings.preferences.adjust || "none");
 
   const loading = ref(false);
   const error = ref("");
@@ -73,34 +120,51 @@ export function useMarketView(options = {}) {
     atrBasePrice: settings.preferences.atrBasePrice,
   }));
 
-  /**
-   * 统一加载入口
-   *
-   * @param {object} opts
-   * @param {boolean} [opts.force_refresh=false] - 是否强制刷新（force_fetch）
-   * @param {boolean} [opts.with_profile=false] - 是否顺带触发/读取 current_profile
-   */
-  async function reload(opts = {}) {
-    if (!code.value) return;
+  function isLatestRequest(reqSeq) {
+    return reqSeq === _lastReqSeq;
+  }
 
-    const currentSymbol = code.value;
+  async function reload(opts = {}) {
+    const identity = normalizeIdentity({
+      symbol: code.value,
+      market: market.value,
+    });
+
+    if (!isValidIdentity(identity)) return;
+
+    const currentSymbol = identity.symbol;
+    const currentMarket = identity.market;
     const currentFreq = freq.value;
     const currentAdjust = adjust.value;
     const forceRefresh = !!opts.force_refresh;
     const withProfile = opts.with_profile === true;
 
-    // ===== NEW: 提交任务阶段也按 class 分流（与读取阶段保持一致）=====
-    const entry = findBySymbol(currentSymbol);
+    // 读取前避让 index/profile 导入中状态
+    {
+      const [idxReadable, pfReadable] = await Promise.all([
+        symbolIndex.waitReadable({ timeoutMs: 60000 }),
+        profileSnapshot.waitReadable({ timeoutMs: 60000 }),
+      ]);
+
+      if (!idxReadable?.ok) {
+        throw new Error(idxReadable?.message || "symbol_index still importing");
+      }
+      if (!pfReadable?.ok) {
+        throw new Error(pfReadable?.message || "profile_snapshot still importing");
+      }
+    }
+
+    const entry = symbolIndex.findBySymbol(currentSymbol, currentMarket);
     const cls = String(entry?.class || "").toLowerCase();
     const isStock = cls === "stock";
 
-    // stock 固定 none；非 stock 按页面 adjust 透传
     const requestAdjust = isStock ? "none" : String(currentAdjust || "none");
     const shouldFetchFactors = isStock;
 
     try {
       if (_abortCtl) _abortCtl.abort();
-    } catch { }
+    } catch {}
+
     const ctl = new AbortController();
     _abortCtl = ctl;
     const mySeq = ++_lastReqSeq;
@@ -110,19 +174,17 @@ export function useMarketView(options = {}) {
 
     try {
       console.log(
-        `${ts()} [MarketView] declare symbol=${currentSymbol} freq=${currentFreq} adjust=${currentAdjust} force=${forceRefresh} profile=${withProfile}`
+        `${ts()} [MarketView] declare symbol=${currentSymbol} market=${currentMarket} freq=${currentFreq} adjust=${currentAdjust} force=${forceRefresh} profile_read=${withProfile}`
       );
 
       await renderHub._executeBatch(async () => {
-        // ===== Step 1: 声明 Task =====
         const majorTaskIds = [];
-        let profileTaskId = null;
 
         try {
           const kTask = await declareCurrentKline({
             symbol: currentSymbol,
             freq: currentFreq,
-            adjust: requestAdjust, // CHANGED: stock 固定 none；非 stock 透传页面 adjust
+            adjust: requestAdjust,
             force_fetch: forceRefresh,
           });
           if (kTask?.task_id) {
@@ -133,7 +195,6 @@ export function useMarketView(options = {}) {
           throw e;
         }
 
-        // CHANGED: 仅 stock 声明 factors；非 stock 不声明
         if (shouldFetchFactors) {
           try {
             const fTask = await declareCurrentFactors({
@@ -149,53 +210,33 @@ export function useMarketView(options = {}) {
           }
         }
 
-        if (withProfile) {
-          try {
-            const pTask = await declareCurrentProfile({
-              symbol: currentSymbol,
-              force_fetch: forceRefresh,
-            });
-            if (pTask?.task_id) {
-              profileTaskId = String(pTask.task_id);
-            }
-          } catch (e) {
-            console.error(
-              `${ts()} [MarketView] declare-current_profile-failed`,
-              e
-            );
-          }
-        }
-
-        if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
+        if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
           return;
         }
 
-        // ===== Step 2: 等待任务完成 =====
         if (majorTaskIds.length) {
           await waitTasksDone({
             taskIds: majorTaskIds,
             timeoutMs: 30000,
           });
 
-          if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
+          if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
             return;
           }
         }
 
-        // ===== Step 3: 拉取业务数据（/api/candles + 可选 /api/factors）=====
         const [candlesRes, factorsRes] = await Promise.all([
           fetchCandles(currentSymbol, currentFreq, {
             signal: ctl.signal,
-            adjust: requestAdjust, // CHANGED: 与提交一致
+            adjust: requestAdjust,
           }),
           shouldFetchFactors ? fetchFactors(currentSymbol) : Promise.resolve([]),
         ]);
 
-        if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
+        if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
           return;
         }
 
-        // ===== Step 4: 更新 K 线 + 因子 + 指标 =====
         const metaRaw = candlesRes.meta || {};
         const completeness =
           metaRaw.is_latest === true ? "complete" : "incomplete";
@@ -238,12 +279,10 @@ export function useMarketView(options = {}) {
               );
             }
           } else {
-            // non-stock：后端已按 adjust 返回（不再需要 factors）
             finalCandles = rawCandles.value;
           }
 
           candles.value = finalCandles;
-
           indicators.value = computeIndicators(
             finalCandles,
             indicatorConfig.value
@@ -256,7 +295,7 @@ export function useMarketView(options = {}) {
 
           error.value = "";
           console.log(
-            `${ts()} [MarketView] load-ok symbol=${currentSymbol} freq=${currentFreq} rows=${allRows}`
+            `${ts()} [MarketView] load-ok symbol=${currentSymbol} market=${currentMarket} freq=${currentFreq} rows=${allRows}`
           );
         } else {
           candles.value = [];
@@ -272,33 +311,22 @@ export function useMarketView(options = {}) {
 
         settings.setFreq(freq.value);
 
-        // ===== Step 5: 若需要档案，等待 current_profile 完成并读取快照 =====
-        if (withProfile && profileTaskId) {
+        if (withProfile) {
           try {
-            await waitTasksDone({
-              taskIds: [profileTaskId],
-              timeoutMs: 30000,
-            });
-
-            if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
-              return;
-            }
-
-            const pf = await fetchProfile(currentSymbol);
-            if (mySeq !== _lastReqSeq || ctl.signal.aborted) {
+            const pf = await fetchProfile(currentSymbol, currentMarket);
+            if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
               return;
             }
             profile.value = pf || null;
           } catch (e) {
             console.error(`${ts()} [MarketView] load-profile-failed`, e);
+            profile.value = null;
           }
         }
       });
 
-      // ===== NEW: force_refresh 指令在数据落地后触发一次 FULL =====
-      if (forceRefresh && mySeq === _lastReqSeq && !ctl.signal.aborted) {
+      if (forceRefresh && isLatestRequest(mySeq) && !ctl.signal.aborted) {
         try {
-          // 仅一次：此时 vm.candles/indicators 已经是最终状态（或已结束），full 计算不会重复。
           renderHub.requestRender({ intent: "force_full" });
         } catch {}
       }
@@ -325,6 +353,7 @@ export function useMarketView(options = {}) {
         ...(meta.value || {}),
         completeness: "incomplete",
       };
+      profile.value = null;
     } finally {
       if (mySeq === _lastReqSeq && ctl === _abortCtl) {
         loading.value = false;
@@ -333,7 +362,11 @@ export function useMarketView(options = {}) {
   }
 
   watch(adjust, () => {
-    if (!code.value) return;
+    const identity = normalizeIdentity({
+      symbol: code.value,
+      market: market.value,
+    });
+    if (!isValidIdentity(identity)) return;
     reload({ force_refresh: false, with_profile: false });
   });
 
@@ -349,22 +382,48 @@ export function useMarketView(options = {}) {
     { deep: true }
   );
 
-  watch(code, (newCode) => {
-    settings.setLastSymbol(newCode || "");
+  // 唯一业务链：身份变化即自动 reload
+  watch(
+    [code, market],
+    ([newCode, newMarket]) => {
+      const identity = normalizeIdentity({
+        symbol: newCode,
+        market: newMarket,
+      });
 
-    settings.setAtrBasePrice(null);
+      if (!isValidIdentity(identity)) return;
 
-    hub.execute("ChangeSymbol", { symbol: String(newCode || "") });
-    reload({ force_refresh: false, with_profile: true });
-  });
+      settings.setLastSymbolIdentity({
+        symbol: identity.symbol,
+        market: identity.market,
+      });
+      settings.setAtrBasePrice(null);
+
+      hub.execute("ChangeSymbol", {
+        symbol: identity.symbol,
+        market: identity.market,
+      });
+
+      reload({ force_refresh: false, with_profile: true });
+    }
+  );
 
   hub.onChange((st) => {
     displayBars.value = Math.max(1, Number(st.barsCount || 1));
   });
 
-  hub.initFromPersist(code.value, freq.value);
+  hub.initFromPersist(code.value, market.value, freq.value);
+
   if (autoStart) {
     reload({ force_refresh: false, with_profile: true });
+  }
+
+  function setSymbolIdentity(input = {}) {
+    const identity = normalizeIdentity(input);
+    if (!isValidIdentity(identity)) return;
+
+    code.value = identity.symbol;
+    market.value = identity.market;
   }
 
   function setFreq(newFreq) {
@@ -405,6 +464,7 @@ export function useMarketView(options = {}) {
 
   return {
     code,
+    market,
     freq,
     adjust,
     chartType,
@@ -418,6 +478,7 @@ export function useMarketView(options = {}) {
     profile,
     visibleRange,
     displayBars,
+    setSymbolIdentity,
     setFreq,
     applyPreset,
     setBars,

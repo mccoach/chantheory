@@ -2,12 +2,21 @@
 # ==============================
 # Schema 初始化
 #
-# 本轮改动（symbol_index 专项）：
-#   - 仅重建 symbol_index 结构：
-#       * 联合主键 (symbol, market)
-#       * 去掉 board
-#       * 保留 listing_date
-#   - 其他表结构本轮保持原状（严格控制范围）
+# 本轮改动（盘后数据导入 import 第一阶段）：
+#   - 删除旧 bulk 表定义（由你手动删旧表，本文件不再创建旧表）
+#   - 新建：
+#       * local_import_batches
+#       * local_import_tasks
+#
+# 本次重构（candles_raw 联合键修正版）：
+#   - candles_raw 补入 market
+#   - candles_raw 删除 adjust
+#   - candles_raw 主键改为：
+#       (market, symbol, freq, ts)
+#
+# 说明：
+#   - 本文件只负责“新建当前正式表结构”
+#   - 不承担旧表删除 / 字段迁移逻辑
 # ==============================
 
 from __future__ import annotations
@@ -19,12 +28,17 @@ def init_schema() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
-    # ===== 表1：K线原始数据（带 adjust 维度）=====
+    # ===== 表1：K线原始数据（联合键修正版）=====
+    # 设计原则：
+    #   - 唯一真相源：原始不复权K线
+    #   - 联合唯一键：
+    #       market + symbol + freq + ts
+    #   - 不再保留 adjust 维度
     cur.execute("""
     CREATE TABLE IF NOT EXISTS candles_raw (
+      market TEXT NOT NULL,
       symbol TEXT NOT NULL,
       freq   TEXT NOT NULL,
-      adjust TEXT NOT NULL DEFAULT 'none',
       ts     INTEGER NOT NULL,
       open   REAL NOT NULL,
       high   REAL NOT NULL,
@@ -35,12 +49,12 @@ def init_schema() -> None:
       turnover_rate REAL,
       source TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      PRIMARY KEY (symbol, freq, ts, adjust)
+      PRIMARY KEY (market, symbol, freq, ts)
     );
     """)
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_candles_raw_main
-      ON candles_raw(symbol, freq, ts, adjust);
+      ON candles_raw(market, symbol, freq, ts);
     """)
 
     # ===== 表2：复权因子 =====
@@ -59,7 +73,7 @@ def init_schema() -> None:
       ON adj_factors(symbol, date);
     """)
 
-    # ===== 表3：标的索引（本轮重建新结构）=====
+    # ===== 表3：标的索引 =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_index (
       symbol       TEXT NOT NULL,
@@ -85,31 +99,33 @@ def init_schema() -> None:
       ON symbol_index(listing_date);
     """)
 
-    # ===== 表4：标的档案 =====
+    # ===== 表4：标的档案（联合主键极简版）=====
+    # 字段单位说明：
+    #   - float_shares : 万股 / 万份
+    #   - float_value  : 万元
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_profile (
-      symbol       TEXT PRIMARY KEY,
-      total_shares REAL,
+      symbol       TEXT NOT NULL,
+      market       TEXT NOT NULL,
       float_shares REAL,
-      total_value  REAL,
-      nego_value   REAL,
-      pe_static    REAL,
+      float_value  REAL,
       industry     TEXT,
       region       TEXT,
       concepts     TEXT,
       updated_at   TEXT,
-      FOREIGN KEY (symbol) REFERENCES symbol_index (symbol)
+      PRIMARY KEY (symbol, market),
+      FOREIGN KEY (symbol, market) REFERENCES symbol_index (symbol, market)
         ON DELETE CASCADE
         ON UPDATE CASCADE
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_profile_industry
-      ON symbol_profile(industry);
+    CREATE INDEX IF NOT EXISTS idx_profile_market_industry
+      ON symbol_profile(market, industry);
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_profile_region
-      ON symbol_profile(region);
+    CREATE INDEX IF NOT EXISTS idx_profile_market_region
+      ON symbol_profile(market, region);
     """)
 
     # ===== 表5：用户自选股 =====
@@ -141,94 +157,59 @@ def init_schema() -> None:
     );
     """)
 
-    # ======================================================================
-    # 表7：bulk_batches（盘后批次真相源 v2.1.2）
-    # ======================================================================
+    # ==========================================================
+    # 表7：盘后数据导入批次（local_import_batches）
+    # ==========================================================
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS bulk_batches (
-      batch_id           TEXT PRIMARY KEY,
-      client_instance_id TEXT NOT NULL,
-      purpose            TEXT NOT NULL,
-
-      started_at         TEXT,
-      server_received_at TEXT NOT NULL,
-
-      -- FIFO 排队真相源
-      queue_ts           TEXT NOT NULL,
-
-      -- 展示字段（不参与逻辑）
-      selected_symbols   INTEGER,
-      planned_total_tasks INTEGER,
-
-      accepted_tasks     INTEGER NOT NULL DEFAULT 0,
-      rejected_tasks     INTEGER NOT NULL DEFAULT 0,
-
-      -- queued|running|paused|stopping|failed|success|cancelled
-      state              TEXT NOT NULL,
-
-      progress_version   INTEGER NOT NULL DEFAULT 1,
-      progress_updated_at TEXT NOT NULL,
-
-      progress_done      INTEGER NOT NULL DEFAULT 0,
-      progress_success   INTEGER NOT NULL DEFAULT 0,
-      progress_failed    INTEGER NOT NULL DEFAULT 0,
-      progress_cancelled INTEGER NOT NULL DEFAULT 0,
-      progress_skipped   INTEGER NOT NULL DEFAULT 0,
-      progress_total     INTEGER NOT NULL DEFAULT 0
+    CREATE TABLE IF NOT EXISTS local_import_batches (
+      batch_id            TEXT PRIMARY KEY,
+      state               TEXT NOT NULL,
+      created_at          TEXT NOT NULL,
+      started_at          TEXT,
+      finished_at         TEXT,
+      progress_total      INTEGER NOT NULL DEFAULT 0,
+      progress_done       INTEGER NOT NULL DEFAULT 0,
+      progress_success    INTEGER NOT NULL DEFAULT 0,
+      progress_failed     INTEGER NOT NULL DEFAULT 0,
+      progress_cancelled  INTEGER NOT NULL DEFAULT 0,
+      retryable           INTEGER NOT NULL DEFAULT 0,
+      cancelable          INTEGER NOT NULL DEFAULT 0,
+      ui_message          TEXT
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_batches_client_state_queue
-      ON bulk_batches(client_instance_id, purpose, state, queue_ts);
-    """)
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_batches_client_latest
-      ON bulk_batches(client_instance_id, purpose, server_received_at);
+    CREATE INDEX IF NOT EXISTS idx_local_import_batches_state_created
+      ON local_import_batches(state, created_at);
     """)
 
-    # ======================================================================
-    # 表8：bulk_tasks（批次任务清单真相源 v2.1.2）
-    # ======================================================================
+    # ==========================================================
+    # 表8：盘后数据导入任务（local_import_tasks）
+    # ==========================================================
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS bulk_tasks (
-      id               INTEGER PRIMARY KEY AUTOINCREMENT,
-
-      batch_id         TEXT NOT NULL,
-      client_task_key  TEXT NOT NULL,
-
-      type             TEXT NOT NULL,
-      scope            TEXT NOT NULL,
-      symbol           TEXT,
-      freq             TEXT,
-      adjust           TEXT,
-
-      params_json      TEXT NOT NULL,
-
-      -- queued|running|success|failed|cancelled
-      status           TEXT NOT NULL,
-
-      attempts         INTEGER NOT NULL DEFAULT 0,
-
-      last_error_code    TEXT,
-      last_error_message TEXT,
-
-      last_task_id      TEXT,
-
-      updated_at       TEXT NOT NULL,
-
-      UNIQUE(batch_id, client_task_key),
-      FOREIGN KEY (batch_id) REFERENCES bulk_batches (batch_id)
+    CREATE TABLE IF NOT EXISTS local_import_tasks (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id       TEXT NOT NULL,
+      market         TEXT NOT NULL,
+      symbol         TEXT NOT NULL,
+      freq           TEXT NOT NULL,
+      state          TEXT NOT NULL,
+      attempts       INTEGER NOT NULL DEFAULT 0,
+      error_code     TEXT,
+      error_message  TEXT,
+      updated_at     TEXT NOT NULL,
+      UNIQUE(batch_id, market, symbol, freq),
+      FOREIGN KEY (batch_id) REFERENCES local_import_batches (batch_id)
         ON DELETE CASCADE
         ON UPDATE CASCADE
     );
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_tasks_batch_status
-      ON bulk_tasks(batch_id, status, id);
+    CREATE INDEX IF NOT EXISTS idx_local_import_tasks_batch_state
+      ON local_import_tasks(batch_id, state, id);
     """)
     cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_bulk_tasks_batch_key
-      ON bulk_tasks(batch_id, client_task_key);
+    CREATE INDEX IF NOT EXISTS idx_local_import_tasks_batch_symbol
+      ON local_import_tasks(batch_id, market, symbol, freq);
     """)
 
     conn.commit()

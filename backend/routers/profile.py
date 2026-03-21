@@ -1,24 +1,14 @@
 # backend/routers/profile.py
 # ==============================
-# 说明：档案快照路由（current_profile 对应的只读 HTTP 通道）
+# 说明：档案快照路由（profile_snapshot 对应的只读 HTTP 通道）
 #
-# 职责：
-#   - 提供单标的档案快照读取接口：
-#       GET /api/profile/current?symbol=...
-#   - 数据来源：
-#       symbol_index（基础索引字段）
-#       LEFT JOIN symbol_profile（档案字段）
-#   - 只读：
-#       不触发 Task，不做任何远程拉取；
-#       前端需先通过 POST /api/ensure-data + type='current_profile'
-#       触发档案同步，等 task_done 后再调用本接口读取快照。
+# 路径：
+#   GET /api/profile/current?symbol=...&market=...
 #
-# 返回约定：
-#   - 查到记录：
-#       { "ok": true, "item": { ...字段... }, "trace_id": "..." }
-#   - 未查到记录（symbol_index 中不存在）：
-#       { "ok": true, "item": null, "trace_id": "..." }
-#     不抛 404，交由前端决定如何提示。
+# 行为：
+#   - 仅从本地 DB 读取
+#   - 不触发 Task，不做任何同步
+#   - 按 (symbol, market) 联合主键查询
 # ==============================
 
 from __future__ import annotations
@@ -41,20 +31,16 @@ _LOG = get_logger("profile.router")
 async def api_get_profile_current(
     request: Request,
     symbol: str = Query(..., description="标的代码，如 600519 或 510300"),
+    market: str = Query(..., description="市场代码：SH / SZ / BJ"),
     trace_id: Optional[str] = Query(None, description="追踪ID（可选）"),
 ) -> Dict[str, Any]:
     """
-    获取单个标的的档案快照（current_profile 的只读 HTTP 通道）
+    获取单个标的的档案快照（profile_snapshot 的只读 HTTP 通道）
 
     行为说明：
       - 仅从本地 DB 读取，不触发任何 Task 或远程同步；
-      - 数据来源：
-          symbol_index  基础字段：
-            symbol, name, market, class, type, board, listing_date, updated_at
-          symbol_profile 档案字段：
-            total_shares, float_shares, total_value, nego_value,
-            pe_static, industry, region, concepts
-      - 若 symbol 在 symbol_index 中不存在：
+      - 查询语义：按 (symbol, market) 联合主键读取；
+      - 若 symbol_index 中不存在该记录：
           返回 ok=true, item=null
       - concepts 字段若为 JSON 字符串，将解析为列表；否则返回空列表。
     """
@@ -72,11 +58,12 @@ async def api_get_profile_current(
         message="GET /api/profile/current",
         extra={
             "symbol": symbol,
+            "market": market,
         },
     )
 
     try:
-        item = await asyncio.to_thread(_select_profile_for_symbol, symbol)
+        item = await asyncio.to_thread(_select_profile_for_symbol_market, symbol, market)
 
         if not item:
             # 未找到该 symbol，返回 ok=true, item=null
@@ -97,6 +84,7 @@ async def api_get_profile_current(
                 message="GET /api/profile/current done (not found)",
                 extra={
                     "symbol": symbol,
+                    "market": market,
                     "found": False,
                 },
             )
@@ -120,6 +108,7 @@ async def api_get_profile_current(
             message="GET /api/profile/current done",
             extra={
                 "symbol": symbol,
+                "market": market,
                 "found": True,
             },
         )
@@ -139,23 +128,24 @@ async def api_get_profile_current(
             message="GET /api/profile/current failed",
             extra={
                 "symbol": symbol,
+                "market": market,
                 "error": str(e),
             },
         )
         raise http_500_from_exc(e, trace_id=tid)
 
 
-def _select_profile_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+def _select_profile_for_symbol_market(symbol: str, market: str) -> Optional[Dict[str, Any]]:
     """
     从 symbol_index + LEFT JOIN symbol_profile 中查询单标的档案快照。
 
     Returns:
-        dict | None:
-          - dict: symbol_index 字段 + 档案字段（concepts 已解析为列表）
-          - None: symbol_index 中不存在该标的
+        dict | None
     """
     conn = get_conn()
     cur = conn.cursor()
+
+    market_u = str(market or "").strip().upper()
 
     cur.execute(
         """
@@ -165,23 +155,21 @@ def _select_profile_for_symbol(symbol: str) -> Optional[Dict[str, Any]]:
             s.market,
             s.class,
             s.type,
-            s.board,
             s.listing_date,
-            s.updated_at,
-            p.total_shares,
+            s.updated_at AS symbol_index_updated_at,
             p.float_shares,
-            p.total_value,
-            p.nego_value,
-            p.pe_static,
+            p.float_value,
             p.industry,
             p.region,
-            p.concepts
+            p.concepts,
+            p.updated_at AS profile_updated_at
         FROM symbol_index s
-        LEFT JOIN symbol_profile p ON s.symbol = p.symbol
-        WHERE s.symbol = ?
+        LEFT JOIN symbol_profile p
+          ON s.symbol = p.symbol AND s.market = p.market
+        WHERE s.symbol = ? AND s.market = ?
         LIMIT 1;
         """,
-        (symbol,),
+        (symbol, market_u),
     )
 
     row = cur.fetchone()

@@ -1,11 +1,15 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\SymbolListItem.vue -->
 <!-- 说明：可复用的列表项组件，用于联想、历史和自选。 -->
-<!-- FINAL FIX: 彻底移除内部所有状态获取逻辑，使其成为一个完全由 props 驱动的纯展示型（Dumb）组件。-->
+<!-- V3.0 - BREAKING: 选择事件升级为完整 item 语义（symbol + market）
+     本轮修正（双主键封口）：
+     - payload 中显式提供 identityKey
+     - 上层不应再把 symbol 当唯一 key 使用
+-->
 <template>
   <div
     class="suggest-item"
     :class="{ active: active }"
-    @mousedown.prevent="$emit('select', symbol)"
+    @mousedown.prevent="$emit('select', itemPayload)"
   >
     <div class="left">
       <span class="code">{{ symbol }}</span>
@@ -21,7 +25,7 @@
         :class="{ active: isStarred }"
         :title="starTitle"
         :aria-label="starTitle"
-        @mousedown.stop.prevent="$emit('toggleStar', symbol)"
+        @mousedown.stop.prevent="$emit('toggleStar', itemPayload)"
       >
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           <path
@@ -35,21 +39,43 @@
 </template>
 
 <script setup>
-// 这个组件现在是纯粹的展示组件，不包含任何业务逻辑。
-defineProps({
+import { computed } from "vue";
+
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function identityKey(symbol, market) {
+  return `${asStr(market).toUpperCase()}:${asStr(symbol)}`;
+}
+
+const props = defineProps({
   symbol: { type: String, required: true },
   name: { type: String, default: "" },
   market: { type: String, default: "" },
   type: { type: String, default: "" },
-  isStarred: { type: Boolean, default: false }, // 星标状态完全由父组件决定
+  isStarred: { type: Boolean, default: false },
   starTitle: { type: String, default: "加入/移除自选" },
   active: { type: Boolean, default: false },
 });
+
 defineEmits(["select", "toggleStar"]);
+
+const itemPayload = computed(() => {
+  const symbol = asStr(props.symbol);
+  const market = asStr(props.market).toUpperCase();
+
+  return {
+    symbol,
+    name: String(props.name || ""),
+    market,
+    type: String(props.type || ""),
+    identityKey: identityKey(symbol, market),
+  };
+});
 </script>
 
 <style scoped>
-/* 统一列宽 */
 :where(.suggest-item) {
   --col-code: 80px;
   --col-name: 1fr;

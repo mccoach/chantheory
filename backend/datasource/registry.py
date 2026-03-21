@@ -1,17 +1,13 @@
 # backend/datasource/registry.py
 # ==============================
-# 数据源方法目录 V11.0
+# 数据源方法目录 V13.0
 #
-# 本轮改动（symbol_index 专项）：
-#   - 标的列表主数据源已从交易所官网爬取切换为 TDX 本地文件解析
-#   - symbol list category 改为按市场分三类：
-#       * symbol_list_sh
-#       * symbol_list_sz
-#       * symbol_list_bj
-#
-# 说明：
-#   - 其他 provider（SSE/SZSE/Baostock/EastMoney/Sina）仍保留给其他业务使用
-#   - 本轮只移除 symbol_index 主链路对旧官网列表方案的依赖
+# 本轮改动（最终收尾）：
+#   - remote profile 能力已彻底删除
+#   - trade_calendar 已切换为 TDX 本地完整自然日历构建
+#   - 仅保留：
+#       * TDX 本地 symbol_index / profile_snapshot / trade_calendar
+#       * baostock / eastmoney / sina 的现有业务能力
 # ==============================
 
 from __future__ import annotations
@@ -19,8 +15,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Any, Dict, List, Tuple, Optional
 
 # 原子化调用函数
-from .providers import sse_adapter
-from .providers import szse_adapter
 from .providers import baostock_adapter as bs
 from .providers import eastmoney_adapter
 from .providers import sina_adapter
@@ -49,9 +43,8 @@ class MethodDescriptor:
 
 _ALL_METHODS: List[MethodDescriptor] = [
     # ==========================================================================
-    # 类别: 标的资产列表（主数据源已切换为 TDX 本地文件）
+    # 标的列表（TDX 本地）
     # ==========================================================================
-
     MethodDescriptor(
         id="tdx_local.symbol_list_sh",
         name="通达信本地-上交所全量标的列表",
@@ -62,7 +55,6 @@ _ALL_METHODS: List[MethodDescriptor] = [
         tags=("local", "tdx", "symbol", "list", "sh"),
         description="解析 hq_cache/shs.tnf，并左连接 base.dbf 的 listing_date",
     ),
-
     MethodDescriptor(
         id="tdx_local.symbol_list_sz",
         name="通达信本地-深交所全量标的列表",
@@ -73,7 +65,6 @@ _ALL_METHODS: List[MethodDescriptor] = [
         tags=("local", "tdx", "symbol", "list", "sz"),
         description="解析 hq_cache/szs.tnf，并左连接 base.dbf 的 listing_date",
     ),
-
     MethodDescriptor(
         id="tdx_local.symbol_list_bj",
         name="通达信本地-北交所全量标的列表",
@@ -86,9 +77,36 @@ _ALL_METHODS: List[MethodDescriptor] = [
     ),
 
     # ==========================================================================
-    # 类别: 静态与衍生数据（Baostock 因子 + 日历）
+    # 档案快照（TDX 本地）
     # ==========================================================================
+    MethodDescriptor(
+        id="tdx_local.profile_snapshot",
+        name="通达信本地-全市场档案快照",
+        provider="tdx_local",
+        category="profile_snapshot",
+        callable=tdx_local_adapter.get_profile_snapshot_tdx,
+        priority=10,
+        tags=("local", "tdx", "profile", "snapshot"),
+        description="解析 tnf/base.dbf/tdxhy.cfg/tdxzs3.cfg/infoharbor_block.dat，组装全市场 profile 原始快照",
+    ),
 
+    # ==========================================================================
+    # 交易日历（TDX 本地）
+    # ==========================================================================
+    MethodDescriptor(
+        id="tdx_local.trade_calendar",
+        name="通达信本地-完整自然日历",
+        provider="tdx_local",
+        category="trade_calendar",
+        callable=tdx_local_adapter.get_trade_calendar_tdx,
+        priority=10,
+        tags=("local", "tdx", "calendar"),
+        description="基于 needini.dat 节假日集合 + 周六周日规则，构建完整自然日历",
+    ),
+
+    # ==========================================================================
+    # 静态与衍生数据
+    # ==========================================================================
     MethodDescriptor(
         id="baostock.get_adj_factors",
         name="Baostock-前/后复权因子",
@@ -97,22 +115,11 @@ _ALL_METHODS: List[MethodDescriptor] = [
         callable=bs.get_raw_adj_factors_bs,
         priority=10,
         tags=("stock", "factor", "baostock"),
-        description="一次性从 Baostock 获取前/后复权因子原始数据（dividOperateDate/foreAdjustFactor/backAdjustFactor）",
-    ),
-
-    MethodDescriptor(
-        id="baostock.get_trade_calendar",
-        name="Baostock-交易日历",
-        provider="baostock",
-        category="trade_calendar",
-        callable=bs.get_trade_calendar_bs,
-        priority=10,
-        tags=("calendar", "baostock"),
-        description="从 Baostock 获取自1990年以来的所有交易日信息（含 is_trading_day 字段）",
+        description="一次性从 Baostock 获取前/后复权因子原始数据",
     ),
 
     # ==========================================================================
-    # 类别: 行情 K 线（东财 / 新浪）
+    # 行情 K 线（东财 / 新浪）
     # ==========================================================================
 
     # ---- 股票日K ----
@@ -203,9 +210,11 @@ for category in METHOD_CATALOG:
 def find_method_by_id(method_id: str) -> Optional[MethodDescriptor]:
     """通过ID快速查找一个方法描述符。"""
     for method in _ALL_METHODS:
-        if method.id == method_id:
-            return method
+        return_method = method if method.id == method_id else None
+        if return_method is not None:
+            return return_method
     return None
+
 
 def get_methods_for_category(category: str) -> List[MethodDescriptor]:
     """获取指定数据类别的所有可用方法，已按优先级排序。"""

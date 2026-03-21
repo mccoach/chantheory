@@ -1,9 +1,14 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
 <!-- ============================== -->
-<!-- V11.0 - REFACTOR: 启动阶段任务链路拉直（SymbolIndex/TradeCalendar）
-     - 交易日历：改为 useTradeCalendar().ensureReady()（唯一工作路径）
-     - 标的索引：改为 useSymbolIndex().ensureIndexReady({mode:'startup'})（唯一工作路径）
-     - 删除启动阶段重复的 ensureIndexFresh/declareSymbolIndex 双段绕路编排
+<!-- V17.0 - BREAKING: 启动编排回归单文件 composable + 唯一业务链
+     本轮目标：
+     - App.vue 只负责应用装配与 UI 容器
+     - 启动流程委托 useAppStartup.js
+     - 恢复当前标的身份后，不再额外显式 vm.reload()
+     - 唯一当前标的加载链路：
+         vm.setSymbolIdentity(...)
+           -> useMarketView watch([code, market])
+           -> reload()
 -->
 <template>
   <div v-if="!backendReady" class="loading-screen">
@@ -37,9 +42,9 @@
       </template>
 
       <template #footer-left>
-        <component 
-          v-if="footerLeftComp" 
-          :is="footerLeftComp" 
+        <component
+          v-if="footerLeftComp"
+          :is="footerLeftComp"
           v-bind="footerLeftProps"
         />
       </template>
@@ -54,9 +59,8 @@ import { useViewCommandHub } from "./composables/useViewCommandHub";
 import { useViewRenderHub } from "./composables/viewRenderHub";
 import { useDialogManager } from "./composables/useDialogManager";
 import { useExportController } from "./composables/useExportController";
-import { useEventStream } from "@/composables/useEventStream";
-import { useWatchlist } from "./composables/useWatchlist";
-import { waitBackendAlive } from "./utils/backendReady";
+import { useUserSettings } from "@/composables/useUserSettings";
+import { useAppStartup } from "@/composables/useAppStartup";
 
 import {
   registerGlobalHandlers,
@@ -70,11 +74,10 @@ import SymbolPanel from "./components/features/SymbolPanel.vue";
 import MainChartPanel from "./components/features/MainChartPanel.vue";
 import TechPanels from "./components/features/TechPanels.vue";
 import ModalDialog from "./components/ui/ModalDialog.vue";
-import { useTradeCalendar } from "@/composables/useTradeCalendar";
-import { useSymbolIndex } from "@/composables/useSymbolIndex";
 
 const backendReady = ref(false);
 
+const settings = useUserSettings();
 const hub = useViewCommandHub();
 const vm = useMarketView({ autoStart: false });
 const renderHub = useViewRenderHub();
@@ -83,6 +86,7 @@ const hotkeys = inject("hotkeys");
 const exportCtl = useExportController({
   isBusy: () => vm.loading.value,
 });
+
 renderHub.setMarketView(vm);
 
 provide("marketView", vm);
@@ -90,6 +94,12 @@ provide("viewCommandHub", hub);
 provide("renderHub", renderHub);
 provide("dialogManager", dialogManager);
 provide("exportController", exportCtl);
+
+const { startApp } = useAppStartup({
+  backendReady,
+  settings,
+  vm,
+});
 
 const activeDialog = computed(() => dialogManager.activeDialog.value);
 const dialogBodyRef = ref(null);
@@ -110,10 +120,6 @@ const footerLeftProps = computed(() => {
 
   return props && typeof props === "object" ? props : {};
 });
-
-function nowTs() {
-  return new Date().toISOString();
-}
 
 function handleModalClose() {
   try {
@@ -147,7 +153,6 @@ function handleFooterAction(action) {
     }
 
     const body = dialogBodyRef.value;
-
     const actionMap = body && typeof body === "object" ? body.dialogActions : null;
     const fn = actionMap && typeof actionMap === "object" ? actionMap[key] : null;
 
@@ -202,7 +207,9 @@ onMounted(async () => {
     onSave: () => {
       try {
         const acts = activeDialog.value?.footerActions || [];
-        const saveAct = Array.isArray(acts) ? acts.find((a) => String(a?.key || "") === "save") : null;
+        const saveAct = Array.isArray(acts)
+          ? acts.find((a) => String(a?.key || "") === "save")
+          : null;
         if (saveAct) {
           handleFooterAction(saveAct);
         }
@@ -212,64 +219,7 @@ onMounted(async () => {
     },
   });
 
-  const alive = await waitBackendAlive({ intervalMs: 200 });
-  backendReady.value = !!alive;
-
-  if (!backendReady.value) {
-    return;
-  }
-
-  console.log(`${nowTs()} [App] backend-ready, start-app`);
-
-  // 建立 SSE 连接（单例）
-  const { connect, connected } = useEventStream();
-  connect();
-
-  console.log(`${nowTs()} [App] waiting-sse-connection`);
-  let retries = 0;
-  while (!connected.value && retries < 50) {
-    await new Promise((r) => setTimeout(r, 100));
-    retries++;
-  }
-
-  if (!connected.value) {
-    console.error(`${nowTs()} [App] sse-timeout`);
-    alert("无法建立实时连接，请刷新页面");
-    return;
-  }
-
-  console.log(`${nowTs()} [App] sse-connected`);
-
-  // ===== 启动被动任务指令集（拉直版）=====
-
-  // 1) 交易日历：唯一入口 ensureReady（declare+wait+load snapshot）
-  try {
-    const tc = useTradeCalendar();
-    const r = await tc.ensureReady({ force_fetch: false, timeoutMs: 60000 });
-    if (r?.ok) console.log(`${nowTs()} [App] trade_calendar-ready`);
-    else console.warn(`${nowTs()} [App] trade_calendar-not-ready`);
-  } catch (e) {
-    console.error(`${nowTs()} [App] trade_calendar-init-failed`, e);
-  }
-
-  // 2) 当前标的行情（K+因子+档案）
-  await vm.reload({ force_refresh: false, with_profile: true });
-
-  // 3) 标的索引：唯一入口 ensureIndexReady(mode=startup)
-  try {
-    const si = useSymbolIndex();
-    const r = await si.ensureIndexReady({ mode: "startup" });
-    if (r?.ok) console.log(`${nowTs()} [App] symbol_index-ready`);
-    else console.warn(`${nowTs()} [App] symbol_index-not-ready`);
-  } catch (e) {
-    console.error(`${nowTs()} [App] symbol_index-init-failed`, e);
-  }
-
-  // 4) 自选列表（全量快照）
-  const wl = useWatchlist();
-  await wl.smartLoad();
-
-  console.log(`${nowTs()} [App] app-started`);
+  await startApp();
 });
 
 onBeforeUnmount(() => {

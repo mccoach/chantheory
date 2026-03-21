@@ -4,12 +4,17 @@
 #
 # 职责：
 #   - 解析 hq_cache/base.dbf
-#   - 当前输出 symbol_index / profile 可复用的基础补充字段
+#   - 输出 symbol_index / profile_snapshot 可复用的基础补充字段
 #
-# 当前字段：
+# 当前输出字段：
 #   - symbol
 #   - market
 #   - listing_date
+#   - float_shares_raw   (LTAG)
+#   - total_shares_raw   (ZGB)
+#   - region_code        (DY)
+#   - industry_code_raw  (HY)
+#   - fund_nav_raw       (TZMGJZ)
 #
 # 明确不做：
 #   - 不与 tnf 合并
@@ -97,6 +102,30 @@ def _normalize_dbf_listing_date_text(listing_raw: str) -> Optional[str]:
     return None
 
 
+def _normalize_numeric_text(val: Any) -> Optional[float]:
+    s = str(val or "").strip().replace(",", "")
+    if not s or s in ("-", "--"):
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _normalize_region_code(val: Any) -> Optional[str]:
+    s = str(val or "").strip()
+    if not s:
+        return None
+    return s
+
+
+def _normalize_industry_code(val: Any) -> Optional[str]:
+    s = str(val or "").strip()
+    if not s:
+        return None
+    return s
+
+
 def load_base_dbf_df_sync() -> pd.DataFrame:
     path = _base_dbf_file_path()
     if not path.exists():
@@ -107,7 +136,11 @@ def load_base_dbf_df_sync() -> pd.DataFrame:
     fields = _parse_dbf_fields(raw, header_len=header_len)
 
     if not fields:
-        return pd.DataFrame(columns=["symbol", "market", "listing_date"])
+        return pd.DataFrame(columns=[
+            "symbol", "market", "listing_date",
+            "float_shares_raw", "total_shares_raw",
+            "region_code", "industry_code_raw", "fund_nav_raw",
+        ])
 
     field_names = [f["name"] for f in fields]
 
@@ -148,15 +181,29 @@ def load_base_dbf_df_sync() -> pd.DataFrame:
             continue
 
         listing_date = _normalize_dbf_listing_date_text(listing_raw)
+        float_shares_raw = _normalize_numeric_text(row.get("LTAG")) if "LTAG" in row else None
+        total_shares_raw = _normalize_numeric_text(row.get("ZGB")) if "ZGB" in row else None
+        region_code = _normalize_region_code(row.get("DY")) if "DY" in row else None
+        industry_code_raw = _normalize_industry_code(row.get("HY")) if "HY" in row else None
+        fund_nav_raw = _normalize_numeric_text(row.get("TZMGJZ")) if "TZMGJZ" in row else None
 
         rows.append({
             "symbol": symbol,
             "market": market,
             "listing_date": listing_date,
+            "float_shares_raw": float_shares_raw,
+            "total_shares_raw": total_shares_raw,
+            "region_code": region_code,
+            "industry_code_raw": industry_code_raw,
+            "fund_nav_raw": fund_nav_raw,
         })
 
     if not rows:
-        return pd.DataFrame(columns=["symbol", "market", "listing_date"])
+        return pd.DataFrame(columns=[
+            "symbol", "market", "listing_date",
+            "float_shares_raw", "total_shares_raw",
+            "region_code", "industry_code_raw", "fund_nav_raw",
+        ])
 
     df = pd.DataFrame(rows)
     df = df.drop_duplicates(subset=["symbol", "market"], keep="last").reset_index(drop=True)
@@ -164,16 +211,9 @@ def load_base_dbf_df_sync() -> pd.DataFrame:
     if "listing_date" in df.columns:
         df["listing_date"] = df["listing_date"].astype("object")
 
-    _LOG.info(
-        "[TDX][BASE_DBF] parsed rows=%s file=%s",
-        len(df),
-        str(path),
-    )
+    _LOG.info("[TDX][BASE_DBF] parsed rows=%s file=%s", len(df), str(path))
     return df
 
 
 async def load_base_dbf_df() -> pd.DataFrame:
-    """
-    异步包装：在线程中解析 base.dbf
-    """
     return await asyncio.to_thread(load_base_dbf_df_sync)

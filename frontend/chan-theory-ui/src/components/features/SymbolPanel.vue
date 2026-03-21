@@ -1,7 +1,20 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
 <!-- ============================== -->
-<!-- V10.1 - REFACTOR: viewCommandHub 使用唯一注入路径（不再直接调用 useViewCommandHub 单例）
-     - 按“唯一工作路径/不留退路”原则：必须由 App.vue provide 的 hub 注入获取。
+<!-- V16.0 - BREAKING: 当前标的身份模型升级为双主键（symbol + market）严格化
+     变更：
+     - 搜索候选 / 历史 / 自选点击，统一传完整 identity
+     - vm.setSymbolIdentity({symbol, market}) 成为唯一切换入口
+     - 当前标的的持久化历史也升级为 symbol + market
+     - UI 层 identity 统一走 normalizeIdentity / identityKey
+
+     Local Import：
+     - 原“盘后远程下载”入口正式切换为“盘后数据导入”
+     - 打开新 LocalImportDialog.vue
+     - 旧远程下载主链路彻底退出引用
+
+     本轮改动（启动重复去重）：
+     - 删除 mounted 中对 wl.refresh() 的主动调用
+     - watchlist 启动加载唯一链路保留在 useAppStartup -> wl.smartLoad()
 -->
 <template>
   <div class="symbol-row">
@@ -51,10 +64,6 @@
         <span v-if="middleMarket" class="sym-meta-chip">
           市场：{{ middleMarket }}
         </span>
-        <span v-if="middleBoard" class="sym-meta-chip">|</span>
-        <span v-if="middleBoard" class="sym-meta-chip">
-          板块：{{ middleBoard }}
-        </span>
         <span v-if="middleClass" class="sym-meta-chip">|</span>
         <span v-if="middleClass" class="sym-meta-chip">
           类别：{{ middleClass }}
@@ -67,31 +76,19 @@
         <span v-if="middleListingDate" class="sym-meta-chip">
           上市日期：{{ middleListingDate }}
         </span>
-        <span v-if="middleMarket" class="sym-meta-chip">|</span>
+        <span v-if="profileInfo.updatedAt" class="sym-meta-chip">|</span>
         <span v-if="profileInfo.updatedAt" class="sym-meta-chip">
           档案更新：{{ formatUpdatedAt(profileInfo.updatedAt) }}
         </span>
       </div>
 
       <div class="info-line-2" v-if="hasProfileInfo">
-        <span v-if="profileInfo.totalShares" class="info-item">
-          总股本：{{ profileInfo.totalShares }}万股（份）
-        </span>
-        <span v-if="profileInfo.floatShares" class="info-item">|</span>
         <span v-if="profileInfo.floatShares" class="info-item">
           流通股：{{ profileInfo.floatShares }}万股（份）
         </span>
-        <span v-if="profileInfo.totalValue" class="info-item">|</span>
-        <span v-if="profileInfo.totalValue" class="info-item">
-          总市值：{{ profileInfo.totalValue }}亿元
-        </span>
-        <span v-if="profileInfo.negoValue" class="info-item">|</span>
-        <span v-if="profileInfo.negoValue" class="info-item">
-          流通市值：{{ profileInfo.negoValue }}亿元
-        </span>
-        <span v-if="profileInfo.peStatic" class="info-item">|</span>
-        <span v-if="profileInfo.peStatic" class="info-item">
-          静态PE：{{ formatPe(profileInfo.peStatic) }}倍
+        <span v-if="profileInfo.floatValue" class="info-item">|</span>
+        <span v-if="profileInfo.floatValue" class="info-item">
+          流通市值：{{ profileInfo.floatValue }}亿元
         </span>
         <span v-if="profileInfo.industry" class="info-item">|</span>
         <span v-if="profileInfo.industry" class="info-item">
@@ -115,11 +112,11 @@
       <div class="seg seg-download-refresh">
         <button
           class="seg-btn"
-          title="下载"
-          @click="openDownloadDialog"
+          title="盘后数据导入"
+          @click="openLocalImportDialog"
           :disabled="vm.loading.value"
         >
-          数据下载
+          盘后导入
         </button>
         <button
           class="seg-btn"
@@ -141,6 +138,7 @@ import { inject, ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
+import { useProfileSnapshot } from "@/composables/useProfileSnapshot";
 
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
@@ -149,17 +147,37 @@ import SymbolActions from "./symbol/SymbolActions.vue";
 import { formatDateTime, formatYmdInt } from "@/utils/timeFormat";
 import { parseTimeValue } from "@/utils/timeParse";
 
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function asMarket(x) {
+  return asStr(x).toUpperCase();
+}
+
+function normalizeIdentity(input = {}) {
+  return {
+    symbol: asStr(input.symbol),
+    market: asMarket(input.market),
+  };
+}
+
+function identityKey(symbol, market) {
+  return `${asMarket(market)}:${asStr(symbol)}`;
+}
+
 const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);
 const settings = useUserSettings();
-const { ready, search, findBySymbol, ensureIndexReady } = useSymbolIndex();
+const symbolIndex = useSymbolIndex();
+const profileSnapshot = useProfileSnapshot();
 const wl = useWatchlist();
 const dialogManager = inject("dialogManager", null);
-
-// 唯一工作路径：必须注入 hub（不再直接 useViewCommandHub）
 const hub = inject("viewCommandHub");
 
-const placeholder = "输入代码/拼音首字母（例：600519 或 gzymt）";
+const { ready, search, findBySymbol, ensureIndexReady } = symbolIndex;
+
+const placeholder = "输入代码/拼音首字母（例：000001 + 市场区分）";
 const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
 const isInputFocused = ref(false);
 const isWatchlistOpen = ref(false);
@@ -172,36 +190,46 @@ const refreshing = ref(false);
 const searchRef = ref(null);
 const watchlistRef = ref(null);
 
-const lastRenderedSymbol = ref(vm.code.value || "");
+const lastRenderedIdentity = ref(identityKey(vm.code.value, vm.market.value));
 
 watch(
-  () => vm.code.value,
-  (newCode) => {
-    lastRenderedSymbol.value = newCode || "";
+  [() => vm.code.value, () => vm.market.value],
+  ([newCode, newMarket]) => {
+    lastRenderedIdentity.value = identityKey(newCode, newMarket);
   }
 );
 
 async function selectItem(item) {
-  if (!item || !item.symbol) return;
-  const sym = String(item.symbol).trim();
+  const identity = normalizeIdentity(item);
+  if (!identity.symbol || !identity.market) return;
 
-  if (sym === lastRenderedSymbol.value) {
-    console.log(`[SymbolPanel] 🔄 标的未变化（${sym}），跳过重载`);
-
-    inputText.value = sym;
+  const nextIdentity = identityKey(identity.symbol, identity.market);
+  if (nextIdentity === lastRenderedIdentity.value) {
+    console.log(`[SymbolPanel] 🔄 标的未变化（${nextIdentity}），跳过重载`);
+    inputText.value = identity.symbol;
     invalidHint.value = "";
     suggestions.value = [];
     isInputFocused.value = false;
-
     return;
   }
 
-  console.log(`[SymbolPanel] 🔄 标的变化: ${lastRenderedSymbol.value} → ${sym}`);
+  console.log(`[SymbolPanel] 🔄 标的变化: ${lastRenderedIdentity.value} → ${nextIdentity}`);
 
-  inputText.value = sym;
-  vm.code.value = sym;
-  settings.setLastSymbol(sym);
-  settings.addSymbolHistoryEntry(sym);
+  inputText.value = identity.symbol;
+
+  settings.setLastSymbolIdentity({
+    symbol: identity.symbol,
+    market: identity.market,
+  });
+  settings.addSymbolHistoryEntry({
+    symbol: identity.symbol,
+    market: identity.market,
+  });
+
+  vm.setSymbolIdentity({
+    symbol: identity.symbol,
+    market: identity.market,
+  });
 
   invalidHint.value = "";
   suggestions.value = [];
@@ -209,31 +237,42 @@ async function selectItem(item) {
 }
 
 function tryCommitByInput() {
-  const t = (inputText.value || "").trim();
+  const t = asStr(inputText.value);
   if (!t) {
     invalidHint.value = "请输入标的代码或拼音首字母";
     return;
   }
-  let entry = findBySymbol(t);
-  if (!entry) {
-    const arr = search(t, 1);
+
+  let entry = null;
+
+  const arr = search(t, 20);
+  if (arr.length === 1) {
     entry = arr[0];
   }
+
   if (entry) {
     selectItem(entry);
   } else {
-    invalidHint.value = "无效标的，请重试";
+    invalidHint.value = "存在重码或无效标的，请从候选中明确选择";
   }
 }
 
 async function toggleStarImmediate(item) {
   try {
-    const sym = String(item?.symbol || "").trim();
-    if (!sym) return;
-    if (inWatchlistSet.value.has(sym)) {
-      await wl.removeOne(sym);
+    const identity = normalizeIdentity(item);
+    if (!identity.symbol || !identity.market) return;
+
+    const key = identityKey(identity.symbol, identity.market);
+    if (inWatchlistSet.value.has(key)) {
+      await wl.removeOne({
+        symbol: identity.symbol,
+        market: identity.market,
+      });
     } else {
-      await wl.addOne(sym);
+      await wl.addOne({
+        symbol: identity.symbol,
+        market: identity.market,
+      });
     }
   } catch {}
 }
@@ -250,15 +289,28 @@ async function forceRefreshSymbols() {
   refreshing.value = true;
 
   try {
-    console.log("[SymbolPanel] 🔄 强制刷新标的列表...");
+    console.log("[SymbolPanel] 🔄 强制刷新标的列表 + 档案快照...");
 
-    // 唯一入口：force
-    await ensureIndexReady({ mode: "force" });
+    const [indexRes, profileRes] = await Promise.all([
+      ensureIndexReady({ mode: "force", timeoutMs: 60000 }),
+      profileSnapshot.ensureReady({ timeoutMs: 60000 }),
+    ]);
 
-    console.log("[SymbolPanel] ✅ 标的列表刷新完成");
+    if (!indexRes?.ok) {
+      throw new Error(indexRes?.message || "标的列表刷新失败");
+    }
+    if (!profileRes?.ok) {
+      throw new Error(profileRes?.message || "档案快照刷新失败");
+    }
+
+    if (vm.code?.value && vm.market?.value) {
+      await vm.reload?.({ force_refresh: false, with_profile: true });
+    }
+
+    console.log("[SymbolPanel] ✅ 标的列表 + 档案快照刷新完成");
   } catch (e) {
     console.error("[SymbolPanel] ❌ 强制刷新失败", e);
-    alert(`标的列表刷新失败：${e.message || "网络错误"}`);
+    alert(`刷新失败：${e.message || "网络错误"}`);
   } finally {
     refreshing.value = false;
   }
@@ -280,7 +332,6 @@ function registerPanelHotkeys() {
 
 onMounted(() => {
   registerPanelHotkeys();
-  wl.refresh().catch(() => {});
   document.addEventListener("click", onDocClick);
 });
 
@@ -297,7 +348,9 @@ onBeforeUnmount(() => {
 const inWatchlistSet = computed(() => {
   const arr = Array.isArray(wl.items.value) ? wl.items.value : [];
   return new Set(
-    arr.map((it) => String((it && it.symbol) || "").trim()).filter(Boolean)
+    arr
+      .map((it) => identityKey(it?.symbol, it?.market))
+      .filter((x) => x && x !== ":")
   );
 });
 
@@ -310,21 +363,21 @@ const showHistory = computed(
   () =>
     isInputFocused.value &&
     !isWatchlistOpen.value &&
-    inputText.value.trim().length === 0
+    asStr(inputText.value).length === 0
 );
 
 const showSuggest = computed(
   () =>
     isInputFocused.value &&
     !isWatchlistOpen.value &&
-    inputText.value.trim().length > 0 &&
+    asStr(inputText.value).length > 0 &&
     suggestions.value.length > 0
 );
 
 function onFocus() {
   isInputFocused.value = true;
   invalidHint.value = "";
-  if (inputText.value?.trim()) {
+  if (asStr(inputText.value)) {
     updateSuggestions();
   }
   hotkeys?.pushScope("panel:symbol");
@@ -346,7 +399,7 @@ watch(inputText, () => {
 });
 
 function updateSuggestions() {
-  const q = inputText.value?.trim() || "";
+  const q = asStr(inputText.value);
   if (!q || !ready.value) {
     suggestions.value = [];
     return;
@@ -373,19 +426,17 @@ function onDocClick(e) {
   }
 }
 
-// ===== 中间栏信息 =====
-const middleCode = computed(() => (vm.code?.value || "").trim());
+const middleCode = computed(() => asStr(vm.code?.value));
+const middleMarket = computed(() => asMarket(vm.market?.value));
 
 const symbolEntry = computed(() => {
-  const sym = middleCode.value;
-  if (!sym) return null;
-  return findBySymbol(sym);
+  const symbol = middleCode.value;
+  const market = middleMarket.value;
+  if (!symbol || !market) return null;
+  return findBySymbol(symbol, market);
 });
 
 const middleName = computed(() => symbolEntry.value?.name || "");
-
-const middleMarket = computed(() => symbolEntry.value?.market || "");
-const middleBoard = computed(() => symbolEntry.value?.board || "");
 const middleClass = computed(() => symbolEntry.value?.class || "");
 const middleType = computed(() => symbolEntry.value?.type || "");
 const middleListingDate = computed(() =>
@@ -394,21 +445,17 @@ const middleListingDate = computed(() =>
 
 const middleTitle = computed(() =>
   middleName.value
-    ? `${middleName.value}（${middleCode.value}）`
-    : middleCode.value || ""
+    ? `${middleName.value}（${middleMarket.value}:${middleCode.value}）`
+    : `${middleMarket.value}:${middleCode.value}` || ""
 );
 
-// ===== 档案信息 =====
 const profileInfo = computed(() => {
   const pf = vm.profile?.value || null;
 
   if (!pf) {
     return {
-      totalShares: null,
       floatShares: null,
-      totalValue: null,
-      negoValue: null,
-      peStatic: null,
+      floatValue: null,
       industry: null,
       region: null,
       concepts: [],
@@ -417,11 +464,8 @@ const profileInfo = computed(() => {
   }
 
   return {
-    totalShares: pf.total_shares ?? null,
     floatShares: pf.float_shares ?? null,
-    totalValue: pf.total_value ?? null,
-    negoValue: pf.nego_value ?? null,
-    peStatic: pf.pe_static ?? null,
+    floatValue: pf.float_value ?? null,
     industry: pf.industry ?? null,
     region: pf.region ?? null,
     concepts: Array.isArray(pf.concepts) ? pf.concepts : [],
@@ -432,23 +476,14 @@ const profileInfo = computed(() => {
 const hasProfileInfo = computed(() => {
   const p = profileInfo.value;
   return !!(
-    p.totalShares ||
     p.floatShares ||
-    p.totalValue ||
-    p.negoValue ||
-    p.peStatic ||
+    p.floatValue ||
     p.industry ||
     p.region ||
     p.concepts.length > 0 ||
     p.updatedAt
   );
 });
-
-function formatPe(pe) {
-  const num = Number(pe);
-  if (!Number.isFinite(num) || num <= 0) return "-";
-  return num.toFixed(2);
-}
 
 function formatUpdatedAt(str) {
   if (!str) return "-";
@@ -464,35 +499,31 @@ function formatListingDate(intVal) {
   return formatYmdInt(n);
 }
 
-// 下载弹窗入口
-async function openDownloadDialog() {
+async function openLocalImportDialog() {
   try {
     if (!dialogManager || typeof dialogManager.open !== "function") return;
 
-    const mod = await import("@/components/ui/DataDownloadDialog.vue");
+    const mod = await import("@/components/ui/LocalImportDialog.vue");
 
     dialogManager.open({
-      title: "盘后下载",
+      title: "盘后数据导入",
       contentComponent: mod.default,
       props: {},
-
-      // CHANGED: 新增“终止下载”（触发 DataDownloadDialog.dialogActions.terminate_download）
-      // 说明：按你的要求，“终止下载”放到底栏右半区，与“数据下载”主按钮并排。
       footerActions: [
         {
-          key: "export_list",
-          label: "导出列表",
+          key: "start_import",
+          label: "开始导入",
           variant: "ok",
           disabled: false,
         },
         {
-          key: "download_data",
-          label: "数据下载",
+          key: "cancel_import",
+          label: "取消当前导入",
           disabled: false,
         },
         {
-          key: "terminate_download",
-          label: "终止下载",
+          key: "retry_import",
+          label: "重试失败任务",
           disabled: false,
         },
         {
@@ -502,13 +533,12 @@ async function openDownloadDialog() {
       ],
     });
   } catch (e) {
-    console.error("[SymbolPanel] openDownloadDialog failed:", e);
+    console.error("[SymbolPanel] openLocalImportDialog failed:", e);
   }
 }
 </script>
 
 <style scoped>
-/* 原样保留：CSS 未改 */
 .symbol-row {
   display: grid;
   grid-template-columns: auto 1fr auto;

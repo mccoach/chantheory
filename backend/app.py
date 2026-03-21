@@ -1,6 +1,18 @@
 # backend/app.py
 # ==============================
-# FastAPI 应用入口（Task/Job/SSE 版）
+# FastAPI 应用入口
+#
+# 本轮改动（盘后数据导入 import 第一阶段）：
+#   - 接入 /api/local-import 路由
+#   - 恢复挂载普通声明型任务路由 /api/ensure-data
+#     * 说明：这不是 old bulk
+#     * 仅用于 trade_calendar / symbol_index / profile_snapshot / current_kline / current_factors
+#   - 移除旧 bulk 恢复/GC 启动逻辑
+#   - 新增 local-import 启动恢复链路：
+#       * 发现上次异常中断的 running 批次
+#       * running batch -> paused
+#       * running task -> failed(INTERRUPTED)
+#   - SSE 通道保持复用 /api/events/stream
 # ==============================
 
 from __future__ import annotations
@@ -19,14 +31,15 @@ from backend.routers.symbols import router as symbols_router
 from backend.routers.user_config import router as user_config_router
 from backend.routers.watchlist import router as watchlist_router
 from backend.routers.events import router as events_router
-from backend.routers.data_sync import router as data_sync_router
 from backend.routers.factors import router as factors_router
 from backend.routers.profile import router as profile_router
 from backend.routers.trade_calendar import router as trade_calendar_router
-from backend.routers.server_identity import router as server_identity_router
+from backend.routers.local_import import router as local_import_router
+from backend.routers.data_sync import router as data_sync_router
 
 from backend.services.unified_sync_executor import get_sync_executor
 from backend.db.async_writer import get_async_writer
+from backend.services.local_import.recovery import recover_interrupted_local_import_batches
 from backend.utils.logger import get_logger
 from backend.utils.events import (
     subscribe as subscribe_event,
@@ -35,12 +48,9 @@ from backend.utils.events import (
 )
 from backend.utils.sse_manager import get_sse_manager
 
-from backend.services.server_identity import init_backend_instance_id
-from backend.db.bulk_batches import recover_incomplete_batches_to_paused, gc_delete_terminal_tasks
-
 _LOG = get_logger("app")
 
-app = FastAPI(title="ChanTheory API", version="8.2.0")
+app = FastAPI(title="ChanTheory API", version="10.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -115,34 +125,19 @@ async def on_startup() -> None:
     _EVENT_LOOP = asyncio.get_running_loop()
     subscribe_event(_forward_event_to_sse)
 
-    beid = init_backend_instance_id()
-    _LOG.info("backend_instance_id=%s", beid)
-
     _LOG.info("应用启动：开始初始化")
 
     ensure_initialized()
 
+    # local-import 启动恢复链路
     try:
-        n = await asyncio.to_thread(recover_incomplete_batches_to_paused, purpose="after_hours")
-        if n:
-            _LOG.info("[bulk] recover paused: %s batches", n)
+        recovered = await recover_interrupted_local_import_batches()
+        if recovered:
+            _LOG.warning("local-import 恢复：发现并暂停了 %s 个异常中断批次", recovered)
     except Exception as e:
-        _LOG.error("[bulk] recover failed: %s", e, exc_info=True)
-
-    try:
-        days = int(getattr(settings, "after_hours_tasks_retention_days", 2))
-        deleted = await asyncio.to_thread(
-            gc_delete_terminal_tasks,
-            retention_days=days,
-            purpose="after_hours",
-        )
-        if deleted:
-            _LOG.info("[bulk] GC deleted bulk_tasks rows=%s (retention_days=%s)", deleted, days)
-    except Exception as e:
-        _LOG.error("[bulk] GC failed: %s", e, exc_info=True)
+        _LOG.error("local-import 启动恢复失败: %s", e, exc_info=True)
 
     await writer.start()
-
     asyncio.create_task(executor.start())
 
     global _RUNTIME_METRICS_TASK
@@ -195,11 +190,12 @@ app.include_router(symbols_router)
 app.include_router(user_config_router)
 app.include_router(watchlist_router)
 app.include_router(events_router)
-app.include_router(data_sync_router)
 app.include_router(factors_router)
 app.include_router(profile_router)
 app.include_router(trade_calendar_router)
-app.include_router(server_identity_router)
+app.include_router(local_import_router)
+app.include_router(data_sync_router)
+
 
 if __name__ == "__main__":
     import uvicorn

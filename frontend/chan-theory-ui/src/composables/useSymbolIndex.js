@@ -1,17 +1,27 @@
 // frontend/chan-theory-ui/src/composables/useSymbolIndex.js
 // ==============================
-// V8.0 - BREAKING: SSE 契约对齐（task.finished）
+// V13.0 - REFACTOR: symbol_index 领域职责收口 + 双主键语义彻底化
 //
-// 变更：
-// - SSE 订阅：从 task_done 切换到 task.finished（新契约）
-// - 自动刷新：任何 symbol_index 任务成功完成时，触发一次 snapshot 刷新（不声明任务）
-// - 不做旧版兼容
+// 职责：
+//   1) symbol_index 快照缓存 / 读取 / 查询
+//   2) symbol_index 集中导入任务触发与等待确认
+//   3) 读取前避让“导入中”状态
+//
+// 本轮修正（启动重复去重 · 结构性收尾链路统一）：
+//   - 删除“模块内部监听 task.finished(symbol_index) 后自动再次 fetch 快照”的副作用路径
+//   - 保留唯一业务收尾链路：
+//       ensureIndexReady()
+//         -> declareSymbolIndex()
+//         -> waitTasksDone()
+//         -> fetchIndexSnapshot()
+//   - 说明：task.finished 仍然是唯一完成真相源；waitTasksDone 只是对该 SSE 事件的 Promise 化封装。
+//   - 因此，不应再保留第二条“收到同一完成事件后模块自行再刷快照”的并行收尾链路。
+//   - 严格双主键查询继续保留：findBySymbol(symbol, market) 不再允许 symbol-only fallback
 // ==============================
 
-import { ref } from "vue";
+import { ref, readonly } from "vue";
 import { api } from "@/api/client";
 import RAW from "@/assets/symbols.index.json";
-import { useEventStream } from "./useEventStream";
 import { declareSymbolIndex } from "@/services/ensureDataAPI";
 import { waitTasksDone } from "@/composables/useTaskWaiter";
 
@@ -19,10 +29,25 @@ const LS_KEY = "chan_symbol_index_v1";
 const LS_TS_KEY = "chan_symbol_index_updated_at";
 
 const ready = ref(false);
+const loading = ref(false);
+const error = ref("");
 const idx = ref([]);
+const activeTaskId = ref(null);
 
-// 可选拼音引擎（动态加载 tiny-pinyin）
 let TinyPinyinMod = null;
+
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function nowTs() {
+  return new Date().toISOString();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function ensurePinyinLib() {
   if (TinyPinyinMod) return true;
   try {
@@ -50,11 +75,6 @@ function saveCache(items, updatedAt) {
   } catch {}
 }
 
-function ts() {
-  return new Date().toISOString();
-}
-
-// 为条目补齐拼音字段 + 档案摘要字段
 function enrichPinyin(item) {
   const name = String(item.name || "");
   if (name && TinyPinyinMod?.isSupported?.()) {
@@ -70,58 +90,38 @@ function enrichPinyin(item) {
     item.pinyin = item.pinyin || "";
     item.pinyin_abbr = item.pinyin_abbr || "";
   }
-
-  // ===== 档案字段（驼峰命名，仅做摘要使用）=====
-  item.totalShares = item.total_shares || null;
-  item.floatShares = item.float_shares || null;
-  item.listingDate = item.listing_date || null;
-  item.industry = item.industry || null;
-  item.region = item.region || null;
-  item.concepts = Array.isArray(item.concepts) ? item.concepts : [];
-
-  // 扩展 symbol_profile 字段
-  item.totalValue = item.total_value || null;
-  item.negoValue = item.nego_value || null;
-  item.peStatic = item.pe_static || null;
-
-  // 索引扩展字段
-  item.board = item.board || null;
-  item.updatedAt = item.updated_at || null;
-
   return item;
 }
 
-// 从 /api/symbols/index 原始 items 构建前端索引
 function buildIndex(raw) {
   const arr = Array.isArray(raw) ? raw : [];
   return arr
-    .filter((x) => x && x.symbol && x.name)
+    .filter((x) => x && x.symbol && x.name && x.market)
     .map((x) =>
       enrichPinyin({
-        symbol: String(x.symbol).trim(),
-        name: String(x.name).trim(),
-        market: String(x.market || "").toUpperCase(),
-        class: x.class || null,
-        type: String(x.type || "").toUpperCase(),
-        board: x.board || null,
-        listing_date: x.listing_date || null,
-        updated_at: x.updated_at || null,
+        symbol: asStr(x.symbol),
+        name: asStr(x.name),
+        market: asStr(x.market).toUpperCase(),
+        class: x.class == null ? null : asStr(x.class),
+        type: x.type == null ? null : asStr(x.type),
+        listingDate:
+          x.listingDate != null
+            ? x.listingDate
+            : x.listing_date != null
+              ? x.listing_date
+              : null,
+        updatedAt:
+          x.updatedAt != null
+            ? x.updatedAt
+            : x.updated_at != null
+              ? x.updated_at
+              : null,
         pinyin: x.pinyin || "",
         pinyin_abbr: x.pinyin_abbr || "",
-
-        total_shares: x.total_shares || null,
-        float_shares: x.float_shares || null,
-        total_value: x.total_value || null,
-        nego_value: x.nego_value || null,
-        pe_static: x.pe_static || null,
-        industry: x.industry || null,
-        region: x.region || null,
-        concepts: x.concepts || [],
       })
     );
 }
 
-// 匹配规则：代码前缀 / 拼音前缀 / 拼音首字母前缀 / 中文包含
 function isMatch(q, it) {
   const s = q.toLowerCase();
   return (
@@ -137,37 +137,36 @@ function useLocalOrBuiltin() {
   if (cached && cached.length) {
     idx.value = buildIndex(cached);
     ready.value = true;
-    console.log(`${ts()} [SymbolIndex] load-cache count=${idx.value.length}`);
+    console.log(`${nowTs()} [SymbolIndex] load-cache count=${idx.value.length}`);
     return true;
   }
   idx.value = buildIndex(RAW);
   ready.value = true;
-  console.log(`${ts()} [SymbolIndex] use-builtin count=${idx.value.length}`);
+  console.log(`${nowTs()} [SymbolIndex] use-builtin count=${idx.value.length}`);
   return false;
 }
 
-/**
- * 从后端快照接口读取全量索引，更新 idx 与缓存
- */
 async function fetchIndexSnapshot() {
   try {
     const { data } = await api.get("/api/symbols/index", { timeout: 20000 });
+
     if (Array.isArray(data?.items) && data.items.length) {
       idx.value = buildIndex(data.items);
       ready.value = true;
       saveCache(data.items, data.updated_at || new Date().toISOString());
 
       console.log(
-        `${ts()} [SymbolIndex] snapshot-refreshed count=${data.items.length} updated_at=${data.updated_at || "null"}`
+        `${nowTs()} [SymbolIndex] snapshot-refreshed count=${data.items.length} updated_at=${data.updated_at || "null"}`
       );
 
       return { ok: true };
     }
-    console.warn(`${ts()} [SymbolIndex] snapshot-empty fallback-cache-or-builtin`);
+
+    console.warn(`${nowTs()} [SymbolIndex] snapshot-empty fallback-cache-or-builtin`);
     useLocalOrBuiltin();
     return { ok: false, message: "snapshot empty" };
   } catch (e) {
-    console.warn(`${ts()} [SymbolIndex] snapshot-fetch-failed fallback-cache-or-builtin`, e);
+    console.warn(`${nowTs()} [SymbolIndex] snapshot-fetch-failed fallback-cache-or-builtin`, e);
     useLocalOrBuiltin();
     return { ok: false, message: e?.message || "snapshot fetch failed" };
   }
@@ -181,49 +180,132 @@ function normalizeMode(mode) {
   return "startup";
 }
 
+async function waitUntilIdle({ timeoutMs = 60000, pollMs = 100 } = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 60000));
+
+  while (loading.value) {
+    if (Date.now() > deadline) {
+      throw new Error("[SymbolIndex] waitUntilIdle timeout");
+    }
+    await sleep(Math.max(20, Number(pollMs || 100)));
+  }
+
+  return { ok: true };
+}
+
 /**
- * 唯一对外入口：保证 symbol_index 已就绪（两入口统一）
+ * 唯一导入入口
  *
- * @param {{mode:'startup'|'force'|'snapshot'}} options
- * @returns {Promise<{ok:boolean, mode:string, message?:string}>}
+ * 语义：
+ * - snapshot：只刷新快照，不触发导入任务
+ * - startup / force：
+ *     * 若当前已有导入任务在跑，则等待它完成
+ *     * 否则触发一次 symbol_index 导入并等待完成
+ *     * 完成后刷新快照
+ *
+ * 本轮确认：
+ * - “完成”只认 waitTasksDone() 等到的 task.finished
+ * - 不再由模块内部另起 SSE 副作用链再次抓快照
  */
 async function ensureIndexReady(options = {}) {
   const mode = normalizeMode(options?.mode);
+  const timeoutMs = Math.max(1000, Number(options?.timeoutMs || 60000));
 
   await ensurePinyinLib();
 
-  // snapshot-only：只读快照（用于 SSE 回调/极简刷新）
   if (mode === "snapshot") {
     const r = await fetchIndexSnapshot();
-    return { ok: r.ok, mode, message: r.message };
+    return { ok: r.ok, mode, message: r.message, taskId: null };
   }
 
-  // startup / force：统一先声明任务（由后端做缺口判断），等 task.finished 后读快照
+  if (loading.value === true) {
+    try {
+      if (activeTaskId.value) {
+        await waitTasksDone({
+          taskIds: [String(activeTaskId.value)],
+          timeoutMs,
+        });
+      } else {
+        await waitUntilIdle({ timeoutMs });
+      }
+
+      const snap = await fetchIndexSnapshot();
+      return {
+        ok: snap.ok,
+        mode,
+        message: snap.message,
+        taskId: activeTaskId.value ? String(activeTaskId.value) : null,
+      };
+    } catch (e) {
+      error.value = e?.message || "symbol_index wait failed";
+      return {
+        ok: false,
+        mode,
+        message: error.value,
+        taskId: activeTaskId.value ? String(activeTaskId.value) : null,
+      };
+    }
+  }
+
+  loading.value = true;
+  error.value = "";
+  ready.value = false;
+
+  let tid = null;
+
   try {
-    const force_fetch = mode === "force";
-    const task = await declareSymbolIndex({ force_fetch });
-    const tid = task?.task_id ? String(task.task_id) : null;
+    const task = await declareSymbolIndex();
+    tid = task?.task_id ? String(task.task_id) : null;
+    activeTaskId.value = tid;
 
     if (tid) {
-      await waitTasksDone({ taskIds: [tid], timeoutMs: 60000 });
+      await waitTasksDone({
+        taskIds: [tid],
+        timeoutMs,
+      });
     }
-  } catch (e) {
-    // declare 失败：继续尝试读 snapshot（DB 可能已有）
-    console.error(`${ts()} [SymbolIndex] declare-task-failed mode=${mode}`, e);
-  }
 
-  const r = await fetchIndexSnapshot();
-  return { ok: r.ok, mode, message: r.message };
+    const snap = await fetchIndexSnapshot();
+    if (snap.ok) ready.value = true;
+
+    return {
+      ok: snap.ok,
+      mode,
+      message: snap.message,
+      taskId: tid,
+    };
+  } catch (e) {
+    error.value = e?.message || "symbol_index ensure failed";
+    return {
+      ok: false,
+      mode,
+      message: error.value,
+      taskId: tid,
+    };
+  } finally {
+    loading.value = false;
+    activeTaskId.value = null;
+  }
 }
 
-// 单例初始化标记（避免重复订阅）
-let _sseSubscribed = false;
+/**
+ * 读取前避让：
+ * - 若导入中，则等待导入完成
+ * - 若未导入中，则直接通过
+ */
+async function waitReadable(options = {}) {
+  try {
+    await waitUntilIdle({ timeoutMs: options?.timeoutMs || 60000 });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, message: e?.message || "waitReadable failed" };
+  }
+}
 
 export function useSymbolIndex() {
   if (!ready.value) {
-    // 启动时先用本地/内置，避免首屏空白
     useLocalOrBuiltin();
-    // 异步尝试加载拼音库并重建索引
+
     ensurePinyinLib().then((ok) => {
       if (ok) {
         const cached = loadCache();
@@ -233,41 +315,8 @@ export function useSymbolIndex() {
     });
   }
 
-  // ===== SSE 订阅：任何 symbol_index 任务完成时，自动刷新一次快照（不声明任务）=====
-  if (!_sseSubscribed) {
-    _sseSubscribed = true;
-
-    try {
-      const eventStream = useEventStream();
-
-      // NEW: task.finished（新契约）
-      eventStream.subscribe("task.finished", async (data) => {
-        try {
-          if (!data || data.type !== "task.finished") return;
-          if (data.task_type !== "symbol_index") return;
-
-          const st = String(data.overall_status || "");
-          if (st !== "success") {
-            console.warn(`${ts()} [SymbolIndex] task.finished non-success overall_status=${st} task_id=${data.task_id || "null"}`);
-            return;
-          }
-
-          console.log(`${ts()} [SymbolIndex] task.finished success -> snapshot refresh task_id=${data.task_id || "null"}`);
-
-          await ensureIndexReady({ mode: "snapshot" });
-        } catch (e) {
-          console.error(`${ts()} [SymbolIndex] sse-auto-refresh-failed`, e);
-        }
-      });
-
-      console.log(`${ts()} [SymbolIndex] sse-subscribe type=task.finished (task_type=symbol_index)`);
-    } catch (e) {
-      console.warn(`${ts()} [SymbolIndex] sse-subscribe-failed`, e);
-    }
-  }
-
   function search(query, limit = 20) {
-    const q = String(query || "").trim();
+    const q = asStr(query);
     if (!q) return [];
     const out = [];
     for (const it of idx.value) {
@@ -279,10 +328,21 @@ export function useSymbolIndex() {
     return out;
   }
 
-  function findBySymbol(symbol) {
-    const q = String(symbol || "").trim();
-    if (!q) return null;
-    return idx.value.find((it) => it.symbol === q) || null;
+  /**
+   * 严格双主键查询：
+   * - 必须同时提供 symbol + market
+   * - 不再允许 symbol-only fallback
+   */
+  function findBySymbol(symbol, market) {
+    const q = asStr(symbol);
+    const mk = asStr(market).toUpperCase();
+    if (!q || !mk) return null;
+
+    return (
+      idx.value.find(
+        (it) => it.symbol === q && asStr(it.market).toUpperCase() === mk
+      ) || null
+    );
   }
 
   function listAll({ clone = true } = {}) {
@@ -291,14 +351,17 @@ export function useSymbolIndex() {
   }
 
   return {
-    ready,
+    ready: readonly(ready),
+    loading: readonly(loading),
+    error: readonly(error),
+    activeTaskId: readonly(activeTaskId),
+
     search,
     findBySymbol,
-
-    // NEW: 唯一入口
-    ensureIndexReady,
-
-    // read-only
     listAll,
+
+    ensureIndexReady,
+    waitReadable,
+    waitUntilIdle,
   };
 }

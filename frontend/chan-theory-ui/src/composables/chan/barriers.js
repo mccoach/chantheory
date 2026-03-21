@@ -14,10 +14,12 @@
 //
 //   3) 新股豁免（利用真实交易日历）：
 //      - 若提供上市日期 ipoYmd（YYYYMMDD 整数），
-//        则从全局 trade_calendar 中取交易日序列：
-//          * ipoIdx = index(date == ipoYmd)
-//          * barIdx = index(date == ymd)
-//          * 若 0 <= barIdx - ipoIdx < 7，则当前 bar 视为“上市后前 7 个交易日”之一，豁免；
+//        则通过 useTradeCalendar() 提供的“交易日索引”能力进行判断：
+//          * getTradingIndex(date) 返回的是“交易日序号”
+//          * isWithinNTradingDays(...) 判断的是“交易日区间”，不是自然日区间
+//      - 注意：后端当前 /api/trade-calendar 返回的是“完整自然日历（交易日+非交易日）”；
+//        前端交易日过滤与交易日索引构建已在 useTradeCalendar 内部完成；
+//        本模块不直接消费原始日历 items，只依赖其对外暴露的交易日语义能力。
 //      - 若无法查到 trade_calendar 或 ipoYmd 缺失，则退回到“前7根K线豁免”（i < 7）。
 //
 //   4) 处理对象：始终作用于原始 K 线（candles），与合并 K 线无关。

@@ -1,12 +1,11 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useUserSettings.js
 // ==============================
-// V5.0 - 自动持久化版
+// V6.0 - 自动持久化版 + 当前标的双主键身份支持
 //
 // 变更要点：
-//   1. 删除原先“仅手动调用 saveAll 才落盘”的策略，对绝大多数写操作自动调用 saveAll。
-//   2. 视图状态 viewState（窗宽 / 右端时间）仍由 ViewCommandHub 通过防抖统一触发 saveAll，
-//      因此 viewState 的方法不做自动保存包装，避免高频拖拽时写入过于频繁。
-//   3. 所有以 getXxx 开头的方法视为只读访问，不触发持久化。
+//   1. 保持绝大多数写操作自动 saveAll。
+//   2. viewState 仍由 ViewCommandHub 统一节流保存。
+//   3. preferences / viewState 已支持 symbol + market 双主键语义。
 // ==============================
 
 import { reactive, readonly } from "vue";
@@ -100,7 +99,7 @@ export function useUserSettings() {
   Object.entries(rawMethods).forEach(([name, fn]) => {
     if (typeof fn !== "function") return;
 
-    const isGetter = /^get[A-Z]/.test(name); // 约定：getXxx 为只读方法
+    const isGetter = /^get[A-Z]/.test(name);
     const isViewStateMethod = viewStateMethodNames.has(name);
 
     // 视图状态方法 + getXxx 系列：不自动保存

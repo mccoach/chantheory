@@ -1,21 +1,22 @@
 # backend/db/calendar.py
 # ==============================
-# 交易日历表操作模块（V2.1 - upsert 加写锁）
+# 交易日历表操作模块（完整自然日历语义版）
 # ==============================
 
 from __future__ import annotations
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from backend.db.connection import get_conn, get_write_lock
 
 
 def upsert_trade_calendar(records: List[Dict[str, Any]]) -> int:
-    """批量插入或更新交易日历（串行写锁保护）"""
+    """批量插入或更新完整自然日历（串行写锁保护）"""
     if not records:
         return 0
 
     for rec in records:
-        rec["market"] = rec.get("market", "CN")
+        rec["market"] = str(rec.get("market") or "CN").strip().upper() or "CN"
+        rec["is_trading_day"] = 1 if int(rec.get("is_trading_day") or 0) == 1 else 0
 
     sql = """
     INSERT INTO trade_calendar (date, market, is_trading_day)
@@ -76,23 +77,3 @@ def select_trading_days_in_range(start_ymd: int, end_ymd: int, market: str = 'CN
     )
     rows = cur.fetchall()
     return [row[0] for row in rows]
-
-
-def get_latest_date(market: str = 'CN') -> Optional[int]:
-    """
-    获取本地交易日历的最晚日期
-
-    用途：
-      启动时判断是否需要更新日历
-
-    Returns:
-        Optional[int]: 最晚日期（YYYYMMDD），不存在返回 None
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT MAX(date) FROM trade_calendar WHERE market=? AND is_trading_day=1;",
-        (market,)
-    )
-    result = cur.fetchone()
-    return result[0] if result and result[0] else None

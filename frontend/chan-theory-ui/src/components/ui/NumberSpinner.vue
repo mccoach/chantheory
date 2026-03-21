@@ -1,11 +1,11 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\ui\NumberSpinner.vue -->
 <!--
-V3.6 - FIX: allowNullCommit 空值 Enter 提交时避免焦点争抢
+V3.7 - FIX: modelValue 显式允许 null（修复 Vue prop type warning）
 根因：
-  - Enter 提交成功后会触发全局 hotkeys 跳到下一格；
-  - allowNullCommit 分支里原先 nextTick 强制 focus 自身，导致与下一格争抢焦点。
+  - 上层（如 MainChartControls 的 ATR 基准价）会合法传入 null；
+  - 旧定义 type:[Number,String] 虽然 validator 放行 null，但 Vue 的 type 检查会先报 warning。
 修复：
-  - 移除 allowNullCommit 分支中的 nextTick focus，自身不再抢回焦点。
+  - 改为基于 validator 做精确校验，不再让 type 与真实输入语义冲突。
 -->
 <template>
   <div
@@ -41,7 +41,10 @@ import { computed, ref, watch } from "vue";
 import { clampNumber } from "@/utils/numberUtils";
 
 const props = defineProps({
-  modelValue: { type: [Number, String], required: true },
+  modelValue: {
+    required: true,
+    validator: (v) => v == null || typeof v === "number" || typeof v === "string",
+  },
   min: { type: Number, default: Number.NEGATIVE_INFINITY },
   max: { type: Number, default: Number.POSITIVE_INFINITY },
   step: { type: Number, default: 1 },
@@ -73,6 +76,8 @@ function roundTo(n, d) {
 }
 
 function formatDisplay(val) {
+  if (val == null || val === "") return "";
+
   let n = Number(val);
   if (!Number.isFinite(n)) return String(val ?? "");
 
@@ -196,7 +201,6 @@ function commitIfPossible(source) {
       editText.value = "";
     }
 
-    // FIX: 不再 nextTick 强制 focus 自身，避免与“跳下一格”争抢焦点
     return true;
   }
 

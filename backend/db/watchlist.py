@@ -5,7 +5,7 @@
 # ==============================
 
 from __future__ import annotations
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
 import json
 
@@ -143,13 +143,12 @@ def update_watchlist_sort_order(symbol: str, sort_order: int) -> bool:
 def select_user_watchlist_with_details() -> List[Dict[str, Any]]:
     """
     查询用户自选池（包含标的详细信息）
-    
-    Returns:
-        List[Dict]: 自选标的列表，包含：
-            自选池字段：
-              - symbol, added_at, source, note, tags, sort_order, updated_at
-            标的索引字段：
-              - name, market, type, listing_date
+
+    说明：
+      - user_watchlist 当前仍以 symbol 为主键；
+      - symbol_index 当前为 (symbol, market) 联合主键；
+      - 在当前可见业务里，watchlist 仍默认 symbol 唯一，因此这里按 symbol 关联，
+        再用子查询稳定取一条 market/name/type/listing_date。
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -163,12 +162,35 @@ def select_user_watchlist_with_details() -> List[Dict[str, Any]]:
         w.tags,
         w.sort_order,
         w.updated_at,
-        s.name,
-        s.market,
-        s.type,
-        s.listing_date
+        (
+          SELECT s.name
+          FROM symbol_index s
+          WHERE s.symbol = w.symbol
+          ORDER BY s.market ASC
+          LIMIT 1
+        ) AS name,
+        (
+          SELECT s.market
+          FROM symbol_index s
+          WHERE s.symbol = w.symbol
+          ORDER BY s.market ASC
+          LIMIT 1
+        ) AS market,
+        (
+          SELECT s.type
+          FROM symbol_index s
+          WHERE s.symbol = w.symbol
+          ORDER BY s.market ASC
+          LIMIT 1
+        ) AS type,
+        (
+          SELECT s.listing_date
+          FROM symbol_index s
+          WHERE s.symbol = w.symbol
+          ORDER BY s.market ASC
+          LIMIT 1
+        ) AS listing_date
     FROM user_watchlist w
-    LEFT JOIN symbol_index s ON w.symbol = s.symbol
     ORDER BY w.sort_order ASC, w.added_at ASC;
     """)
     

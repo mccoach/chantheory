@@ -1,12 +1,14 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\useViewCommandHub.js
 // ==============================
-// V5.7 - FIX: 右侧触底（最新）时刷新后保持“贴最新”
+// V6.0 - BREAKING: 当前标的身份升级为双主键语义（symbol + market）
+//
 // 变更说明：
-//   - 需求：当用户当前处于最右端（最新），刷新/数据延长后应继续贴住新的最新K；
-//           当用户在中段浏览时，刷新后应保持当前位置。
-//   - 修复点：原 setDatasetBounds 使用 atRightEdge（依赖旧 maxTsRef）判断，
-//            在 maxTs 更新后无法正确“贴新右端”。
-//   - 新逻辑：以“更新 maxTsRef 之前的旧 maxTsRef”判断是否在右端，然后在更新后对齐到新 maxTs。
+//   - 持久化视图状态时，key 不再是 symbol|freq，而是 market:symbol|freq
+//   - currentIdentity = { symbol, market, freq }
+//   - initFromPersist / ChangeSymbol / persist 都按双主键执行
+//
+// 保持：
+//   - 右侧触底刷新后继续贴最新的修复逻辑
 // ==============================
 
 import { ref, computed } from "vue";
@@ -19,6 +21,10 @@ import {
 
 let _hubSingleton = null;
 
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
 export function useViewCommandHub() {
   if (_hubSingleton) return _hubSingleton;
 
@@ -26,13 +32,12 @@ export function useViewCommandHub() {
 
   const barsCount = ref(1);
   const rightTs = ref(null);
-
-  // NEW: 最后一次显示 tooltip 的 bar.ts（键盘移动基点）
   const tipTs = ref(null);
 
   const allRows = ref(0);
   const currentFreq = ref(settings.preferences.freq || "1d");
   const currentSymbol = ref(settings.preferences.lastSymbol || "");
+  const currentMarket = ref(settings.preferences.lastMarket || "");
 
   const minTsRef = ref(null);
   const maxTsRef = ref(null);
@@ -93,15 +98,15 @@ export function useViewCommandHub() {
 
   function _doRealPersist() {
     try {
-      const symbol = String(currentSymbol.value || "").trim();
-      const freq = String(currentFreq.value || "").trim() || "1d";
+      const symbol = asStr(currentSymbol.value);
+      const market = asStr(currentMarket.value).toUpperCase();
+      const freq = asStr(currentFreq.value) || "1d";
 
-      // 窗口锚点（原语义）
-      settings.setViewBars(symbol, freq, barsCount.value);
-      settings.setRightTs(symbol, freq, rightTs.value);
+      if (!symbol || !market) return;
 
-      // tooltip 基点（新语义，独立于窗口锚点）
-      settings.setTipTs(symbol, freq, tipTs.value);
+      settings.setViewBars(symbol, market, freq, barsCount.value);
+      settings.setRightTs(symbol, market, freq, rightTs.value);
+      settings.setTipTs(symbol, market, freq, tipTs.value);
 
       settings.saveAll();
     } catch (e) {
@@ -154,17 +159,34 @@ export function useViewCommandHub() {
     });
   }
 
-  function initFromPersist(code, freq) {
-    currentSymbol.value = String(code || "").trim();
-    currentFreq.value = String(freq || "").trim() || "1d";
+  /**
+   * BREAKING:
+   * 初始化当前标的身份 + 视图状态
+   *
+   * @param {string} symbol
+   * @param {string} market
+   * @param {string} freq
+   */
+  function initFromPersist(symbol, market, freq) {
+    currentSymbol.value = asStr(symbol);
+    currentMarket.value = asStr(market).toUpperCase();
+    currentFreq.value = asStr(freq) || "1d";
 
     const savedBars = settings.getViewBars(
       currentSymbol.value,
+      currentMarket.value,
       currentFreq.value
     );
-    const savedTs = settings.getRightTs(currentSymbol.value, currentFreq.value);
-
-    const savedTipTs = settings.getTipTs(currentSymbol.value, currentFreq.value);
+    const savedTs = settings.getRightTs(
+      currentSymbol.value,
+      currentMarket.value,
+      currentFreq.value
+    );
+    const savedTipTs = settings.getTipTs(
+      currentSymbol.value,
+      currentMarket.value,
+      currentFreq.value
+    );
 
     barsCount.value = Math.max(1, Number(savedBars || 1));
     rightTs.value = Number.isFinite(+savedTs) ? +savedTs : null;
@@ -176,25 +198,20 @@ export function useViewCommandHub() {
   function setDatasetBounds({ minTs, maxTs, totalRows }) {
     allRows.value = Math.max(0, Number(totalRows || 0));
 
-    // ===== NEW: 用“旧 maxTsRef”判断刷新前是否处于最右端 =====
-    // 规则：
-    //   - 若 rightTs 为空：视为“跟随右端”（因为用户没有明确锚点）
-    //   - 若 oldMaxTs 有效且 rightTs == oldMaxTs：视为在右端
     const oldMaxTs = Number.isFinite(+maxTsRef.value) ? +maxTsRef.value : null;
     const wasAtRightEdge =
       rightTs.value == null ||
-      (oldMaxTs != null && Number.isFinite(rightTs.value) && Number(rightTs.value) === Number(oldMaxTs));
+      (oldMaxTs != null &&
+        Number.isFinite(rightTs.value) &&
+        Number(rightTs.value) === Number(oldMaxTs));
 
-    // ===== 更新边界 =====
     minTsRef.value = Number.isFinite(+minTs) ? +minTs : null;
     maxTsRef.value = Number.isFinite(+maxTs) ? +maxTs : null;
 
-    // ===== NEW: 若刷新前在右端，则贴到“新 maxTs” =====
     if (wasAtRightEdge && maxTsRef.value != null) {
       rightTs.value = +maxTsRef.value;
     }
 
-    // ===== 非右端：仅做边界钳制（保持当前位置）=====
     if (rightTs.value != null) {
       if (minTsRef.value != null && rightTs.value < +minTsRef.value) {
         rightTs.value = +minTsRef.value;
@@ -204,7 +221,6 @@ export function useViewCommandHub() {
       }
     }
 
-    // tipTs 只做边界钳制（不主动改语义）
     if (tipTs.value != null) {
       if (minTsRef.value != null && tipTs.value < +minTsRef.value) tipTs.value = +minTsRef.value;
       if (maxTsRef.value != null && tipTs.value > +maxTsRef.value) tipTs.value = +maxTsRef.value;
@@ -227,8 +243,9 @@ export function useViewCommandHub() {
       atRightEdge: atRightEdge.value,
       allRows: Math.max(0, Number(allRows.value || 0)),
       presetKey: currentPresetKey.value,
-      freq: String(currentFreq.value || "1d"),
-      symbol: String(currentSymbol.value || ""),
+      freq: asStr(currentFreq.value || "1d"),
+      symbol: asStr(currentSymbol.value || ""),
+      market: asStr(currentMarket.value || "").toUpperCase(),
     };
   }
 
@@ -264,7 +281,6 @@ export function useViewCommandHub() {
         break;
       }
 
-      // NEW: tooltip 基点同步（唯一语义入口：由 chart 的 showTip 事件驱动）
       case "SyncTipTs": {
         const next = Number.isFinite(+p.tipTs) ? +p.tipTs : null;
         if (next == null) break;
@@ -277,7 +293,6 @@ export function useViewCommandHub() {
 
         tipTs.value = v;
 
-        // 你要求：只要显示了 tooltip 的 bar，就立即持久化
         _persistImmediate();
 
         if (!p.silent) {
@@ -287,8 +302,8 @@ export function useViewCommandHub() {
       }
 
       case "ChangeFreq": {
-        const freqOld = String(currentFreq.value || "1d");
-        const freqNew = String(p.freq || freqOld);
+        const freqOld = asStr(currentFreq.value || "1d");
+        const freqNew = asStr(p.freq || freqOld);
 
         if (freqOld === freqNew) {
           _scheduleNotify();
@@ -297,7 +312,6 @@ export function useViewCommandHub() {
 
         const barsOld = Math.max(1, Number(barsCount.value || 1));
 
-        // 每日柱数表（交易时段：4小时 = 240分钟）
         const BARS_PER_DAY = {
           "1m": 240,
           "5m": 48,
@@ -312,16 +326,12 @@ export function useViewCommandHub() {
         const barsPerDayOld = BARS_PER_DAY[freqOld] || 1;
         const barsPerDayNew = BARS_PER_DAY[freqNew] || 1;
 
-        // 计算时间跨度（天）
         const timeSpanDays = barsOld / barsPerDayOld;
-
-        // 转换为新频率的 bars
         const barsTheoretical = Math.ceil(timeSpanDays * barsPerDayNew);
 
         currentFreq.value = freqNew;
         const total = Math.max(0, Number(p.allRows || allRows.value || 0));
 
-        // ===== 边界检查：右端超界 → 自动 ALL =====
         const rightTsCurrent = rightTs.value;
         const maxTsAvailable = maxTsRef.value;
 
@@ -337,8 +347,7 @@ export function useViewCommandHub() {
           rightTs.value = maxTsAvailable;
           autoAll = true;
         } else {
-          barsNew =
-            total > 0 ? Math.min(barsTheoretical, total) : barsTheoretical;
+          barsNew = total > 0 ? Math.min(barsTheoretical, total) : barsTheoretical;
         }
 
         barsCount.value = Math.max(1, barsNew);
@@ -350,7 +359,6 @@ export function useViewCommandHub() {
             rightTs.value = +p.maxTs;
         }
 
-        // tipTs 不改变语义，仅钳制
         if (tipTs.value != null) {
           if (minTsRef.value != null && tipTs.value < +minTsRef.value) tipTs.value = +minTsRef.value;
           if (maxTsRef.value != null && tipTs.value > +maxTsRef.value) tipTs.value = +maxTsRef.value;
@@ -361,7 +369,6 @@ export function useViewCommandHub() {
         break;
       }
 
-      // ===== 系统1：窗宽预设逻辑（保持不变）=====
       case "ChangeWidthPreset": {
         const presetKey = String(p.presetKey || "ALL").toUpperCase();
         const total = Math.max(0, Number(p.allRows || allRows.value || 0));
@@ -392,13 +399,20 @@ export function useViewCommandHub() {
         break;
       }
 
+      /**
+       * BREAKING:
+       * 当前标的身份切换统一入口
+       * payload: { symbol, market }
+       */
       case "ChangeSymbol": {
-        const sym = String(p.symbol || "").trim();
-        if (sym) {
-          currentSymbol.value = sym;
-          _persistImmediate();
-          _scheduleNotify();
-        }
+        const sym = asStr(p.symbol);
+        const mk = asStr(p.market).toUpperCase();
+
+        if (sym) currentSymbol.value = sym;
+        if (mk) currentMarket.value = mk;
+
+        _persistImmediate();
+        _scheduleNotify();
         break;
       }
 

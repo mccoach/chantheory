@@ -2,9 +2,9 @@
 # ==============================
 # DB 模块导出接口
 #
-# 本轮改动（symbol_index 专项）：
-#   - symbol_index 已切换为联合主键版
-#   - 其他表保持现状
+# 本轮改动：
+#   - 移除旧 bulk 相关导出
+#   - 仅保留当前仍在使用的正式导出
 # ==============================
 
 from backend.db.connection import get_conn, close_all_connections
@@ -50,27 +50,6 @@ from backend.db.calendar import (
     select_trading_days_in_range,
 )
 
-# bulk v2.1.2
-from backend.db.bulk_batches import (
-    get_batch_snapshot,
-    get_batch_snapshot_for_client,
-    get_active_batch_for_client,
-    list_queued_batches_for_client,
-    get_queue_position,
-    start_batch_idempotent,
-    list_queued_tasks_for_batch,
-    mark_task_running,
-    finalize_task_terminal,
-    enter_stopping,
-    apply_stopping_sweep,
-    resume_batch,
-    retry_failed_reset,
-    tick_pick_next_queued,
-    list_failed_tasks,
-    recover_incomplete_batches_to_paused,
-    gc_delete_terminal_tasks,
-)
-
 __all__ = [
     # 连接与Schema
     "get_conn",
@@ -107,23 +86,4 @@ __all__ = [
     "is_trading_day",
     "get_recent_trading_days",
     "select_trading_days_in_range",
-
-    # bulk
-    "get_batch_snapshot",
-    "get_batch_snapshot_for_client",
-    "get_active_batch_for_client",
-    "list_queued_batches_for_client",
-    "get_queue_position",
-    "start_batch_idempotent",
-    "list_queued_tasks_for_batch",
-    "mark_task_running",
-    "finalize_task_terminal",
-    "enter_stopping",
-    "apply_stopping_sweep",
-    "resume_batch",
-    "retry_failed_reset",
-    "tick_pick_next_queued",
-    "list_failed_tasks",
-    "recover_incomplete_batches_to_paused",
-    "gc_delete_terminal_tasks",
 ]

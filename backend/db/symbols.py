@@ -1,16 +1,24 @@
 # backend/db/symbols.py
 # ==============================
-# 说明：标的元数据表操作模块（symbol_index 专项重构版）
+# 说明：标的元数据表操作模块（symbol_index / symbol_profile 专项版）
 #
-# 本轮目标：
-#   - 仅围绕 symbol_index 完成新结构改造
-#   - 新结构：
-#       symbol + market 联合主键
-#       字段：symbol, market, name, class, type, listing_date, updated_at
+# 当前结构：
+#   - symbol_index：联合主键 (symbol, market)
+#   - symbol_profile：联合主键 (symbol, market)
 #
 # 注意：
-#   - 本轮严格控制范围，不扩散到 symbol_profile 的联合主键重构
-#   - symbol_profile 相关函数先保持现状
+#   - 本轮 symbol_profile 已彻底切换为本地批量快照极简版
+#   - 旧 total_shares / total_value / nego_value / pe_static 已删除
+#
+# 字段单位约定（symbol_profile）：
+#   - float_shares : 万股 / 万份
+#   - float_value  : 万元
+#
+# 本轮最终修复：
+#   - symbol_profile 写库前，先一次性读取 symbol_index 的有效 (symbol, market) 集合；
+#   - 仅对存在于 symbol_index 的记录执行批量 upsert；
+#   - 不存在于 symbol_index 的记录直接跳过；
+#   - 目的：避免单条孤儿记录触发外键失败，导致整批 profile 回滚。
 # ==============================
 
 from __future__ import annotations
@@ -195,125 +203,135 @@ def get_listing_date(symbol: str, market: str) -> Optional[int]:
 
 
 # ==============================================================================
-# symbol_profile 表操作
+# symbol_profile 表操作（联合主键极简版）
 # ==============================================================================
 
 def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
     """
-    批量插入或更新标的档案（新字段版）。
+    批量插入或更新标的档案（联合主键极简版）。
 
     字段语义：
-      - symbol       (str):   必需
-      - total_shares (float): 总股本/总份额（万股/万份，两位小数）
-      - float_shares (float): 流通股本/总份额（万股/万份，两位小数）
-      - total_value  (float): 总市值（亿元，两位小数）
-      - nego_value   (float): 流通市值（亿元，两位小数）
-      - pe_static    (float): 静态市盈率（倍，两位小数）
-      - industry     (str):   行业名称
-      - region       (str):   地区（省级）
+      - symbol       (str): 必需
+      - market       (str): 必需，SH/SZ/BJ
+      - float_shares (float): 流通股本 / 流通份额，单位：万股 / 万份
+      - float_value  (float): 流通市值，单位：万元
+      - industry     (str): 行业名称
+      - region       (str): 地域名称
       - concepts     (list/str/None): 概念标签列表，内部 JSON 字符串存储
-      - updated_at   (str):   更新时间（ISO8601）
+      - updated_at   (str): 更新时间（ISO8601）
 
-    规则：
-      - 对于无来源的字段，上游应传入 None；本函数不再进行任何推断或填充。
-      - concepts 若为 list，则转为 JSON 字符串存储；若为 None/空串则存 NULL。
-
-    Args:
-        profiles: 字典列表
-
-    Returns:
-        int: 影响的行数
+    最终写库策略：
+      - 先一次性读取 symbol_index 的有效 (symbol, market) 集合；
+      - 仅对有效集合中的 profile 记录执行批量 upsert；
+      - 无效记录直接跳过，不触发外键失败。
     """
     if not profiles:
         return 0
 
-    conn = get_conn()
-    cur = conn.cursor()
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
 
-    sql = """
-    INSERT INTO symbol_profile (
-        symbol,
-        total_shares,
-        float_shares,
-        total_value,
-        nego_value,
-        pe_static,
-        industry,
-        region,
-        concepts,
-        updated_at
-    )
-    VALUES (
-        :symbol,
-        :total_shares,
-        :float_shares,
-        :total_value,
-        :nego_value,
-        :pe_static,
-        :industry,
-        :region,
-        :concepts,
-        :updated_at
-    )
-    ON CONFLICT(symbol) DO UPDATE SET
-        total_shares = COALESCE(excluded.total_shares, symbol_profile.total_shares),
-        float_shares = COALESCE(excluded.float_shares, symbol_profile.float_shares),
-        total_value  = COALESCE(excluded.total_value,  symbol_profile.total_value),
-        nego_value   = COALESCE(excluded.nego_value,   symbol_profile.nego_value),
-        pe_static    = COALESCE(excluded.pe_static,    symbol_profile.pe_static),
-        industry     = COALESCE(excluded.industry,     symbol_profile.industry),
-        region       = COALESCE(excluded.region,       symbol_profile.region),
-        concepts     = COALESCE(excluded.concepts,     symbol_profile.concepts),
-        updated_at   = excluded.updated_at;
-    """
+        sql = """
+        INSERT INTO symbol_profile (
+            symbol,
+            market,
+            float_shares,
+            float_value,
+            industry,
+            region,
+            concepts,
+            updated_at
+        )
+        VALUES (
+            :symbol,
+            :market,
+            :float_shares,
+            :float_value,
+            :industry,
+            :region,
+            :concepts,
+            :updated_at
+        )
+        ON CONFLICT(symbol, market) DO UPDATE SET
+            float_shares = COALESCE(excluded.float_shares, symbol_profile.float_shares),
+            float_value  = COALESCE(excluded.float_value,  symbol_profile.float_value),
+            industry     = COALESCE(excluded.industry,     symbol_profile.industry),
+            region       = COALESCE(excluded.region,       symbol_profile.region),
+            concepts     = COALESCE(excluded.concepts,     symbol_profile.concepts),
+            updated_at   = excluded.updated_at;
+        """
 
-    now = datetime.now().isoformat()
-    prepared: List[Dict[str, Any]] = []
+        now = datetime.now().isoformat()
+        prepared: List[Dict[str, Any]] = []
 
-    for p in profiles:
-        if not isinstance(p, dict):
-            raise TypeError(
-                f"upsert_symbol_profile expects dict profiles, got {type(p).__name__}"
-            )
+        for p in profiles:
+            if not isinstance(p, dict):
+                raise TypeError(
+                    f"upsert_symbol_profile expects dict profiles, got {type(p).__name__}"
+                )
 
-        record: Dict[str, Any] = {
-            "symbol": p.get("symbol"),
-            "total_shares": p.get("total_shares"),
-            "float_shares": p.get("float_shares"),
-            "total_value": p.get("total_value"),
-            "nego_value": p.get("nego_value"),
-            "pe_static": p.get("pe_static"),
-            "industry": p.get("industry"),
-            "region": p.get("region"),
-            # updated_at：无条件覆盖为 now，忽略调用方传入的任何值
-            "updated_at": now,
+            symbol = str(p.get("symbol") or "").strip()
+            market = str(p.get("market") or "").strip().upper()
+
+            if not symbol:
+                raise ValueError("upsert_symbol_profile: symbol is required")
+            if market not in ("SH", "SZ", "BJ"):
+                raise ValueError(f"upsert_symbol_profile: invalid market={market!r}")
+
+            record: Dict[str, Any] = {
+                "symbol": symbol,
+                "market": market,
+                "float_shares": p.get("float_shares"),
+                "float_value": p.get("float_value"),
+                "industry": p.get("industry"),
+                "region": p.get("region"),
+                "updated_at": now,
+            }
+
+            concepts_val = p.get("concepts")
+            if isinstance(concepts_val, list):
+                record["concepts"] = json.dumps(concepts_val, ensure_ascii=False)
+            elif isinstance(concepts_val, str):
+                record["concepts"] = concepts_val
+            else:
+                record["concepts"] = None
+
+            prepared.append(record)
+
+        if not prepared:
+            return 0
+
+        # 一次性读取 symbol_index 当前有效联合键，避免逐条查询
+        cur.execute("SELECT symbol, market FROM symbol_index;")
+        valid_keys = {
+            (str(row[0]).strip(), str(row[1]).strip().upper())
+            for row in cur.fetchall()
         }
 
-        concepts_val = p.get("concepts")
-        if isinstance(concepts_val, list):
-            record["concepts"] = json.dumps(concepts_val, ensure_ascii=False)
-        elif isinstance(concepts_val, str):
-            record["concepts"] = concepts_val
-        else:
-            record["concepts"] = None
+        filtered_profiles = [
+            rec for rec in prepared
+            if (rec["symbol"], rec["market"]) in valid_keys
+        ]
 
-        prepared.append(record)
+        if not filtered_profiles:
+            return 0
 
-    cur.executemany(sql, prepared)
-    conn.commit()
-    return cur.rowcount
+        cur.executemany(sql, filtered_profiles)
+        conn.commit()
+        return cur.rowcount
 
 
-def select_symbol_profile(symbol: str) -> Optional[Dict[str, Any]]:
+def select_symbol_profile(symbol: str, market: str) -> Optional[Dict[str, Any]]:
     """
-    查询单个标的的详细档案。
-
-    Returns:
-        Optional[Dict]: 档案字典，不存在则返回 None
+    查询单个标的的详细档案（按联合主键）。
     """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM symbol_profile WHERE symbol=?;", (symbol,))
+    cur.execute(
+        "SELECT * FROM symbol_profile WHERE symbol=? AND market=?;",
+        (symbol, str(market).strip().upper()),
+    )
     row = cur.fetchone()
 
     if not row:
@@ -332,16 +350,9 @@ def select_symbol_profile(symbol: str) -> Optional[Dict[str, Any]]:
     return result
 
 
-# ==============================================================================
-# NEW: 查询 updated_at 相关方法
-# ==============================================================================
-
-def get_profile_updated_at(symbol: str) -> Optional[str]:
+def get_profile_updated_at(symbol: str, market: str) -> Optional[str]:
     """
     获取档案的最后更新时间。
-
-    Returns:
-        Optional[str]: ISO 格式时间字符串，不存在返回 None
     """
-    profile = select_symbol_profile(symbol)
+    profile = select_symbol_profile(symbol, market)
     return profile.get("updated_at") if profile else None

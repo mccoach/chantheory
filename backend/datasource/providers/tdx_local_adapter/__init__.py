@@ -6,10 +6,8 @@
 #   - get_symbol_list_sh_tdx : 上交所标的列表（本地 shs.tnf + base.dbf）
 #   - get_symbol_list_sz_tdx : 深交所标的列表（本地 szs.tnf + base.dbf）
 #   - get_symbol_list_bj_tdx : 北交所标的列表（本地 bjs.tnf + base.dbf）
-#
-# 说明：
-#   - 本包属于 provider 层，对外暴露“TDX 本地数据源如何形成 listing 原始表”
-#   - 更底层的文件格式解析能力已下沉到 backend.datasource.local_files
+#   - get_profile_snapshot_tdx : 全市场档案快照（本地 tnf + base.dbf + cfg + block）
+#   - get_trade_calendar_tdx : 完整自然日历（本地 needini.dat + 周六周日规则）
 # ==============================
 
 from __future__ import annotations
@@ -19,9 +17,13 @@ from .listing_tdx import (
     get_symbol_list_sz_tdx,
     get_symbol_list_bj_tdx,
 )
+from .profile_tdx import get_profile_snapshot_tdx
+from .calendar_tdx import get_trade_calendar_tdx
 
 __all__ = [
     "get_symbol_list_sh_tdx",
     "get_symbol_list_sz_tdx",
     "get_symbol_list_bj_tdx",
+    "get_profile_snapshot_tdx",
+    "get_trade_calendar_tdx",
 ]

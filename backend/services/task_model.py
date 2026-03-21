@@ -2,11 +2,11 @@
 # ==============================
 # 说明：Task 模型与构建工具（统一 Task 结构）
 #
-# 设计要点：
-#   - 一次 HTTP 请求 = 一个 Task；
-#   - Task 内部字段与《Task / Job / SSE 两级体系最终共识说明》对齐；
-#   - 提供 create_task(...) 工具函数，用于从请求载荷构建 Task；
-#   - class 字段（股票/基金）统一从 symbol_index 表推断。
+# 本轮改动：
+#   - 支持固定语义最小请求体任务：
+#       * symbol_index
+#       * profile_snapshot
+#   - current_profile 已废弃
 # ==============================
 
 from __future__ import annotations
@@ -25,20 +25,6 @@ _LOG = get_logger("task_model")
 
 @dataclass
 class Task:
-    """
-    Task：一次请求对应的主任务。
-
-    字段语义与共识文档保持一致：
-      - type    : 'current_kline' / 'symbol_index' / 'trade_calendar' / ...
-      - scope   : 'symbol' / 'global' / ...
-      - symbol  : 标的代码（scope='symbol' 时必填）
-      - freq    : 频率，仅 current_kline 有意义
-      - adjust  : 复权方式：'none'/'qfq'/'hfq'
-      - cls     : 标的类别：'stock'/'fund'/None（从 symbol_index 推断）
-      - params  : 任务专属参数（如 force_fetch/start_date/end_date 等）
-      - metadata: 运行时元信息（如 priority/created_at/source 等）
-    """
-
     task_id: str
     trace_id: Optional[str]
 
@@ -55,9 +41,6 @@ class Task:
 
 
 def _infer_class_from_db(symbol: Optional[str]) -> Optional[str]:
-    """
-    从 symbol_index 表推断标的类别 class：'stock'/'fund'/None
-    """
     s = (symbol or "").strip()
     if not s:
         return None
@@ -91,13 +74,6 @@ def _generate_task_id(
     source: str,
     trace_id: Optional[str],
 ) -> str:
-    """
-    生成可读性强的 task_id。
-
-    格式示例：
-      current_kline:symbol:510300:5m:qfq@20251212T071936(src=api/ensure-data,trace=REQ123)
-      symbol_index:global:ALL@20251212T071936(src=startup,trace=NA)
-    """
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     base_parts = [task_type, scope]
 
@@ -130,23 +106,6 @@ def create_task(
     source: str = "",
     priority: Optional[int] = None,
 ) -> Task:
-    """
-    从上层传入的语义参数构建 Task 对象。
-
-    参数：
-      - type     : 任务类型，如 'current_kline'/'symbol_index'/'trade_calendar'...
-      - scope    : 'symbol'/'global'/...
-      - symbol   : 标的代码（scope='symbol' 时建议非空）
-      - freq     : K 线频率（仅 current_kline 时使用）
-      - adjust   : 复权方式；仅 current_kline 时使用
-      - trace_id : 前端透传的 x-trace-id
-      - params   : 任务参数（包含 force_fetch/start_date/end_date 等）
-      - source   : 调用来源（如 'api/ensure-data'/'api/symbols/refresh'/'startup'）
-      - priority : 可选优先级，若为空则从 DATA_TYPE_DEFINITIONS 中读取
-
-    返回：
-      - Task 实例（已填充 class/metadata 等）
-    """
     t = (type or "").strip()
     sc = (scope or "").strip() or "symbol"
     sym = (symbol or "").strip() or None

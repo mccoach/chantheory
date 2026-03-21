@@ -1,24 +1,27 @@
 // frontend/src/services/ensureDataAPI.js
 // ==============================
-// V5.0 - Task/Job 契约适配版（单 Task 请求）
+// V8.0 - CHANGED: index/profile 固定语义导入任务 + 保留其它旧任务声明
 //
 // 职责：
-//   - 为 /api/ensure-data 提供薄封装（每次请求 = 一个 Task）；
-//   - 不做任何业务编排，只负责声明 Task 并返回响应；
-//   - 具体等待逻辑由 waitTasksDone（composables/useTaskWaiter.js）负责。
+//   - symbol_index / profile_snapshot：固定语义最小请求体
+//   - 其它尚未改造完成的任务：暂继续使用 declareTask 旧壳
+//
+// 说明：
+//   - 本文件只负责 HTTP 声明，不做等待、不做状态管理
+//   - current_profile 旧路径已彻底删除
 // ==============================
 
 import { api } from "@/api/client";
 
 /**
- * 底层声明函数：向 /api/ensure-data 发送一个 Task
+ * 旧通用壳任务声明（仅供尚未完成契约改造的任务继续使用）
  *
  * @param {Object} payload
- * @param {string} payload.type   - 任务类型，如 'current_kline'
- * @param {string} payload.scope  - 'global' | 'symbol'
+ * @param {string} payload.type
+ * @param {string} payload.scope
  * @param {string|null} [payload.symbol]
  * @param {string|null} [payload.freq]
- * @param {string} [payload.adjust='none'] - 'none' | 'qfq' | 'hfq'
+ * @param {string} [payload.adjust='none']
  * @param {Object} [payload.params]
  * @returns {Promise<{ok:boolean, task_id:string, message:string, trace_id:string|null}>}
  */
@@ -53,7 +56,22 @@ async function declareTask(payload) {
 }
 
 /**
- * 声明：同步交易日历（trade_calendar）
+ * 固定语义最小请求体任务声明
+ *
+ * @param {string} type
+ * @returns {Promise<{ok:boolean, task_id:string, message:string, trace_id:string|null}>}
+ */
+async function declareFixedTypeTask(type) {
+  const body = {
+    type: String(type || "").trim(),
+  };
+
+  const { data } = await api.post("/api/ensure-data", body);
+  return data;
+}
+
+/**
+ * trade_calendar（旧链路暂保留）
  *
  * @param {{force_fetch?:boolean}} [options]
  */
@@ -73,32 +91,30 @@ export async function declareTradeCalendar(options = {}) {
 }
 
 /**
- * 声明：同步标的列表（symbol_index）
- *
- * @param {{force_fetch?:boolean}} [options]
+ * symbol_index 集中导入（固定语义）
+ * 请求体：
+ *   { "type": "symbol_index" }
  */
-export async function declareSymbolIndex(options = {}) {
-  const force = !!options.force_fetch;
-
-  return declareTask({
-    type: "symbol_index",
-    scope: "global",
-    symbol: null,
-    freq: null,
-    adjust: "none",
-    params: {
-      force_fetch: force,
-    },
-  });
+export async function declareSymbolIndex() {
+  return declareFixedTypeTask("symbol_index");
 }
 
 /**
- * 声明：同步当前标的的 K 线（current_kline）
+ * profile 集中导入（固定语义）
+ * 请求体：
+ *   { "type": "profile_snapshot" }
+ */
+export async function declareProfileSnapshot() {
+  return declareFixedTypeTask("profile_snapshot");
+}
+
+/**
+ * current_kline（旧链路暂保留）
  *
  * @param {Object} options
- * @param {string} options.symbol   - 标的代码
- * @param {string} options.freq     - 频率（1m|5m|15m|30m|60m|1d|1w|1M）
- * @param {string} [options.adjust] - 'none' | 'qfq' | 'hfq'
+ * @param {string} options.symbol
+ * @param {string} options.freq
+ * @param {string} [options.adjust='none']
  * @param {boolean} [options.force_fetch]
  */
 export async function declareCurrentKline({
@@ -126,7 +142,7 @@ export async function declareCurrentKline({
 }
 
 /**
- * 声明：同步当前标的的复权因子（current_factors）
+ * current_factors（旧链路暂保留）
  *
  * @param {Object} options
  * @param {string} options.symbol
@@ -152,42 +168,13 @@ export async function declareCurrentFactors({ symbol, force_fetch = false }) {
 }
 
 /**
- * 声明：同步当前标的档案信息（current_profile）
- *
- * @param {Object} options
- * @param {string} options.symbol
- * @param {boolean} [options.force_fetch]
- */
-export async function declareCurrentProfile({ symbol, force_fetch = false }) {
-  if (!symbol) {
-    throw new Error(
-      `[ensureDataAPI] declareCurrentProfile 需要有效的 symbol，当前 symbol=${symbol}`
-    );
-  }
-
-  return declareTask({
-    type: "current_profile",
-    scope: "symbol",
-    symbol,
-    freq: null,
-    adjust: "none",
-    params: {
-      force_fetch: !!force_fetch,
-    },
-  });
-}
-
-/**
- * NEW: 批量入队（盘后批量任务契约）
- * - POST /api/ensure-data/bulk
- * - 本函数只做薄封装：不做分片/不做等待/不做重试（这些属于业务层，如 DataDownloadDialog）
+ * 盘后批量入队
  *
  * @param {object} payload
- * @returns {Promise<object>} - 后端 bulk 响应体（opaque，前端仅按契约字段读取）
+ * @returns {Promise<object>}
  */
 export async function declareEnsureDataBulk(payload) {
   const body = payload && typeof payload === "object" ? payload : {};
-
   const { data } = await api.post("/api/ensure-data/bulk", body);
   return data;
 }

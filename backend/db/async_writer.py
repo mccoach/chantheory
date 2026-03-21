@@ -1,13 +1,14 @@
 # backend/db/async_writer.py
 # ==============================
-# 异步数据库写入队列（V2.1 - 因子压缩 + candles.adjust 版）
-# 设计目标：
-#   1. 单线程写入（彻底避免锁冲突）
-#   2. 批量提交（减少fsync次数，提升性能）
-#   3. 自动合并（相同键的记录自动去重）
-#   4. 优雅关闭（确保数据落盘）
-#   5. 复权因子写入前自动压缩（仅保留数值变化的日期）
-#   6. NEW：K线写入支持 adjust 维度（'none'/'qfq'/'hfq'），主键为 (symbol,freq,ts,adjust)
+# 异步数据库写入队列
+#
+# 本轮改动（symbol_profile 专项）：
+#   - symbol_profile 改为联合主键 (symbol, market)
+#   - 字段收敛为：
+#       symbol, market,
+#       float_shares, float_value,
+#       industry, region, concepts,
+#       updated_at
 # ==============================
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ _LOG = get_logger("async_writer")
 
 class AsyncDBWriter:
     """异步数据库写入队列"""
-    
+
     def __init__(self):
         # 任务队列（最大1000个待处理任务）
         self.queue = asyncio.Queue(maxsize=1000)
@@ -90,43 +91,39 @@ class AsyncDBWriter:
         # 检查队列是否接近饱和
         if self.queue.qsize() > 900:
             _LOG.warning(
-                f"[异步写入] 队列接近饱和 ({self.queue.qsize()}/1000)，"
-                "等待刷新..."
+                f"[异步写入] 队列接近饱和 ({self.queue.qsize()}/1000)，等待刷新..."
             )
             await asyncio.sleep(0.1)
         
         await self.queue.put(('candles', records))
     
     async def write_factors(self, records: List[Dict[str, Any]]):
+        if not records:
+            return
+
+        await self.queue.put(("factors", records))
+
+    async def write_profile(self, records: List[Dict[str, Any]] | Dict[str, Any]):
         """
-        提交因子写入请求（异步，立即返回）
-        
-        Args:
-            records: 因子记录列表（原始稀疏序列，未压缩）
+        提交档案写入请求（支持单条或多条）。
         """
         if not records:
             return
-        
-        await self.queue.put(('factors', records))
-    
-    async def write_profile(self, record: Dict[str, Any]):
-        """
-        提交档案写入请求（异步，立即返回）
-        
-        Args:
-            record: 档案写入字典
-        """
-        if not record:
+
+        if isinstance(records, dict):
+            payload = [records]
+        else:
+            payload = list(records or [])
+
+        if not payload:
             return
-        
-        await self.queue.put(('profile', [record]))
-    
+
+        await self.queue.put(("profile", payload))
+
     async def _write_loop(self):
-        """写入循环（单线程执行，避免锁竞争）"""
         loop = asyncio.get_event_loop()
         while self.running:
             try:
-                # 等待新任务（超时0.1秒后检查是否需要刷新）
                 try:
                     table, payload = await asyncio.wait_for(
                         self.queue.get(),
@@ -324,18 +321,19 @@ class AsyncDBWriter:
                         f"(原始={len(self.factors_buffer)}, 去重后={len(factor_list)})"
                     )
                 else:
-                    _LOG.debug(
-                        "[批量写入] 因子：压缩后无有效记录，跳过写入"
-                    )
-            
-            # ===== 3. 写档案（自动去重）=====
+                    _LOG.debug("[批量写入] 因子：压缩后无有效记录，跳过写入")
+
+            # ===== 3. 写档案（联合主键极简版）=====
             if self.profiles_buffer:
-                unique_profiles: Dict[str, Dict[str, Any]] = {}
+                unique_profiles: Dict[tuple, Dict[str, Any]] = {}
+                now_iso = datetime.now().isoformat()
+
                 for rec in self.profiles_buffer:
                     r = dict(rec)
-                    # updated_at：无条件覆盖为本次写入时间
-                    r["updated_at"] = datetime.now().isoformat()
-                    key = r["symbol"]
+                    r["updated_at"] = now_iso
+                    market = str(r.get("market") or "").strip().upper()
+                    key = (r.get("symbol"), market)
+                    r["market"] = market
                     unique_profiles[key] = r
                 
                 profiles_list = list(unique_profiles.values())
@@ -343,11 +341,9 @@ class AsyncDBWriter:
                 sql_p = """
                 INSERT INTO symbol_profile (
                     symbol,
-                    total_shares,
+                    market,
                     float_shares,
-                    total_value,
-                    nego_value,
-                    pe_static,
+                    float_value,
                     industry,
                     region,
                     concepts,
@@ -355,22 +351,17 @@ class AsyncDBWriter:
                 )
                 VALUES (
                     :symbol,
-                    :total_shares,
+                    :market,
                     :float_shares,
-                    :total_value,
-                    :nego_value,
-                    :pe_static,
+                    :float_value,
                     :industry,
                     :region,
                     :concepts,
                     :updated_at
                 )
-                ON CONFLICT(symbol) DO UPDATE SET
-                    total_shares=COALESCE(excluded.total_shares, symbol_profile.total_shares),
+                ON CONFLICT(symbol, market) DO UPDATE SET
                     float_shares=COALESCE(excluded.float_shares, symbol_profile.float_shares),
-                    total_value=COALESCE(excluded.total_value, symbol_profile.total_value),
-                    nego_value=COALESCE(excluded.nego_value, symbol_profile.nego_value),
-                    pe_static=COALESCE(excluded.pe_static, symbol_profile.pe_static),
+                    float_value=COALESCE(excluded.float_value, symbol_profile.float_value),
                     industry=COALESCE(excluded.industry, symbol_profile.industry),
                     region=COALESCE(excluded.region, symbol_profile.region),
                     concepts=COALESCE(excluded.concepts, symbol_profile.concepts),

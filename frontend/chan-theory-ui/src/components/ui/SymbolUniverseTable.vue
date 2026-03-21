@@ -6,6 +6,11 @@
 - 竖向滚动仅覆盖表体：vscroll 只滚动 body，不含表头
 - 表头右侧滚动条等宽占位：用一次性测量 vscroll scrollbar 宽度对齐
 - 去高频/去绕弯：不在 scrollTop 时测 scrollbar 宽度；不让表头自身滚动；同步只做单向（hbar -> others）
+
+本轮新增（双主键/复合主键支持）：
+- 新增 rowKeyBuilder：由调用方提供“行唯一 key”的构造方式
+- 选择/星标/toggle 事件一律基于 row 对象本身，不再假定 symbol 是唯一主键
+- 默认兼容旧调用：若未传 rowKeyBuilder，则回退 symbol
 ============================== -->
 <template>
   <div class="sut-wrap">
@@ -14,9 +19,7 @@
     </div>
 
     <div class="table">
-      <!-- 冻结表头（不在竖向滚动范围内） -->
       <div class="thead-wrap">
-        <!-- 表头横向展示区：不允许用户横向滚动，只被动跟随 hbar -->
         <div class="thead-h" ref="theadHRef">
           <div class="thead-inner" :style="{ width: totalWidthPx + 'px' }">
             <div
@@ -34,13 +37,10 @@
           </div>
         </div>
 
-        <!-- 表头右侧滚动条占位：宽度=竖向滚动条宽度 -->
         <div class="thead-spacer" :style="{ width: vScrollBarWidthPx + 'px' }"></div>
       </div>
 
-      <!-- 竖向滚动视口（仅表体，滚动条固定在右侧） -->
       <div ref="vscrollRef" class="vscroll" @scroll="handleVScroll">
-        <!-- 内容横向滚动容器：仍隐藏其横向滚动条，但不再作为“入口”，只被动接受 hbar 同步 -->
         <div ref="hcontentRef" class="hcontent">
           <div class="table-inner" :style="{ width: totalWidthPx + 'px' }">
             <div class="tbody">
@@ -48,25 +48,25 @@
 
               <div
                 v-for="row in visibleRows"
-                :key="row.symbol"
+                :key="rowKey(row)"
                 class="tr"
-                :class="{ selected: isSelected(row.symbol) }"
+                :class="{ selected: isSelected(row) }"
                 :style="{ height: rowHeightPx + 'px' }"
               >
                 <div class="td c-check" :style="cellStyle('check')">
                   <input
                     type="checkbox"
-                    :checked="isSelected(row.symbol)"
-                    @change="$emit('toggle-select', row.symbol)"
+                    :checked="isSelected(row)"
+                    @change="$emit('toggle-select', row)"
                   />
                 </div>
 
                 <div class="td c-star" :style="cellStyle('star')">
                   <button
                     class="star-btn"
-                    :class="{ active: isStarred(row.symbol) }"
-                    :title="isStarred(row.symbol) ? '从自选移除' : '加入自选'"
-                    @click="$emit('toggle-star', row.symbol)"
+                    :class="{ active: isStarred(row) }"
+                    :title="isStarred(row) ? '从自选移除' : '加入自选'"
+                    @click="$emit('toggle-star', row)"
                   >
                     ★
                   </button>
@@ -87,7 +87,6 @@
         </div>
       </div>
 
-      <!-- 底部横向滚动条（固定显示在视口底部；唯一入口） -->
       <div ref="hbarRef" class="hbar" @scroll="handleHBarScroll">
         <div class="hbar-inner" :style="{ width: totalWidthPx + 'px' }"></div>
       </div>
@@ -113,6 +112,8 @@ const props = defineProps({
   approxVisibleRows: { type: Number, default: 20 },
 
   initialColWidths: { type: Object, default: () => ({}) },
+
+  rowKeyBuilder: { type: Function, default: null },
 });
 
 const emit = defineEmits(["sort", "toggle-select", "toggle-star"]);
@@ -120,14 +121,9 @@ const emit = defineEmits(["sort", "toggle-select", "toggle-star"]);
 const vscrollRef = ref(null);
 const hcontentRef = ref(null);
 const hbarRef = ref(null);
-
-// 表头展示容器（非滚动入口，仅用于被动设置 scrollLeft）
 const theadHRef = ref(null);
-
-// 竖向滚动条宽度（表头右侧占位）
 const vScrollBarWidthPx = ref(0);
 
-// 列宽固定策略（不允许改列宽）
 const columns = ref([
   { key: "check", label: "", sortable: true, min: 32, max: 90, default: 30, align: "center" },
   { key: "star", label: "自选", sortable: true, min: 40, max: 80, default: 48, align: "center" },
@@ -204,9 +200,16 @@ function onHeaderClick(col) {
   emit("sort", key);
 }
 
-// ===== 虚拟滚动：表体视口高度固定（总尺寸不变约束的关键）=====
-// 旧：vscroll(493) 内含表头30 => body viewport=463
-// 新：表头拆出 => vscroll 仅表体，直接固定为 463
+function rowKey(row) {
+  try {
+    if (typeof props.rowKeyBuilder === "function") {
+      const k = String(props.rowKeyBuilder(row) || "").trim();
+      if (k) return k;
+    }
+  } catch {}
+  return String(row?.symbol || "");
+}
+
 const viewportHeight = ref(463);
 
 const totalCountRef = computed(() => (Array.isArray(props.rows) ? props.rows.length : 0));
@@ -222,7 +225,6 @@ function handleVScroll(e) {
   onScroll(e);
 }
 
-// ===== 竖向滚动条宽度测量（只在必要时测）=====
 function updateVScrollBarWidth() {
   try {
     const el = vscrollRef.value;
@@ -232,7 +234,6 @@ function updateVScrollBarWidth() {
   } catch {}
 }
 
-// ===== 横向滚动：唯一入口 hbar；单向同步到 hcontent + thead =====
 let syncing = false;
 
 function syncHorizontalFromHBar() {
@@ -251,7 +252,6 @@ function handleHBarScroll() {
   syncHorizontalFromHBar();
 }
 
-// 初始化：按当前 hcontent 或 hbar 位置对齐（优先 hbar，作为唯一入口）
 function initHorizontalAlignment() {
   try {
     const left = hbarRef.value?.scrollLeft || 0;
@@ -271,7 +271,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", updateVScrollBarWidth);
 });
 
-// rows 数量变化可能导致“是否出现竖向滚动条”变化：下一拍重测一次宽度
 watch(
   () => totalCountRef.value,
   async () => {
@@ -307,7 +306,6 @@ const visibleRows = computed(() => {
   color: #ddd;
 }
 
-/* table */
 .table {
   display: flex;
   flex-direction: column;
@@ -315,7 +313,6 @@ const visibleRows = computed(() => {
   flex: 1;
 }
 
-/* 表头冻结区（独立） */
 .thead-wrap {
   display: flex;
   align-items: stretch;
@@ -327,7 +324,7 @@ const visibleRows = computed(() => {
 .thead-h {
   flex: 1;
   min-width: 0;
-  overflow: hidden; /* 表头不作为滚动入口 */
+  overflow: hidden;
 }
 
 .thead-inner {
@@ -336,14 +333,12 @@ const visibleRows = computed(() => {
   height: 30px;
 }
 
-/* 表头右侧滚动条占位 */
 .thead-spacer {
   flex-shrink: 0;
   height: 30px;
   background: #141414;
 }
 
-/* 竖向滚动视口：仅表体，固定高度 463px（保持总尺寸不变） */
 .vscroll {
   overflow-y: auto;
   overflow-x: hidden;
@@ -351,7 +346,6 @@ const visibleRows = computed(() => {
   min-height: 260px;
 }
 
-/* 内容横向滚动：隐藏自身横向滚动条（由底部 hbar 统一入口） */
 .hcontent {
   overflow-x: auto;
   overflow-y: hidden;
@@ -370,7 +364,6 @@ const visibleRows = computed(() => {
   min-height: 0;
 }
 
-/* 表头单元格 */
 .th {
   position: relative;
   height: 30px;
@@ -462,7 +455,6 @@ const visibleRows = computed(() => {
   background: rgba(241, 196, 15, 0.08);
 }
 
-/* 底部横向滚动条：固定显示在视口底部（不改实现方式） */
 .hbar {
   height: 14px;
   overflow-x: auto;

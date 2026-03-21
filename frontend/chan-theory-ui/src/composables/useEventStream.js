@@ -1,19 +1,12 @@
 // frontend/src/composables/useEventStream.js
 // ==============================
-// V11.0 - BREAKING: SSE 契约全面对齐（点分事件名 + 以 data.type 精确分发）
+// V11.1 - SSE 心跳日志降噪
 //
-// 变更说明（按后端新标准彻底切换，不做旧版兼容）：
-// - SSE endpoint：GET /api/events/stream（不变）
-// - 监听事件名：
-//     sse.connected / sse.heartbeat
-//     task.job.finished / task.finished
-//     bulk.batch.snapshot
-//     system.alert
-//     runtime.metrics
-// - 分发规则：
-//     * 前端以 payload.type 为准（精确匹配），不做 contains 猜测
-// - connected.value：仅由 sse.connected 驱动
-// - lastEventTime：收到任意已解析事件即更新
+// 说明：
+// - 保留 sse.heartbeat 的连接保活语义；
+// - 仍然更新 lastEventTime；
+// - 但在 DEV 下不再为 heartbeat 打印逐条日志，避免控制台刷屏；
+// - 其它业务事件仍保持原有日志输出。
 // ==============================
 
 import { ref } from "vue";
@@ -61,7 +54,6 @@ function createEventStreamSingleton() {
     const p = payload && typeof payload === "object" ? payload : null;
     const pType = asStr(p?.type);
 
-    // 契约：必须以 payload.type 精确分发；不允许猜测
     if (!pType) {
       if (import.meta.env.DEV) {
         console.warn(`${ts()} [SSE] drop: missing payload.type (event=${rawEventName})`);
@@ -76,23 +68,25 @@ function createEventStreamSingleton() {
     }
 
     if (import.meta.env.DEV) {
-      // 扁平日志：只打印关键字段，避免 console 展开大对象
-      const taskId = asStr(p?.task_id);
-      const taskType = asStr(p?.task_type);
-      const overall = asStr(p?.overall_status);
-      const batchId = asStr(p?.batch?.batch_id);
-      const batchState = asStr(p?.batch?.state);
-      const ver = p?.batch?.progress?.version;
+      // 心跳只保留语义，不打印逐条日志，避免刷屏
+      if (pType !== "sse.heartbeat") {
+        const taskId = asStr(p?.task_id);
+        const taskType = asStr(p?.task_type);
+        const overall = asStr(p?.overall_status);
+        const batchId = asStr(p?.batch?.batch_id);
+        const batchState = asStr(p?.batch?.state);
+        const ver = p?.batch?.progress?.version;
 
-      console.log(
-        `${ts()} [SSE] recv type=${pType}` +
-          (taskId ? ` task_id=${taskId}` : "") +
-          (taskType ? ` task_type=${taskType}` : "") +
-          (overall ? ` overall_status=${overall}` : "") +
-          (batchId ? ` batch_id=${batchId}` : "") +
-          (batchState ? ` batch_state=${batchState}` : "") +
-          (ver != null ? ` version=${ver}` : "")
-      );
+        console.log(
+          `${ts()} [SSE] recv type=${pType}` +
+            (taskId ? ` task_id=${taskId}` : "") +
+            (taskType ? ` task_type=${taskType}` : "") +
+            (overall ? ` overall_status=${overall}` : "") +
+            (batchId ? ` batch_id=${batchId}` : "") +
+            (batchState ? ` batch_state=${batchState}` : "") +
+            (ver != null ? ` version=${ver}` : "")
+        );
+      }
     }
 
     _notifyHandlers(pType, p);
@@ -112,7 +106,6 @@ function createEventStreamSingleton() {
 
     globalEventSource = new EventSource("/api/events/stream");
 
-    // ===== 新契约：点分事件名 =====
     const listen = (eventName) => {
       globalEventSource.addEventListener(eventName, (e) => {
         const payload = safeJsonParse(e?.data);
@@ -128,6 +121,10 @@ function createEventStreamSingleton() {
     listen("task.finished");
 
     listen("bulk.batch.snapshot");
+
+    // NEW: local import
+    listen("local_import.status");
+    listen("local_import.task_changed");
 
     listen("system.alert");
     listen("runtime.metrics");
@@ -181,7 +178,6 @@ function createEventStreamSingleton() {
   return { connect, disconnect, connected, lastEventTime, subscribe };
 }
 
-// ===== 显式单例 =====
 const _singleton = createEventStreamSingleton();
 
 export function useEventStream() {

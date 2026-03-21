@@ -1,16 +1,34 @@
 // E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\composables\settings\preferences.js
 // ==============================
 // 设置子模块：应用偏好与历史记录
-// V3.1 改动：
-//   - 修复 setAtrBasePrice 对 null/空串 的处理（避免 Number(null)===0 导致误判）
+//
+// V4.0 - BREAKING: 当前标的身份升级为双主键语义（symbol + market）
+// 改动：
+//   - 新增 lastMarket，与 lastSymbol 组成当前标的身份
+//   - symbolHistory 从“仅 symbol”升级为“symbol + market + ts”
+//   - 新增 getLastSymbolIdentity() 统一读取当前持久化身份
+//   - 新增 setLastSymbolIdentity() 统一写入当前持久化身份
+//   - addSymbolHistoryEntry 升级为写入双主键历史
+//
+// V3.1 兼容说明（已内化）：
+//   - setAtrBasePrice 对 null/空串 处理保持不变
 // ==============================
 
 import { reactive } from "vue";
-import { DEFAULT_APP_PREFERENCES, SYMBOL_HISTORY_MAX, ATR_BASE_PRICE_HISTORY_MAX } from "@/constants";
+import {
+  DEFAULT_APP_PREFERENCES,
+  SYMBOL_HISTORY_MAX,
+  ATR_BASE_PRICE_HISTORY_MAX,
+} from "@/constants";
+
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
 
 export function createPreferencesState(localData = {}) {
   const state = reactive({
     lastSymbol: localData.lastSymbol || "",
+    lastMarket: localData.lastMarket || "",
     lastStart: localData.lastStart || "",
     lastEnd: localData.lastEnd || "",
     hotkeyOverrides: localData.hotkeyOverrides || {},
@@ -39,9 +57,15 @@ export function createPreferencesState(localData = {}) {
           kind: String(x?.kind || "MACD"),
         }))
       : [],
+
+    // BREAKING: 历史记录升级为双主键语义
     symbolHistory: Array.isArray(localData.symbolHistory)
       ? localData.symbolHistory.filter(
-          (x) => x && typeof x.symbol === "string" && Number.isFinite(+x.ts)
+          (x) =>
+            x &&
+            typeof x.symbol === "string" &&
+            typeof x.market === "string" &&
+            Number.isFinite(+x.ts)
         )
       : [],
 
@@ -62,7 +86,21 @@ export function createPreferencesState(localData = {}) {
   });
 
   const setters = {
-    setLastSymbol: (s) => (state.lastSymbol = String(s || "")),
+    setLastSymbol: (s) => (state.lastSymbol = asStr(s)),
+    setLastMarket: (m) => (state.lastMarket = asStr(m).toUpperCase()),
+
+    // NEW: 当前标的身份统一入口
+    setLastSymbolIdentity: ({ symbol, market } = {}) => {
+      state.lastSymbol = asStr(symbol);
+      state.lastMarket = asStr(market).toUpperCase();
+    },
+
+    getLastSymbolIdentity: () => {
+      const symbol = asStr(state.lastSymbol);
+      const market = asStr(state.lastMarket).toUpperCase();
+      return { symbol, market };
+    },
+
     setLastStart: (s) => (state.lastStart = String(s || "")),
     setLastEnd: (s) => (state.lastEnd = String(s || "")),
     setHotkeyOverrides: (o) => (state.hotkeyOverrides = o || {}),
@@ -96,18 +134,32 @@ export function createPreferencesState(localData = {}) {
         ? arr.map((x) => ({ kind: String(x?.kind || "MACD") }))
         : [];
     },
-    addSymbolHistoryEntry: (symbol) => {
-      const sym = String(symbol || "").trim();
-      if (!sym) return;
+
+    // BREAKING: 历史记录统一存 symbol + market
+    addSymbolHistoryEntry: ({ symbol, market } = {}) => {
+      const sym = asStr(symbol);
+      const mk = asStr(market).toUpperCase();
+      if (!sym || !mk) return;
+
       const nowTs = Date.now();
       const list = Array.isArray(state.symbolHistory)
         ? state.symbolHistory.slice()
         : [];
-      const idx = list.findIndex((x) => String(x.symbol || "") === sym);
+
+      const idx = list.findIndex(
+        (x) =>
+          asStr(x?.symbol) === sym &&
+          asStr(x?.market).toUpperCase() === mk
+      );
       if (idx >= 0) list.splice(idx, 1);
-      list.unshift({ symbol: sym, ts: nowTs });
-      state.symbolHistory = list.slice(0, Math.max(1, Number(SYMBOL_HISTORY_MAX || 200)));
+
+      list.unshift({ symbol: sym, market: mk, ts: nowTs });
+      state.symbolHistory = list.slice(
+        0,
+        Math.max(1, Number(SYMBOL_HISTORY_MAX || 200))
+      );
     },
+
     getSymbolHistoryList: () => {
       const list = Array.isArray(state.symbolHistory)
         ? state.symbolHistory.slice()
@@ -134,7 +186,6 @@ export function createPreferencesState(localData = {}) {
       return Number.isFinite(+v) ? Math.round(+v) : null;
     },
 
-    // ===== FIX: 对 null/空串 特判，避免 Number(null)===0 =====
     setAtrBasePrice: (v) => {
       if (v == null || v === "") {
         state.atrBasePrice = null;
@@ -144,7 +195,6 @@ export function createPreferencesState(localData = {}) {
       }
     },
 
-    // ===== NEW: ATR 基准价历史（类似标的历史）=====
     addAtrBasePriceHistoryEntry: (v) => {
       const n = Number(v);
       if (!Number.isFinite(n)) return;

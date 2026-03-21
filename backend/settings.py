@@ -2,7 +2,10 @@
 # ==============================
 # 设置中心（统一归口版）
 #
-# 你只需要改这个文件，就能控制后端的关键行为（并发、限流、重试、日志等）。
+# 本轮改动（盘后数据导入 import 第一阶段）：
+#   - 新增 tdx_vipdoc_dir：通达信本地盘后数据目录（唯一真相源根目录）
+#   - 当前第一阶段只支持从 tdx_vipdoc_dir 递归扫描 .day 文件
+#   - 删除旧 after_hours 远程 bulk 专用配置，不再为旧机制保留冗余开关
 # ==============================
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 # --- 基础路径定义 ---
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
@@ -18,6 +21,7 @@ DEFAULT_DATA_DIR: Path = Path(os.getenv("CHAN_DATA_DIR", PROJECT_ROOT / "var"))
 DEFAULT_DB_PATH: Path = DEFAULT_DATA_DIR / "data.sqlite"
 DEFAULT_CONFIG_PATH: Path = DEFAULT_DATA_DIR / "config.json"
 DEFAULT_TDX_HQ_CACHE_DIR: Path = Path(r"D:\TDX_new\T0002\hq_cache")
+DEFAULT_TDX_VIPDOC_DIR: Path = Path(r"D:\TDX_new\vipdoc")
 
 
 @dataclass
@@ -51,13 +55,15 @@ class Settings:
     # user_config_path：用户配置文件路径（config.json）
     user_config_path: Path = DEFAULT_CONFIG_PATH
 
-    # NEW：通达信本地行情缓存目录（symbol_index 唯一数据源）
-    # 目录下当前使用的文件：
-    #   - shs.tnf
-    #   - szs.tnf
-    #   - bjs.tnf
-    #   - base.dbf
+    # TDX 本地行情缓存目录（symbol_index / profile_snapshot / trade_calendar）
     tdx_hq_cache_dir: Path = DEFAULT_TDX_HQ_CACHE_DIR
+
+    # NEW：通达信盘后本地数据根目录（盘后数据导入 import 唯一真相源）
+    # 说明：
+    #   - 必须从该根目录开始递归扫描全部子目录
+    #   - 当前第一阶段只纳入 .day 文件
+    #   - 将来 .lc1 / .lc5 会在同一递归扫描框架下扩展
+    tdx_vipdoc_dir: Path = DEFAULT_TDX_VIPDOC_DIR
 
     # ==========================================================
     # 三、网络与重试（影响“稳定性”与“速度”）
@@ -137,23 +143,7 @@ class Settings:
     sync_init_start_date: int = 19900101
 
     # ==========================================================
-    # 七、After Hours Bulk（盘后批量入队）
-    # ==========================================================
-    # bulk_max_jobs：单次 bulk 请求允许提交的最大 job 数（仅提示，不会拒绝）
-    bulk_max_jobs: int = 30000
-
-    # after_hours_priority：盘后任务优先级（数值越大优先级越低）
-    after_hours_priority: int = 1000
-
-    # NEW (After Hours Bulk v2.1.2 project edition):
-    # 成功/取消的批次任务明细保留天数（启动时清理过期 bulk_tasks）
-    after_hours_tasks_retention_days: int = 2
-
-    # NEW: Bulk inflight 闸门（硬限制每个 batch 同时 running 的任务数）
-    bulk_max_inflight_tasks: int = 8
-
-    # ==========================================================
-    # 八、日志系统（一般不用动；出问题时再调）
+    # 七、日志系统
     # ==========================================================
     log_file: Path = PROJECT_ROOT / "chan-theory.log"
 
@@ -200,6 +190,7 @@ class Settings:
         self.db_path = Path(self.db_path).resolve()
         self.user_config_path = Path(self.user_config_path).resolve()
         self.tdx_hq_cache_dir = Path(self.tdx_hq_cache_dir).resolve()
+        self.tdx_vipdoc_dir = Path(self.tdx_vipdoc_dir).resolve()
 
         # trace_id 白名单解析
         raw_trace_ids = str(self.log_debug_trace_ids_raw or "").strip()
@@ -263,18 +254,6 @@ class Settings:
             cleaned[k.strip().lower()] = {"rps": rps, "burst": burst}
         self.provider_limiters = cleaned
 
-        # # NEW: retention_days 防御性兜底
-        # try:
-        #     self.after_hours_tasks_retention_days = max(0, int(self.after_hours_tasks_retention_days))
-        # except Exception:
-        #     self.after_hours_tasks_retention_days = 2
-
-        # # NEW: bulk_max_inflight_tasks 兜底
-        # try:
-        #     self.bulk_max_inflight_tasks = max(1, int(self.bulk_max_inflight_tasks))
-        # except Exception:
-        #     self.bulk_max_inflight_tasks = 8
-
         self.log_module_levels = {
             "eastmoney_adapter.kline": "WARN",
             "sse_adapter": "WARN",
@@ -289,7 +268,7 @@ class Settings:
 settings = Settings()
 
 # ==============================
-# 数据类型完整定义（仅核心 Task 类型 + watchlist_update）
+# 数据类型完整定义
 # ==============================
 
 DATA_TYPE_DEFINITIONS = {
@@ -317,8 +296,8 @@ DATA_TYPE_DEFINITIONS = {
         "priority": 300,
         "sse_notify": True,
     },
-    "current_profile": {
-        "name": "当前档案",
+    "profile_snapshot": {
+        "name": "档案快照",
         "category": "profile",
         "priority": 400,
         "sse_notify": True,

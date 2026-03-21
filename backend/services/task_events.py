@@ -2,10 +2,13 @@
 # ==============================
 # Task / Job 事件工具（统一状态码/错误码/SSE协议版）
 #
-# 本轮关键修复：
-#   - Bulk 真相源写库（bulk_tasks.last_error_code/message）必须落最准确错误：
-#       * 以 task.finished.summary.extra.primary_error 为唯一首选来源
-#       * 不再使用 summary 内“占位错误”（如 INTERNAL_ERROR/see job result）
+# 本轮改动：
+#   - 彻底删除 old bulk hook
+#   - 本文件只负责：
+#       * task.job.finished 事件
+#       * task.finished 事件
+#   - 不再推进任何旧盘后 bulk 真相源
+#   - local-import 有自己独立的 SSE 事件链路，不走这里
 # ==============================
 
 from __future__ import annotations
@@ -15,13 +18,6 @@ from backend.services.task_model import Task
 from backend.utils.events import publish as publish_event
 from backend.utils.time import now_iso
 from backend.utils.logger import get_logger
-
-from backend.db.bulk_batches import finalize_task_terminal
-from backend.services.bulk_events import emit_bulk_batch_snapshot
-from backend.services.bulk_scheduler import (
-    tick as bulk_tick,
-    refill_inflight as bulk_refill_inflight,
-)
 
 _LOG = get_logger("task_events")
 
@@ -58,34 +54,6 @@ def _extract_error_fields(obj: Dict[str, Any] | None) -> Tuple[Optional[str], Op
 
     extra = obj.get("extra") if isinstance(obj.get("extra"), dict) else {}
     return code, msg, details, extra
-
-
-def _extract_primary_error_from_summary_extra(summary: Dict[str, Any] | None) -> Tuple[Optional[str], Optional[str]]:
-    """
-    方案A：从 task.finished.summary.extra.primary_error 提取真相源要写入的错误信息。
-
-    返回：
-      (error_code, error_message)
-    """
-    if not isinstance(summary, dict):
-        return None, None
-    extra = summary.get("extra") if isinstance(summary.get("extra"), dict) else {}
-    pe = extra.get("primary_error") if isinstance(extra.get("primary_error"), dict) else {}
-
-    code = pe.get("error_code")
-    if code is not None:
-        code = str(code).strip() or None
-
-    msg = pe.get("error_message")
-    if msg is not None:
-        msg = str(msg).strip() or None
-
-    # 如果 primary_error 没给 message，允许用 details 兜底
-    if not msg:
-        det = pe.get("details")
-        msg = str(det).strip() if det else None
-
-    return code, msg
 
 
 def emit_job_finished(
@@ -209,7 +177,7 @@ def emit_task_finished(
             "error_code": code,
             "error_message": err_msg,
             "details": details,
-            "extra": extra or {},  # 必含 primary_error（由配方提供）
+            "extra": extra or {},
         },
     }
 
@@ -223,79 +191,3 @@ def emit_task_finished(
         overall_status,
         code,
     )
-
-    # ==============================
-    # After Hours Bulk hook
-    # ==============================
-    try:
-        md = task.metadata or {}
-        batch_id = md.get("batch_id")
-        client_task_key = md.get("client_task_key")
-        client_instance_id = md.get("client_instance_id")
-
-        if isinstance(batch_id, str) and batch_id.strip() and isinstance(client_task_key, str) and client_task_key.strip():
-            bid = batch_id.strip()
-            ckey = client_task_key.strip()
-
-            if overall_status == "success":
-                term = "success"
-            elif overall_status == "cancelled":
-                term = "cancelled"
-            elif overall_status == "skipped":
-                term = "skipped"
-            else:
-                term = "failed"
-
-            # ===== NEW: 真相源错误信息从 primary_error 取 =====
-            pe_code, pe_msg = _extract_primary_error_from_summary_extra(event.get("summary"))
-
-            # 防御性回退：若 primary_error 缺失，再回退到 summary.error_code/error_message
-            if not pe_code and code:
-                pe_code = code
-            if not pe_msg and err_msg:
-                pe_msg = err_msg
-            if not pe_msg and isinstance(summ, dict) and summ.get("message"):
-                pe_msg = str(summ.get("message"))
-
-            snap = finalize_task_terminal(
-                batch_id=bid,
-                client_task_key=ckey,
-                terminal_status=term,
-                error_code=pe_code,
-                error_message=pe_msg,
-            )
-
-            if snap:
-                emit_bulk_batch_snapshot(snap)
-
-                st = str(snap.get("state") or "").strip().lower()
-
-                if st in ("failed", "success", "cancelled") and isinstance(client_instance_id, str) and client_instance_id.strip():
-                    awaitable = bulk_tick(
-                        client_instance_id=client_instance_id.strip(),
-                        trace_id=task.trace_id,
-                    )
-                    try:
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            loop.create_task(awaitable)
-                    except Exception:
-                        pass
-
-                if st == "running" and isinstance(client_instance_id, str) and client_instance_id.strip():
-                    awaitable2 = bulk_refill_inflight(
-                        batch_id=bid,
-                        client_instance_id=client_instance_id.strip(),
-                        trace_id=task.trace_id,
-                    )
-                    try:
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            loop.create_task(awaitable2)
-                    except Exception:
-                        pass
-
-    except Exception as e:
-        _LOG.error("[Bulk] task.finished hook failed: %s", e, exc_info=True)
