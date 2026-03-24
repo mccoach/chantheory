@@ -1,6 +1,11 @@
 # backend/services/local_import/repository/tasks.py
 # ==============================
 # 盘后数据导入 import - 任务表持久化访问
+#
+# 最终模型：
+#   - queued batch 不提前展开为 tasks
+#   - 只有 running/paused/最后有效终态批次允许在 tasks 表中存在任务
+#   - tasks 表始终只服务于“唯一有效批次真相源”
 # ==============================
 
 from __future__ import annotations
@@ -11,6 +16,142 @@ from backend.db.connection import get_conn, get_write_lock
 from backend.utils.time import now_iso
 
 from .common import _safe_task_state, _joined_row_to_task_dict
+
+
+def create_tasks_for_batch(batch_id: str, items: List[Dict[str, Any]]) -> int:
+    """
+    为某个 batch 显式创建 tasks。
+    只应在 batch 正式进入 running 时调用。
+
+    说明：
+      - 若同 batch 的 task 已存在，则静默跳过（依赖 UNIQUE 约束 + INSERT OR IGNORE）
+    """
+    bid = str(batch_id or "").strip()
+    if not bid:
+        return 0
+    if not items:
+        return 0
+
+    now = now_iso()
+
+    payload = []
+    for item in items:
+        market = str(item.get("market") or "").strip().upper()
+        symbol = str(item.get("symbol") or "").strip()
+        freq = str(item.get("freq") or "").strip()
+        if market not in ("SH", "SZ", "BJ") or not symbol or not freq:
+            continue
+        payload.append((
+            bid,
+            market,
+            symbol,
+            freq,
+            "queued",
+            0,
+            None,
+            None,
+            now,
+        ))
+
+    if not payload:
+        return 0
+
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO local_import_tasks (
+                batch_id,
+                market,
+                symbol,
+                freq,
+                state,
+                attempts,
+                error_code,
+                error_message,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            payload,
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
+def delete_tasks_for_batch(batch_id: str) -> int:
+    bid = str(batch_id or "").strip()
+    if not bid:
+        return 0
+
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM local_import_tasks WHERE batch_id=?;", (bid,))
+        affected = int(cur.rowcount or 0)
+        conn.commit()
+    return affected
+
+
+def delete_tasks_for_batches(batch_ids: List[str]) -> int:
+    ids = [str(x).strip() for x in (batch_ids or []) if str(x).strip()]
+    if not ids:
+        return 0
+
+    total = 0
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        for bid in ids:
+            cur.execute("DELETE FROM local_import_tasks WHERE batch_id=?;", (bid,))
+            total += int(cur.rowcount or 0)
+        conn.commit()
+    return total
+
+
+def delete_tasks_except_batch_ids(keep_batch_ids: List[str]) -> int:
+    """
+    删除所有不属于 keep_batch_ids 的任务。
+
+    这是当前最终一致性清理的主工具：
+      - 唯一有效批次真相源之外的 task 必须全部清除
+    """
+    keep_ids = [str(x).strip() for x in (keep_batch_ids or []) if str(x).strip()]
+
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+
+        if not keep_ids:
+            cur.execute("DELETE FROM local_import_tasks;")
+            affected = int(cur.rowcount or 0)
+            conn.commit()
+            return affected
+
+        placeholders = ",".join(["?"] * len(keep_ids))
+        sql = f"DELETE FROM local_import_tasks WHERE batch_id NOT IN ({placeholders});"
+        cur.execute(sql, keep_ids)
+        affected = int(cur.rowcount or 0)
+        conn.commit()
+        return affected
+
+
+def delete_orphan_tasks() -> int:
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM local_import_tasks
+            WHERE batch_id NOT IN (
+                SELECT batch_id FROM local_import_batches
+            );
+            """
+        )
+        affected = int(cur.rowcount or 0)
+        conn.commit()
+    return affected
 
 
 def list_tasks_for_batch(batch_id: str) -> List[Dict[str, Any]]:
@@ -91,35 +232,6 @@ def get_running_task(batch_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
-def mark_task_running(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dict[str, Any]]:
-    bid = str(batch_id or "").strip()
-    m = str(market or "").strip().upper()
-    s = str(symbol or "").strip()
-    f = str(freq or "").strip()
-    if not bid or not m or not s or not f:
-        return None
-
-    now = now_iso()
-    with get_write_lock():
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE local_import_tasks
-            SET state='running',
-                attempts=attempts+1,
-                error_code=NULL,
-                error_message=NULL,
-                updated_at=?
-            WHERE batch_id=? AND market=? AND symbol=? AND freq=? AND state='queued';
-            """,
-            (now, bid, m, s, f),
-        )
-        conn.commit()
-
-    return get_task(batch_id=bid, market=m, symbol=s, freq=f)
-
-
 def get_task(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dict[str, Any]]:
     """
     单任务读取同样直接 JOIN symbol_index，避免重复查库。
@@ -160,6 +272,35 @@ def get_task(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dic
     return _joined_row_to_task_dict(row) if row else None
 
 
+def mark_task_running(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dict[str, Any]]:
+    bid = str(batch_id or "").strip()
+    m = str(market or "").strip().upper()
+    s = str(symbol or "").strip()
+    f = str(freq or "").strip()
+    if not bid or not m or not s or not f:
+        return None
+
+    now = now_iso()
+    with get_write_lock():
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE local_import_tasks
+            SET state='running',
+                attempts=attempts+1,
+                error_code=NULL,
+                error_message=NULL,
+                updated_at=?
+            WHERE batch_id=? AND market=? AND symbol=? AND freq=? AND state='queued';
+            """,
+            (now, bid, m, s, f),
+        )
+        conn.commit()
+
+    return get_task(batch_id=bid, market=m, symbol=s, freq=f)
+
+
 def mark_task_terminal(
     batch_id: str,
     market: str,
@@ -170,7 +311,7 @@ def mark_task_terminal(
     error_message: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     """
-    允许：
+    只允许：
       - running -> success
       - running -> failed
     """
@@ -206,8 +347,7 @@ def mark_task_terminal(
 
 def cancel_queued_tasks_in_batch(batch_id: str) -> List[Dict[str, Any]]:
     """
-    取消批次中所有 queued 任务，并返回真正发生 queued->cancelled 的任务列表，
-    供 orchestrator 逐条发 task_changed。
+    取消当前有效批次中所有 queued 任务，并返回真正发生 queued->cancelled 的任务列表。
     """
     bid = str(batch_id or "").strip()
     if not bid:
@@ -274,8 +414,6 @@ def reset_retryable_tasks(batch_id: str) -> List[Dict[str, Any]]:
       - success 不动
       - failed -> queued
       - cancelled -> queued
-
-    返回真正发生状态重置的任务列表，供 orchestrator 逐条发 task_changed。
     """
     bid = str(batch_id or "").strip()
     if not bid:

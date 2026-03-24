@@ -2,9 +2,12 @@
 <!-- ==============================
 盘后数据导入弹窗底栏左侧信息区
 职责：
-  - 只展示 local import 主批次状态与少量辅助动作
-  - 不做业务推导
-  - retry/cancel 可用性只认后端字段
+  - 只展示 local import 主批次状态与结果
+  - 展示“当前批次运行时间”
+  - 不做业务推导，不做批次切换决策
+  - 运行时间按当前批次独立计时：
+      * 新 batchId 出现时归零重新开始
+      * 终态后停止计时
 ============================== -->
 <template>
   <div class="footer-wrap">
@@ -35,33 +38,16 @@
         </div>
       </div>
 
-      <div class="ops">
-        <button
-          class="op-btn"
-          type="button"
-          @click="onRefreshStatus"
-          :disabled="!!busy"
-          title="刷新当前导入状态"
-        >
-          刷新状态
-        </button>
-
-        <button
-          class="op-btn"
-          type="button"
-          @click="onRefreshTasks"
-          :disabled="!!busy || !batchId"
-          title="刷新当前任务表"
-        >
-          刷新任务
-        </button>
+      <div class="col col-runtime">
+        <div class="col-label">运行时间</div>
+        <div class="col-value mono">{{ runtimeText }}</div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
 
 const props = defineProps({
   batchId: { type: String, default: "" },
@@ -74,9 +60,37 @@ const props = defineProps({
   uiMessage: { type: String, default: "" },
   busy: { type: Boolean, default: false },
 
-  onRefreshStatus: { type: Function, default: null },
-  onRefreshTasks: { type: Function, default: null },
+  startedAt: { type: String, default: "" },
+  finishedAt: { type: String, default: "" },
 });
+
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function parseMs(x) {
+  const s = asStr(x);
+  if (!s) return null;
+  const ms = new Date(s).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function isTerminalState(state) {
+  const s = asStr(state);
+  return s === "success" || s === "failed" || s === "cancelled";
+}
+
+function pad2(n) {
+  return String(Math.max(0, Math.floor(Number(n || 0)))).padStart(2, "0");
+}
+
+function formatDuration(ms) {
+  const totalSec = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const hh = Math.floor(totalSec / 3600);
+  const mm = Math.floor((totalSec % 3600) / 60);
+  const ss = totalSec % 60;
+  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+}
 
 const progressPercent = computed(() => {
   const total = Math.max(0, Number(props.progressTotal || 0));
@@ -92,11 +106,11 @@ const progressText = computed(() => {
 });
 
 const batchStateText = computed(() => {
-  return String(props.batchState || "").trim() || "NO-BATCH";
+  return asStr(props.batchState) || "NO-BATCH";
 });
 
 const stateTagClass = computed(() => {
-  const s = String(props.batchState || "").trim();
+  const s = asStr(props.batchState);
   if (s === "running") return "tag-running";
   if (s === "queued") return "tag-queued";
   if (s === "paused") return "tag-paused";
@@ -104,6 +118,67 @@ const stateTagClass = computed(() => {
   if (s === "success") return "tag-success";
   if (s === "cancelled") return "tag-cancelled";
   return "tag-idle";
+});
+
+const nowMs = ref(Date.now());
+let timerId = null;
+
+function stopTimer() {
+  if (timerId != null) {
+    clearInterval(timerId);
+    timerId = null;
+  }
+}
+
+function ensureTimerRunning() {
+  if (timerId != null) return;
+  timerId = setInterval(() => {
+    nowMs.value = Date.now();
+  }, 1000);
+}
+
+watch(
+  () => [asStr(props.batchId), asStr(props.batchState)],
+  ([batchId, batchState]) => {
+    if (!batchId) {
+      stopTimer();
+      return;
+    }
+
+    if (isTerminalState(batchState)) {
+      stopTimer();
+      return;
+    }
+
+    ensureTimerRunning();
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  stopTimer();
+});
+
+const runtimeMs = computed(() => {
+  const batchId = asStr(props.batchId);
+  if (!batchId) return 0;
+
+  const started = parseMs(props.startedAt);
+  if (started == null) return 0;
+
+  const finished = parseMs(props.finishedAt);
+  const state = asStr(props.batchState);
+
+  if (finished != null && isTerminalState(state)) {
+    return Math.max(0, finished - started);
+  }
+
+  return Math.max(0, nowMs.value - started);
+});
+
+const runtimeText = computed(() => {
+  if (!asStr(props.batchId)) return "00:00:00";
+  return formatDuration(runtimeMs.value);
 });
 </script>
 
@@ -249,6 +324,10 @@ const stateTagClass = computed(() => {
   min-width: 70px;
 }
 
+.col-runtime {
+  min-width: 88px;
+}
+
 .col-value .success {
   color: #47a69b;
 }
@@ -266,30 +345,7 @@ const stateTagClass = computed(() => {
   color: #aaa;
 }
 
-.ops {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.op-btn {
-  height: 26px;
-  padding: 0 8px;
-  background: #2a2a2a;
-  color: #ddd;
-  border: 1px solid #444;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.op-btn:hover:not(:disabled) {
-  border-color: #5b7fb3;
-}
-
-.op-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 </style>

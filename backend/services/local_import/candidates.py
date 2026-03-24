@@ -3,31 +3,24 @@
 # 盘后数据导入 import - 候选快照构建器
 #
 # 职责：
+#   - 消费 runtime 中的扫描快照
 #   - 基于扫描结果 + symbol_index 双控筛选
 #   - 生成面向前端的候选项列表
 #
 # 关键规则：
-#   - 本地文件扫描结果才是候选范围真相源
-#   - symbol_index 只是补充展示信息来源
+#   - 扫描快照是文件发现真相源
+#   - candidates 只消费快照，不自己管理运行时执行逻辑
 #   - 必须同时满足：
-#       1) 扫描到文件
+#       1) 扫描快照中存在文件
 #       2) symbol_index 中存在对应 (market, symbol)
 #     才能出现在候选快照里
-#
-# 输出字段严格对齐 ImportCandidateItem：
-#   - market
-#   - symbol
-#   - freq
-#   - name
-#   - class
-#   - type
 # ==============================
 
 from __future__ import annotations
 
 from typing import Dict, Any, List
 
-from backend.services.local_import.scan import scan_importable_files
+from backend.services.local_import.runtime import get_local_import_runtime
 from backend.utils.common import get_symbol_record_from_db
 from backend.utils.time import now_iso
 from backend.utils.logger import get_logger
@@ -39,26 +32,23 @@ def build_import_candidates_snapshot() -> Dict[str, Any]:
     """
     构建候选快照。
 
-    Returns:
-        {
-          "ok": True,
-          "items": [...],
-          "generated_at": "...",
-          "ui_message": ...
-        }
+    这里不直接扫描目录，而是统一通过 runtime 获取/刷新扫描快照。
+    这样：
+      - 打开弹窗时完成唯一一次扫描
+      - start / retry / pipeline 可在 TTL 内复用
     """
-    scanned = scan_importable_files()
+    runtime = get_local_import_runtime()
+    snapshot = runtime.get_or_refresh_scan_snapshot()
+    scanned = snapshot.get("items") or []
 
     items: List[Dict[str, Any]] = []
     for item in scanned:
         meta = get_symbol_record_from_db(symbol=item.symbol, market=item.market)
         if not meta:
-            # 双控筛选：没有 symbol_index 展示信息的残缺项不返回给前端
             continue
 
         name = str(meta.get("name") or "").strip()
         if not name:
-            # 候选列表必须只保留完整可识别标的信息
             continue
 
         items.append({
@@ -68,6 +58,7 @@ def build_import_candidates_snapshot() -> Dict[str, Any]:
             "name": name,
             "class": meta.get("class"),
             "type": meta.get("type"),
+            "file_datetime": item.file_datetime,
         })
 
     items.sort(key=lambda x: (str(x.get("market")), str(x.get("symbol")), str(x.get("freq"))))
@@ -79,9 +70,10 @@ def build_import_candidates_snapshot() -> Dict[str, Any]:
         ui_message = "已扫描到本地文件，但没有可用于展示导入的有效标的信息"
 
     _LOG.info(
-        "[LOCAL_IMPORT][CANDIDATES] scanned=%s visible=%s",
+        "[LOCAL_IMPORT][CANDIDATES] scanned=%s visible=%s snapshot_generated_at=%s",
         len(scanned),
         len(items),
+        runtime.get_snapshot_generated_at(),
     )
 
     return {

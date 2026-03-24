@@ -3,15 +3,17 @@
 // Local Import 控制器
 //
 // 职责：
-//   - 管理 candidates / status / tasks 的加载
+//   - 管理 candidates / status 的加载
 //   - 管理 start / cancel / retry 提交
 //   - 管理 SSE 主更新链路
 //   - 管理初始化快照与 watchdog 纠偏
 //
-// 约束：
-//   - display_batch / queued_batches / ui_message 只认后端
-//   - tasks 只按当前 tasksBatchId 加载
-//   - 不基于 tasks 重算 display_batch.progress
+// 当前前端语义（已拉直）：
+//   - start / retry 只负责“启动确认”
+//   - 不再同步拉 tasks（任务区 UI 已移除）
+//   - 批次后续推进完全依赖：
+//       1) local_import.status / local_import.task_changed
+//       2) /api/local-import/status watchdog 纠偏
 // ==============================
 
 import { computed } from "vue";
@@ -44,6 +46,8 @@ function normalizeCandidate(item) {
     name: asStr(it.name),
     class: asStr(it.class),
     type: asStr(it.type),
+    file_datetime:
+      it.file_datetime == null ? null : asStr(it.file_datetime),
   };
 }
 
@@ -141,7 +145,7 @@ export function useLocalImportController() {
     }
   }
 
-  async function loadStatus({ syncTasks = true } = {}) {
+  async function loadStatus({ syncTasks = false } = {}) {
     state.loadingStatus.value = true;
     try {
       const resp = await fetchLocalImportStatus();
@@ -150,7 +154,7 @@ export function useLocalImportController() {
       const batchId = asStr(state.displayBatch.value?.batch_id);
       if (syncTasks && batchId) {
         await loadTasks({ batch_id: batchId });
-      } else if (syncTasks && !batchId) {
+      } else if (!batchId) {
         state.tasksBatchId.value = null;
         state.tasks.value = [];
       }
@@ -192,15 +196,6 @@ export function useLocalImportController() {
     try {
       const resp = await startLocalImport({ items });
       applyStatusSnapshot(resp);
-
-      const batchId = asStr(state.displayBatch.value?.batch_id);
-      if (batchId) {
-        await loadTasks({ batch_id: batchId });
-      } else {
-        state.tasksBatchId.value = null;
-        state.tasks.value = [];
-      }
-
       return { ok: true, message: state.uiMessage.value || "" };
     } catch (e) {
       return { ok: false, message: e?.message || "启动导入失败" };
@@ -212,25 +207,16 @@ export function useLocalImportController() {
   async function cancelImport() {
     const batchId = asStr(state.displayBatch.value?.batch_id);
     if (!batchId) {
-      return { ok: false, message: "当前没有可取消的导入批次" };
+      return { ok: false, message: "当前没有可停止的导入批次" };
     }
 
     state.submittingCancel.value = true;
     try {
       const resp = await cancelLocalImport({ batch_id: batchId });
       applyStatusSnapshot(resp);
-
-      const nextBatchId = asStr(state.displayBatch.value?.batch_id);
-      if (nextBatchId) {
-        await loadTasks({ batch_id: nextBatchId });
-      } else {
-        state.tasksBatchId.value = null;
-        state.tasks.value = [];
-      }
-
       return { ok: true, message: state.uiMessage.value || "" };
     } catch (e) {
-      return { ok: false, message: e?.message || "取消导入失败" };
+      return { ok: false, message: e?.message || "停止导入失败" };
     } finally {
       state.submittingCancel.value = false;
     }
@@ -246,15 +232,6 @@ export function useLocalImportController() {
     try {
       const resp = await retryLocalImport({ batch_id: batchId });
       applyStatusSnapshot(resp);
-
-      const nextBatchId = asStr(state.displayBatch.value?.batch_id);
-      if (nextBatchId) {
-        await loadTasks({ batch_id: nextBatchId });
-      } else {
-        state.tasksBatchId.value = null;
-        state.tasks.value = [];
-      }
-
       return { ok: true, message: state.uiMessage.value || "" };
     } catch (e) {
       return { ok: false, message: e?.message || "重试失败任务失败" };
@@ -275,8 +252,9 @@ export function useLocalImportController() {
       return;
     }
 
-    if (currentTasksBatchId !== nextBatchId) {
-      await loadTasks({ batch_id: nextBatchId });
+    if (currentTasksBatchId && currentTasksBatchId !== nextBatchId) {
+      state.tasksBatchId.value = null;
+      state.tasks.value = [];
     }
   }
 
@@ -353,7 +331,7 @@ export function useLocalImportController() {
         if (!last) return;
         if (now - last < 18000) return;
 
-        await loadStatus({ syncTasks: true });
+        await loadStatus({ syncTasks: false });
       } catch {}
     }, 5000);
   }
@@ -361,12 +339,12 @@ export function useLocalImportController() {
   async function initialize() {
     tracker.start();
     await loadCandidates();
-    await loadStatus({ syncTasks: true });
+    await loadStatus({ syncTasks: false });
     startWatchdog();
   }
 
   async function recoverAfterSseReconnect() {
-    await loadStatus({ syncTasks: true });
+    await loadStatus({ syncTasks: false });
   }
 
   const displayBatchId = computed(() => asStr(state.displayBatch.value?.batch_id));

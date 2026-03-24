@@ -8,11 +8,12 @@
 #       * local_import_batches
 #       * local_import_tasks
 #
-# 本次重构（candles_raw 联合键修正版）：
-#   - candles_raw 补入 market
-#   - candles_raw 删除 adjust
-#   - candles_raw 主键改为：
-#       (market, symbol, freq, ts)
+# 本次重构：
+#   - candles_raw 已按 market+symbol+freq+ts 联合键重构
+#   - local_import_batches 新增 selection_signature
+#   - local_import_tasks 的语义改为：
+#       * 只承载当前/最近有效 running(or recovered paused) 批次的任务
+#       * queued 批次不提前展开为 tasks
 #
 # 说明：
 #   - 本文件只负责“新建当前正式表结构”
@@ -29,11 +30,6 @@ def init_schema() -> None:
     cur = conn.cursor()
 
     # ===== 表1：K线原始数据（联合键修正版）=====
-    # 设计原则：
-    #   - 唯一真相源：原始不复权K线
-    #   - 联合唯一键：
-    #       market + symbol + freq + ts
-    #   - 不再保留 adjust 维度
     cur.execute("""
     CREATE TABLE IF NOT EXISTS candles_raw (
       market TEXT NOT NULL,
@@ -100,9 +96,6 @@ def init_schema() -> None:
     """)
 
     # ===== 表4：标的档案（联合主键极简版）=====
-    # 字段单位说明：
-    #   - float_shares : 万股 / 万份
-    #   - float_value  : 万元
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_profile (
       symbol       TEXT NOT NULL,
@@ -162,29 +155,37 @@ def init_schema() -> None:
     # ==========================================================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS local_import_batches (
-      batch_id            TEXT PRIMARY KEY,
-      state               TEXT NOT NULL,
-      created_at          TEXT NOT NULL,
-      started_at          TEXT,
-      finished_at         TEXT,
-      progress_total      INTEGER NOT NULL DEFAULT 0,
-      progress_done       INTEGER NOT NULL DEFAULT 0,
-      progress_success    INTEGER NOT NULL DEFAULT 0,
-      progress_failed     INTEGER NOT NULL DEFAULT 0,
-      progress_cancelled  INTEGER NOT NULL DEFAULT 0,
-      retryable           INTEGER NOT NULL DEFAULT 0,
-      cancelable          INTEGER NOT NULL DEFAULT 0,
-      ui_message          TEXT
+      batch_id             TEXT PRIMARY KEY,
+      state                TEXT NOT NULL,
+      created_at           TEXT NOT NULL,
+      started_at           TEXT,
+      finished_at          TEXT,
+      progress_total       INTEGER NOT NULL DEFAULT 0,
+      progress_done        INTEGER NOT NULL DEFAULT 0,
+      progress_success     INTEGER NOT NULL DEFAULT 0,
+      progress_failed      INTEGER NOT NULL DEFAULT 0,
+      progress_cancelled   INTEGER NOT NULL DEFAULT 0,
+      retryable            INTEGER NOT NULL DEFAULT 0,
+      cancelable           INTEGER NOT NULL DEFAULT 0,
+      ui_message           TEXT,
+      selection_signature  TEXT
     );
     """)
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_local_import_batches_state_created
       ON local_import_batches(state, created_at);
     """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_local_import_batches_signature_state
+      ON local_import_batches(selection_signature, state, created_at);
+    """)
 
     # ==========================================================
     # 表8：盘后数据导入任务（local_import_tasks）
     # ==========================================================
+    # 设计语义：
+    #   - 只为“当前/最近有效 running(or recovered paused)”批次展开任务
+    #   - queued 批次不提前写入 tasks
     cur.execute("""
     CREATE TABLE IF NOT EXISTS local_import_tasks (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,

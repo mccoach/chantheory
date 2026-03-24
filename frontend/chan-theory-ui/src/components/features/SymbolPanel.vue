@@ -1,21 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\SymbolPanel.vue -->
-<!-- ============================== -->
-<!-- V16.0 - BREAKING: 当前标的身份模型升级为双主键（symbol + market）严格化
-     变更：
-     - 搜索候选 / 历史 / 自选点击，统一传完整 identity
-     - vm.setSymbolIdentity({symbol, market}) 成为唯一切换入口
-     - 当前标的的持久化历史也升级为 symbol + market
-     - UI 层 identity 统一走 normalizeIdentity / identityKey
-
-     Local Import：
-     - 原“盘后远程下载”入口正式切换为“盘后数据导入”
-     - 打开新 LocalImportDialog.vue
-     - 旧远程下载主链路彻底退出引用
-
-     本轮改动（启动重复去重）：
-     - 删除 mounted 中对 wl.refresh() 的主动调用
-     - watchlist 启动加载唯一链路保留在 useAppStartup -> wl.smartLoad()
--->
 <template>
   <div class="symbol-row">
     <div class="col-left">
@@ -113,7 +96,7 @@
         <button
           class="seg-btn"
           title="盘后数据导入"
-          @click="openLocalImportDialog"
+          @click="handleOpenLocalImportDialog"
           :disabled="vm.loading.value"
         >
           盘后导入
@@ -146,6 +129,7 @@ import SymbolActions from "./symbol/SymbolActions.vue";
 
 import { formatDateTime, formatYmdInt } from "@/utils/timeFormat";
 import { parseTimeValue } from "@/utils/timeParse";
+import { openLocalImportDialog } from "@/settings/localImport";
 
 function asStr(x) {
   return String(x == null ? "" : x).trim();
@@ -313,6 +297,14 @@ async function forceRefreshSymbols() {
     alert(`刷新失败：${e.message || "网络错误"}`);
   } finally {
     refreshing.value = false;
+  }
+}
+
+async function handleOpenLocalImportDialog() {
+  try {
+    await openLocalImportDialog(dialogManager);
+  } catch (e) {
+    console.error("[SymbolPanel] openLocalImportDialog failed:", e);
   }
 }
 
@@ -497,44 +489,6 @@ function formatListingDate(intVal) {
   const n = Number(intVal);
   if (!Number.isFinite(n)) return "";
   return formatYmdInt(n);
-}
-
-async function openLocalImportDialog() {
-  try {
-    if (!dialogManager || typeof dialogManager.open !== "function") return;
-
-    const mod = await import("@/components/ui/LocalImportDialog.vue");
-
-    dialogManager.open({
-      title: "盘后数据导入",
-      contentComponent: mod.default,
-      props: {},
-      footerActions: [
-        {
-          key: "start_import",
-          label: "开始导入",
-          variant: "ok",
-          disabled: false,
-        },
-        {
-          key: "cancel_import",
-          label: "取消当前导入",
-          disabled: false,
-        },
-        {
-          key: "retry_import",
-          label: "重试失败任务",
-          disabled: false,
-        },
-        {
-          key: "close",
-          label: "关闭",
-        },
-      ],
-    });
-  } catch (e) {
-    console.error("[SymbolPanel] openLocalImportDialog failed:", e);
-  }
 }
 </script>
 

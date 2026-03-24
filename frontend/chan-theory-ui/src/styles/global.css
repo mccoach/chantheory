@@ -144,30 +144,39 @@ button:focus-visible {
 /* ============================= */
 /* 标准化：三态开关（checkbox skin）
    说明：
-     - 原先该样式定义在 ModalDialog.vue（设置窗可用，但不属于“壳职责”）
-     - 现在迁移到 global.css，成为全局可复用的标准皮肤
-     - 业务只要使用 .std-check 包裹 input[type=checkbox] 即可复用
+     - 全站 checkbox 统一皮肤源头
+     - 所有需要统一外观的 checkbox 都必须走：
+         <span class="std-check"><input type="checkbox" ... /></span>
    约定：
      - checked：对勾
-     - indeterminate：横杠（用于三态“部分选择”）
+     - indeterminate：横杠
 /* ============================= */
 
 .std-check {
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 16px;
 }
 
 .std-check input[type="checkbox"] {
   appearance: none;
   width: 16px;
   height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
   border: 1px solid #555;
   border-radius: 3px;
   background: #0f0f0f;
   position: relative;
   cursor: pointer;
   outline: none;
+  box-sizing: border-box;
+  flex: 0 0 16px;
 }
 
 .std-check input[type="checkbox"]:hover {

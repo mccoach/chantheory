@@ -1,16 +1,11 @@
 <!-- src/components/ui/SymbolUniverseTable.vue -->
 <!-- ==============================
-本轮修正目标（按你的“最高原则”执行）：
-- 总尺寸不变：整体表格区高度=原值不变（表头30px + 表体滚动区463px = 原 vscroll 493px），hbar 14px 不变
-- 逻辑拉直：横向滚动仅允许一个入口（底部 hbar）；表头/内容区都只被动跟随 hbar.scrollLeft
-- 竖向滚动仅覆盖表体：vscroll 只滚动 body，不含表头
-- 表头右侧滚动条等宽占位：用一次性测量 vscroll scrollbar 宽度对齐
-- 去高频/去绕弯：不在 scrollTop 时测 scrollbar 宽度；不让表头自身滚动；同步只做单向（hbar -> others）
-
-本轮新增（双主键/复合主键支持）：
-- 新增 rowKeyBuilder：由调用方提供“行唯一 key”的构造方式
-- 选择/星标/toggle 事件一律基于 row 对象本身，不再假定 symbol 是唯一主键
-- 默认兼容旧调用：若未传 rowKeyBuilder，则回退 symbol
+本轮重构目标：
+- 表格仍保持“通用候选表”职责，不承载 local import 快选业务
+- 列展示改为“可配置 schema”，从根因上消除旧版把 listingDateText 硬塞成 freq 的错位设计
+- 默认行为保持兼容：未传 columns 时，使用原有通用列
+- 新增 fileTime 列支持，供 local import 候选表显示“文件时间”
+- 候选表勾选框统一接入全局 std-check 链路，和快选栏完全同构
 ============================== -->
 <template>
   <div class="sut-wrap">
@@ -23,7 +18,7 @@
         <div class="thead-h" ref="theadHRef">
           <div class="thead-inner" :style="{ width: totalWidthPx + 'px' }">
             <div
-              v-for="col in columns"
+              v-for="col in normalizedColumns"
               :key="col.key"
               class="th"
               :class="`c-${col.key}`"
@@ -53,32 +48,39 @@
                 :class="{ selected: isSelected(row) }"
                 :style="{ height: rowHeightPx + 'px' }"
               >
-                <div class="td c-check" :style="cellStyle('check')">
-                  <input
-                    type="checkbox"
-                    :checked="isSelected(row)"
-                    @change="$emit('toggle-select', row)"
-                  />
-                </div>
+                <div
+                  v-for="col in normalizedColumns"
+                  :key="col.key"
+                  class="td"
+                  :class="`c-${col.key}`"
+                  :style="cellStyle(col.key)"
+                  :title="cellTitle(row, col)"
+                >
+                  <template v-if="col.key === 'check'">
+                    <span class="std-check">
+                      <input
+                        type="checkbox"
+                        :checked="isSelected(row)"
+                        @change="$emit('toggle-select', row)"
+                      />
+                    </span>
+                  </template>
 
-                <div class="td c-star" :style="cellStyle('star')">
-                  <button
-                    class="star-btn"
-                    :class="{ active: isStarred(row) }"
-                    :title="isStarred(row) ? '从自选移除' : '加入自选'"
-                    @click="$emit('toggle-star', row)"
-                  >
-                    ★
-                  </button>
-                </div>
+                  <template v-else-if="col.key === 'star'">
+                    <button
+                      class="star-btn"
+                      :class="{ active: isStarred(row) }"
+                      :title="isStarred(row) ? '从自选移除' : '加入自选'"
+                      @click="$emit('toggle-star', row)"
+                    >
+                      ★
+                    </button>
+                  </template>
 
-                <div class="td c-symbol" :style="cellStyle('symbol')">{{ row.symbol }}</div>
-                <div class="td c-name" :style="cellStyle('name')" :title="row.name">{{ row.name }}</div>
-                <div class="td c-market" :style="cellStyle('market')">{{ row.market }}</div>
-                <div class="td c-class" :style="cellStyle('class')">{{ row.class }}</div>
-                <div class="td c-type" :style="cellStyle('type')">{{ row.type }}</div>
-                <div class="td c-listing" :style="cellStyle('listingDate')">{{ row.listingDateText }}</div>
-                <div class="td c-updated" :style="cellStyle('updatedAt')" :title="row.updatedAt">{{ row.updatedAt }}</div>
+                  <template v-else>
+                    {{ cellValue(row, col) }}
+                  </template>
+                </div>
               </div>
 
               <div :style="{ height: padBottom + 'px' }"></div>
@@ -98,6 +100,18 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from "vue";
 import { useVirtualListFixedRow } from "@/composables/useVirtualListFixedRow";
 
+const DEFAULT_COLUMNS = [
+  { key: "check", label: "", sortable: true, min: 32, max: 90, default: 30, align: "center" },
+  { key: "star", label: "自选", sortable: true, min: 40, max: 80, default: 48, align: "center" },
+  { key: "symbol", label: "代码", sortable: true, min: 70, max: 140, default: 60, align: "center" },
+  { key: "name", label: "名称", sortable: true, min: 120, max: 360, default: 120, align: "center" },
+  { key: "market", label: "市场", sortable: true, min: 60, max: 120, default: 56, align: "center" },
+  { key: "class", label: "类别", sortable: true, min: 70, max: 160, default: 56, align: "center" },
+  { key: "type", label: "类型", sortable: true, min: 70, max: 180, default: 72, align: "center" },
+  { key: "listingDateText", label: "上市日期", sortable: true, min: 90, max: 150, default: 90, align: "center" },
+  { key: "updatedAt", label: "更新时间", sortable: true, min: 140, max: 260, default: 190, align: "center" },
+];
+
 const props = defineProps({
   title: { type: String, default: "标的列表" },
   rows: { type: Array, default: () => [] },
@@ -114,6 +128,8 @@ const props = defineProps({
   initialColWidths: { type: Object, default: () => ({}) },
 
   rowKeyBuilder: { type: Function, default: null },
+
+  columns: { type: Array, default: () => [] },
 });
 
 const emit = defineEmits(["sort", "toggle-select", "toggle-star"]);
@@ -124,17 +140,30 @@ const hbarRef = ref(null);
 const theadHRef = ref(null);
 const vScrollBarWidthPx = ref(0);
 
-const columns = ref([
-  { key: "check", label: "", sortable: true, min: 32, max: 90, default: 30, align: "center" },
-  { key: "star", label: "自选", sortable: true, min: 40, max: 80, default: 48, align: "center" },
-  { key: "symbol", label: "代码", sortable: true, min: 70, max: 140, default: 60, align: "center" },
-  { key: "name", label: "名称", sortable: true, min: 120, max: 360, default: 120, align: "center" },
-  { key: "market", label: "市场", sortable: true, min: 60, max: 120, default: 56, align: "center" },
-  { key: "class", label: "类别", sortable: true, min: 70, max: 160, default: 56, align: "center" },
-  { key: "type", label: "类型", sortable: true, min: 70, max: 160, default: 56, align: "center" },
-  { key: "listingDate", label: "上市日期", sortable: true, min: 90, max: 150, default: 90, align: "center" },
-  { key: "updatedAt", label: "更新时间", sortable: true, min: 140, max: 260, default: 190, align: "center" },
-]);
+function normalizeColumn(col) {
+  const c = col && typeof col === "object" ? col : {};
+  const key = String(c.key || "").trim();
+  return {
+    key,
+    label: String(c.label ?? ""),
+    sortable: c.sortable !== false,
+    min: Number.isFinite(+c.min) ? +c.min : 40,
+    max: Number.isFinite(+c.max) ? +c.max : 320,
+    default: Number.isFinite(+c.default) ? +c.default : 80,
+    align: String(c.align || "center"),
+    field: c.field != null ? String(c.field) : key,
+    titleField: c.titleField != null ? String(c.titleField) : null,
+  };
+}
+
+const normalizedColumns = computed(() => {
+  const raw = Array.isArray(props.columns) && props.columns.length
+    ? props.columns
+    : DEFAULT_COLUMNS;
+  return raw
+    .map(normalizeColumn)
+    .filter((x) => x.key);
+});
 
 function clamp(n, min, max) {
   const x = Math.floor(Number(n));
@@ -147,14 +176,20 @@ const colWidths = ref({});
 function initColWidths() {
   const init = props.initialColWidths && typeof props.initialColWidths === "object" ? props.initialColWidths : {};
   const out = {};
-  for (const c of columns.value) {
+  for (const c of normalizedColumns.value) {
     const v = Number(init[c.key]);
     out[c.key] = Number.isFinite(v) ? clamp(v, c.min, c.max) : c.default;
   }
   colWidths.value = out;
 }
 
-initColWidths();
+watch(
+  () => normalizedColumns.value,
+  () => {
+    initColWidths();
+  },
+  { immediate: true, deep: true }
+);
 
 watch(
   () => props.initialColWidths,
@@ -175,17 +210,23 @@ function cellStyle(key) {
 }
 
 const totalWidthPx = computed(() => {
-  const cols = columns.value || [];
   let sum = 0;
-  for (const c of cols) {
+  for (const c of normalizedColumns.value) {
     const w = Number(colWidths.value?.[c.key] ?? c.default ?? 0);
     if (Number.isFinite(w) && w > 0) sum += w;
   }
   return Math.max(1, Math.floor(sum));
 });
 
+function sortKeyOfColumn(col) {
+  const key = String(col?.key || "");
+  if (key === "check") return "__selected__";
+  if (key === "star") return "__starred__";
+  return key;
+}
+
 function sortMark(col) {
-  const key = col.key === "check" ? "__selected__" : col.key === "star" ? "__starred__" : col.key;
+  const key = sortKeyOfColumn(col);
   if (String(props.sortKey) !== String(key)) return "";
   return props.sortDir === "desc" ? "▼" : "▲";
 }
@@ -196,8 +237,7 @@ function colTitle(col) {
 
 function onHeaderClick(col) {
   if (col.sortable === false) return;
-  const key = col.key === "check" ? "__selected__" : col.key === "star" ? "__starred__" : col.key;
-  emit("sort", key);
+  emit("sort", sortKeyOfColumn(col));
 }
 
 function rowKey(row) {
@@ -208,6 +248,22 @@ function rowKey(row) {
     }
   } catch {}
   return String(row?.symbol || "");
+}
+
+function cellValue(row, col) {
+  const field = String(col?.field || col?.key || "");
+  const v = row?.[field];
+  return v == null ? "" : v;
+}
+
+function cellTitle(row, col) {
+  const titleField = col?.titleField ? String(col.titleField) : null;
+  if (titleField) {
+    const v = row?.[titleField];
+    return v == null ? "" : String(v);
+  }
+  const v = cellValue(row, col);
+  return v == null ? "" : String(v);
 }
 
 const viewportHeight = ref(463);
@@ -263,7 +319,6 @@ function initHorizontalAlignment() {
 onMounted(() => {
   updateVScrollBarWidth();
   initHorizontalAlignment();
-
   window.addEventListener("resize", updateVScrollBarWidth);
 });
 
