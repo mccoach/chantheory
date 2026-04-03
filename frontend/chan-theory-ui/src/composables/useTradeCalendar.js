@@ -2,26 +2,21 @@
 // ==============================
 // 说明：交易日历前端缓存与查询（单例 composable）
 //
-// V3.0 - BREAKING: 后端 trade_calendar 语义已变为“完整自然日历表”
-// 后端现状：
-//   - /api/trade-calendar 返回完整自然日历（交易日 + 非交易日）
-//   - items 中通过 is_trading_day 区分：1=交易日，0=非交易日
+// 当前职责（纯业务执行器）：
+//   - 读取 trade_calendar 快照
+//   - 构建前端交易日索引
+//   - 提供 getTradingIndex / isWithinNTradingDays 查询
+//   - 提供 waitReadable 等待能力
 //
-// 前端职责（单一真相源保持不变）：
-//   - 本模块对外仍提供“交易日索引 / 交易日区间判断”能力；
-//   - 因此内部必须在加载快照后，显式过滤出 is_trading_day === 1 的日期，构建交易日序列。
-//   - 这样可保证 getTradingIndex / isWithinNTradingDays 的语义继续严格等于“交易日”而不是“自然日”。
-//
-// V2.0 - NEW: ensureReady（唯一编排链路）
-// 背景约定：所有任务由前端发起，后端收到请求后直接重建并落库交易日历。
-// 目标：将 App.vue 中“declare + wait + ensureLoaded”两段逻辑收敛到本模块，形成唯一工作路径。
-// 失败策略：失败只返回结果（ok=false），不 throw、不 alert、不做额外副作用。
+// 命令权收敛：
+//   - 本模块不再自行触发“准备任务”
+//   - 触发 declareTradeCalendar 的权力只允许存在于：
+//       1) App 启动链
+//       2) 未来若有明确页面按钮，则由按钮路径显式调用
 // ==============================
 
 import { ref, readonly } from "vue";
 import { fetchTradeCalendarSnapshot } from "@/services/tradeCalendarService";
-import { declareTradeCalendar } from "@/services/ensureDataAPI";
-import { waitTasksDone } from "@/composables/useTaskWaiter";
 
 const ready = ref(false);
 const loading = ref(false);
@@ -32,6 +27,7 @@ let _dates = [];
 let _indexByDate = new Map();
 
 let _singleton = null;
+let _loadingPromise = null;
 
 function isTradingDayRow(row) {
   const flag = Number(row?.is_trading_day);
@@ -43,7 +39,6 @@ function buildMarketIndex(items) {
   _indexByDate = new Map();
 
   for (const row of items || []) {
-    // 后端已改为“完整自然日历”，这里必须显式过滤出交易日
     if (!isTradingDayRow(row)) continue;
 
     const date = Number(row?.date);
@@ -56,59 +51,47 @@ function buildMarketIndex(items) {
   _dates.forEach((d, idx) => _indexByDate.set(d, idx));
 }
 
+async function loadSnapshot() {
+  const { items } = await fetchTradeCalendarSnapshot();
+  buildMarketIndex(items);
+  ready.value = true;
+}
+
 async function ensureLoaded() {
-  if (ready.value || loading.value) return;
+  if (ready.value) return { ok: true };
+  if (_loadingPromise) return _loadingPromise;
+
   loading.value = true;
   error.value = "";
 
-  try {
-    const { items } = await fetchTradeCalendarSnapshot();
-    buildMarketIndex(items);
-    ready.value = true;
-  } catch (e) {
-    console.error("[useTradeCalendar] load snapshot failed", e);
-    error.value = e?.message || "load trade_calendar failed";
-  } finally {
-    loading.value = false;
-  }
+  _loadingPromise = (async () => {
+    try {
+      await loadSnapshot();
+      return { ok: true };
+    } catch (e) {
+      console.error("[useTradeCalendar] load snapshot failed", e);
+      error.value = e?.message || "load trade_calendar failed";
+      return { ok: false, message: error.value };
+    } finally {
+      loading.value = false;
+      _loadingPromise = null;
+    }
+  })();
+
+  return _loadingPromise;
 }
 
-/**
- * 唯一入口：确保 trade_calendar 已就绪
- * - force_fetch=false：后端当前也会直接重建并落库，不再做缺口判断
- * - force_fetch=true：语义保持透传
- *
- * 失败策略：返回 {ok:false}，不 throw、不做额外副作用
- */
-async function ensureReady({ force_fetch = false, timeoutMs = 60000 } = {}) {
-  // 幂等：已 ready 且不要求强制刷新 => 直接成功
-  if (ready.value === true && force_fetch !== true) {
-    return { ok: true };
-  }
+async function waitReadable({ timeoutMs = 60000, pollMs = 100 } = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 60000));
 
-  // 1) 声明任务（后端当前语义：直接重建并落库）
-  try {
-    const t = await declareTradeCalendar({ force_fetch: !!force_fetch });
-    const tid = t?.task_id ? String(t.task_id) : null;
-    if (tid) {
-      await waitTasksDone({
-        taskIds: [tid],
-        timeoutMs: Math.max(1000, Number(timeoutMs || 60000)),
-      });
+  while (loading.value) {
+    if (Date.now() > deadline) {
+      return { ok: false, message: "[useTradeCalendar] waitReadable timeout" };
     }
-  } catch (e) {
-    console.error("[useTradeCalendar] declare/wait failed", e);
-    return { ok: false, message: e?.message || "declare/wait failed" };
+    await new Promise((resolve) => setTimeout(resolve, Math.max(20, Number(pollMs || 100))));
   }
 
-  // 2) 拉取快照并加载到内存索引
-  try {
-    await ensureLoaded();
-    return { ok: ready.value === true };
-  } catch (e) {
-    // ensureLoaded 内部不 throw，这里只是兜底
-    return { ok: false, message: e?.message || "ensureLoaded failed" };
-  }
+  return { ok: true };
 }
 
 function getTradingIndex(ymd) {
@@ -142,11 +125,9 @@ export function useTradeCalendar() {
     loading: readonly(loading),
     error: readonly(error),
 
-    // loaders
     ensureLoaded,
-    ensureReady,
+    waitReadable,
 
-    // query
     getTradingIndex,
     isWithinNTradingDays,
   };

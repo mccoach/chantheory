@@ -1,12 +1,15 @@
 // frontend/src/composables/useEventStream.js
 // ==============================
-// V11.1 - SSE 心跳日志降噪
+// V12.1 - SSE 按类型分流订阅（全局基础流 + local-import 专用流）
+//
+// 全局基础流用途：
+//   - sse.connected
+//   - sse.heartbeat
+//   - task.finished
 //
 // 说明：
-// - 保留 sse.heartbeat 的连接保活语义；
-// - 仍然更新 lastEventTime；
-// - 但在 DEV 下不再为 heartbeat 打印逐条日志，避免控制台刷屏；
-// - 其它业务事件仍保持原有日志输出。
+//   - 基础数据任务中心 useFoundationData 依赖 task.finished 维护实时状态
+//   - local-import 继续使用专用流
 // ==============================
 
 import { ref } from "vue";
@@ -27,12 +30,43 @@ function asStr(x) {
   return String(x == null ? "" : x).trim();
 }
 
-function createEventStreamSingleton() {
-  let globalEventSource = null;
-  const eventHandlers = new Map(); // key: payload.type, val: Set<fn>
+function normalizeTypeList(types) {
+  const arr = Array.isArray(types) ? types : [];
+  const uniq = new Set();
+
+  for (const t of arr) {
+    const v = asStr(t);
+    if (!v) continue;
+    uniq.add(v);
+  }
+
+  return Array.from(uniq.values());
+}
+
+function buildSseUrl(types) {
+  const list = normalizeTypeList(types);
+
+  if (!list.length) {
+    return "/api/events/stream";
+  }
+
+  const qs = new URLSearchParams();
+  for (const t of list) {
+    qs.append("type", t);
+  }
+
+  return `/api/events/stream?${qs.toString()}`;
+}
+
+function createEventStreamClient({ name, subscribeTypes }) {
+  let eventSource = null;
+  const eventHandlers = new Map();
 
   const connected = ref(false);
   const lastEventTime = ref(null);
+
+  const clientName = asStr(name) || "sse-client";
+  const subscribedTypes = normalizeTypeList(subscribeTypes);
 
   function _notifyHandlers(eventType, data) {
     const t = asStr(eventType);
@@ -45,7 +79,7 @@ function createEventStreamSingleton() {
       try {
         handler(data);
       } catch (err) {
-        console.error(`${ts()} [SSE] handler error (type=${t})`, err);
+        console.error(`${ts()} [SSE:${clientName}] handler error (type=${t})`, err);
       }
     });
   }
@@ -56,7 +90,7 @@ function createEventStreamSingleton() {
 
     if (!pType) {
       if (import.meta.env.DEV) {
-        console.warn(`${ts()} [SSE] drop: missing payload.type (event=${rawEventName})`);
+        console.warn(`${ts()} [SSE:${clientName}] drop: missing payload.type (event=${rawEventName})`);
       }
       return;
     }
@@ -68,7 +102,6 @@ function createEventStreamSingleton() {
     }
 
     if (import.meta.env.DEV) {
-      // 心跳只保留语义，不打印逐条日志，避免刷屏
       if (pType !== "sse.heartbeat") {
         const taskId = asStr(p?.task_id);
         const taskType = asStr(p?.task_type);
@@ -78,7 +111,7 @@ function createEventStreamSingleton() {
         const ver = p?.batch?.progress?.version;
 
         console.log(
-          `${ts()} [SSE] recv type=${pType}` +
+          `${ts()} [SSE:${clientName}] recv type=${pType}` +
             (taskId ? ` task_id=${taskId}` : "") +
             (taskType ? ` task_type=${taskType}` : "") +
             (overall ? ` overall_status=${overall}` : "") +
@@ -93,51 +126,44 @@ function createEventStreamSingleton() {
   }
 
   function connect() {
-    if (globalEventSource) {
+    if (eventSource) {
       if (import.meta.env.DEV) {
-        console.log(`${ts()} [SSE] already-connected`);
+        console.log(`${ts()} [SSE:${clientName}] already-connected`);
       }
       return;
     }
 
+    const url = buildSseUrl(subscribedTypes);
+
     if (import.meta.env.DEV) {
-      console.log(`${ts()} [SSE] connecting...`);
+      console.log(
+        `${ts()} [SSE:${clientName}] connecting... url=${url} types=${JSON.stringify(subscribedTypes)}`
+      );
     }
 
-    globalEventSource = new EventSource("/api/events/stream");
+    eventSource = new EventSource(url);
 
     const listen = (eventName) => {
-      globalEventSource.addEventListener(eventName, (e) => {
+      eventSource.addEventListener(eventName, (e) => {
         const payload = safeJsonParse(e?.data);
         if (!payload) return;
         _dispatchByPayloadType(eventName, payload);
       });
     };
 
-    listen("sse.connected");
-    listen("sse.heartbeat");
+    for (const eventName of subscribedTypes) {
+      listen(eventName);
+    }
 
-    listen("task.job.finished");
-    listen("task.finished");
-
-    listen("bulk.batch.snapshot");
-
-    // NEW: local import
-    listen("local_import.status");
-    listen("local_import.task_changed");
-
-    listen("system.alert");
-    listen("runtime.metrics");
-
-    globalEventSource.onerror = (err) => {
-      console.warn(`${ts()} [SSE] connection lost`, err);
+    eventSource.onerror = (err) => {
+      console.warn(`${ts()} [SSE:${clientName}] connection lost`, err);
       connected.value = false;
 
-      if (globalEventSource) {
+      if (eventSource) {
         try {
-          globalEventSource.close();
+          eventSource.close();
         } catch {}
-        globalEventSource = null;
+        eventSource = null;
       }
 
       setTimeout(connect, 5000);
@@ -162,24 +188,51 @@ function createEventStreamSingleton() {
   }
 
   function disconnect() {
-    if (globalEventSource) {
+    if (eventSource) {
       try {
-        globalEventSource.close();
+        eventSource.close();
       } catch {}
-      globalEventSource = null;
+      eventSource = null;
       connected.value = false;
 
       if (import.meta.env.DEV) {
-        console.log(`${ts()} [SSE] disconnected`);
+        console.log(`${ts()} [SSE:${clientName}] disconnected`);
       }
     }
   }
 
-  return { connect, disconnect, connected, lastEventTime, subscribe };
+  return {
+    connect,
+    disconnect,
+    connected,
+    lastEventTime,
+    subscribe,
+    subscribedTypes,
+  };
 }
 
-const _singleton = createEventStreamSingleton();
+const _globalSingleton = createEventStreamClient({
+  name: "global",
+  subscribeTypes: [
+    "sse.connected",
+    "sse.heartbeat",
+    "task.finished",
+  ],
+});
+
+const _localImportSingleton = createEventStreamClient({
+  name: "local-import",
+  subscribeTypes: [
+    "sse.connected",
+    "sse.heartbeat",
+    "local_import.status",
+  ],
+});
 
 export function useEventStream() {
-  return _singleton;
+  return _globalSingleton;
+}
+
+export function useLocalImportEventStream() {
+  return _localImportSingleton;
 }

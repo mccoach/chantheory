@@ -1,4 +1,4 @@
-# backend/services/data_recipes/calendar.py
+# backend/services/data_recipes/trade_calendar.py
 # ==============================
 # 交易日历任务配方（trade_calendar）
 #
@@ -6,6 +6,10 @@
 #   - 不做缺口判断
 #   - 触发即执行本地完整自然日历构建与落库
 #   - 数据源：TDX 本地 needini.dat + 周六周日规则
+#
+# 本轮改动：
+#   - 增加基础数据任务稳定状态写入
+#   - 文件名按任务全名统一
 # ==============================
 
 from __future__ import annotations
@@ -19,11 +23,15 @@ from backend.datasource import dispatcher
 from backend.services.task_model import Task
 from backend.services.task_events import emit_job_finished, emit_task_finished
 from backend.db.calendar import upsert_trade_calendar
+from backend.db.data_task_status import (
+    mark_data_task_running,
+    mark_data_task_success,
+    mark_data_task_failed,
+)
 from backend.services.normalizer import normalize_trade_calendar_df
 from backend.utils.logger import get_logger, log_event
 
-_LOG = get_logger("data_recipes.calendar")
-
+_LOG = get_logger("data_recipes.trade_calendar")
 
 async def run_trade_calendar(task: Task) -> Dict[str, Any]:
     trace_id = task.trace_id
@@ -33,15 +41,17 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
     total_rows = 0
     source_id = None
 
+    mark_data_task_running("trade_calendar")
+
     log_event(
         logger=_LOG,
-        service="data_recipes.calendar",
+        service="data_recipes.trade_calendar",
         level="INFO",
         file=__file__,
         func="run_trade_calendar",
         line=0,
         trace_id=trace_id,
-        event="calendar.start",
+        event="trade_calendar.start",
         message="运行交易日历配方（本地完整自然日历版）",
         extra={
             "task_id": task.task_id,
@@ -53,6 +63,7 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
 
         if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
             jobs_status[job_type] = "failed"
+            mark_data_task_failed("trade_calendar", "trade_calendar raw dataframe is empty")
             emit_job_finished(
                 task,
                 job_type=job_type,
@@ -72,6 +83,7 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
             clean_df = normalize_trade_calendar_df(raw_df)
             if clean_df is None or clean_df.empty:
                 jobs_status[job_type] = "failed"
+                mark_data_task_failed("trade_calendar", "normalized trade_calendar is empty")
                 emit_job_finished(
                     task,
                     job_type=job_type,
@@ -92,6 +104,7 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
                 rows_written = await asyncio.to_thread(upsert_trade_calendar, records)
                 total_rows = int(rows_written or 0)
                 jobs_status[job_type] = "success"
+                mark_data_task_success("trade_calendar")
                 emit_job_finished(
                     task,
                     job_type=job_type,
@@ -110,6 +123,7 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
 
     except Exception as e:
         jobs_status[job_type] = "failed"
+        mark_data_task_failed("trade_calendar", str(e))
         emit_job_finished(
             task,
             job_type=job_type,
@@ -125,7 +139,7 @@ async def run_trade_calendar(task: Task) -> Dict[str, Any]:
                 "extra": {"exception_type": type(e).__name__},
             },
         )
-        _LOG.error("[日历配方] 同步异常: %s", e, exc_info=True)
+        _LOG.error("[交易日历配方] 同步异常: %s", e, exc_info=True)
 
     st = jobs_status.get(job_type)
     if st == "success":

@@ -6,28 +6,19 @@
 #   - symbol_index：联合主键 (symbol, market)
 #   - symbol_profile：联合主键 (symbol, market)
 #
-# 注意：
-#   - 本轮 symbol_profile 已彻底切换为本地批量快照极简版
-#   - 旧 total_shares / total_value / nego_value / pe_static 已删除
-#
-# 字段单位约定（symbol_profile）：
-#   - float_shares : 万股 / 万份
-#   - float_value  : 万元
-#
-# 本轮最终修复：
-#   - symbol_profile 写库前，先一次性读取 symbol_index 的有效 (symbol, market) 集合；
-#   - 仅对存在于 symbol_index 的记录执行批量 upsert；
-#   - 不存在于 symbol_index 的记录直接跳过；
-#   - 目的：避免单条孤儿记录触发外键失败，导致整批 profile 回滚。
+# 本轮最终收口：
+#   - symbol_index / symbol_profile 作为批量快照表
+#   - 删除逐行 updated_at 写入
+#   - 最近同步时间统一由 data_task_status 承担
 # ==============================
 
 from __future__ import annotations
 
 from typing import List, Dict, Any, Optional, Iterable
-from datetime import datetime
 import json
 
 from backend.db.connection import get_conn, get_write_lock
+
 
 # ==============================================================================
 # symbol_index 表操作
@@ -44,7 +35,6 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
       - class
       - type
       - listing_date
-      - updated_at（调用方可省略，由本函数统一覆盖）
     """
     rows = list(rows or [])
     if not rows:
@@ -61,8 +51,7 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
             market,
             class,
             type,
-            listing_date,
-            updated_at
+            listing_date
         )
         VALUES (
             :symbol,
@@ -70,18 +59,15 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
             :market,
             :class,
             :type,
-            :listing_date,
-            :updated_at
+            :listing_date
         )
         ON CONFLICT(symbol, market) DO UPDATE SET
           name         = excluded.name,
           class        = excluded.class,
           type         = excluded.type,
-          listing_date = COALESCE(excluded.listing_date, symbol_index.listing_date),
-          updated_at   = excluded.updated_at;
+          listing_date = COALESCE(excluded.listing_date, symbol_index.listing_date);
         """
 
-        now = datetime.now().isoformat()
         prepared: List[Dict[str, Any]] = []
 
         for row in rows:
@@ -117,7 +103,6 @@ def upsert_symbol_index(rows: Iterable[Dict[str, Any]]) -> int:
                 "class": row.get("class"),
                 "type": row.get("type"),
                 "listing_date": listing_date,
-                "updated_at": now,
             })
 
         cur.executemany(sql, prepared)
@@ -173,8 +158,7 @@ def select_symbol_index(
         market,
         class,
         type,
-        listing_date,
-        updated_at
+        listing_date
     FROM symbol_index
     WHERE {where_sql}
     ORDER BY market ASC, symbol ASC;
@@ -188,9 +172,6 @@ def select_symbol_index(
 def get_listing_date(symbol: str, market: str) -> Optional[int]:
     """
     获取指定标的（symbol + market）的上市日期。
-
-    Returns:
-        Optional[int]: 上市日期（YYYYMMDD），不存在则返回 None
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -209,21 +190,6 @@ def get_listing_date(symbol: str, market: str) -> Optional[int]:
 def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
     """
     批量插入或更新标的档案（联合主键极简版）。
-
-    字段语义：
-      - symbol       (str): 必需
-      - market       (str): 必需，SH/SZ/BJ
-      - float_shares (float): 流通股本 / 流通份额，单位：万股 / 万份
-      - float_value  (float): 流通市值，单位：万元
-      - industry     (str): 行业名称
-      - region       (str): 地域名称
-      - concepts     (list/str/None): 概念标签列表，内部 JSON 字符串存储
-      - updated_at   (str): 更新时间（ISO8601）
-
-    最终写库策略：
-      - 先一次性读取 symbol_index 的有效 (symbol, market) 集合；
-      - 仅对有效集合中的 profile 记录执行批量 upsert；
-      - 无效记录直接跳过，不触发外键失败。
     """
     if not profiles:
         return 0
@@ -240,8 +206,7 @@ def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
             float_value,
             industry,
             region,
-            concepts,
-            updated_at
+            concepts
         )
         VALUES (
             :symbol,
@@ -250,19 +215,16 @@ def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
             :float_value,
             :industry,
             :region,
-            :concepts,
-            :updated_at
+            :concepts
         )
         ON CONFLICT(symbol, market) DO UPDATE SET
             float_shares = COALESCE(excluded.float_shares, symbol_profile.float_shares),
             float_value  = COALESCE(excluded.float_value,  symbol_profile.float_value),
             industry     = COALESCE(excluded.industry,     symbol_profile.industry),
             region       = COALESCE(excluded.region,       symbol_profile.region),
-            concepts     = COALESCE(excluded.concepts,     symbol_profile.concepts),
-            updated_at   = excluded.updated_at;
+            concepts     = COALESCE(excluded.concepts,     symbol_profile.concepts);
         """
 
-        now = datetime.now().isoformat()
         prepared: List[Dict[str, Any]] = []
 
         for p in profiles:
@@ -286,7 +248,6 @@ def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
                 "float_value": p.get("float_value"),
                 "industry": p.get("industry"),
                 "region": p.get("region"),
-                "updated_at": now,
             }
 
             concepts_val = p.get("concepts")
@@ -302,7 +263,6 @@ def upsert_symbol_profile(profiles: List[Dict[str, Any]]) -> int:
         if not prepared:
             return 0
 
-        # 一次性读取 symbol_index 当前有效联合键，避免逐条查询
         cur.execute("SELECT symbol, market FROM symbol_index;")
         valid_keys = {
             (str(row[0]).strip(), str(row[1]).strip().upper())
@@ -339,20 +299,10 @@ def select_symbol_profile(symbol: str, market: str) -> Optional[Dict[str, Any]]:
 
     result = dict(row)
 
-    # concepts: 如果是 JSON 字符串，解析为列表
     if result.get("concepts"):
         try:
             result["concepts"] = json.loads(result["concepts"])
         except (json.JSONDecodeError, TypeError):
-            # 保持原始字符串
             pass
 
     return result
-
-
-def get_profile_updated_at(symbol: str, market: str) -> Optional[str]:
-    """
-    获取档案的最后更新时间。
-    """
-    profile = select_symbol_profile(symbol, market)
-    return profile.get("updated_at") if profile else None

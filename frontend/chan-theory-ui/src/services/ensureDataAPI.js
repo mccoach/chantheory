@@ -1,14 +1,13 @@
 // frontend/src/services/ensureDataAPI.js
 // ==============================
-// V8.0 - CHANGED: index/profile 固定语义导入任务 + 保留其它旧任务声明
+// V9.1 - CHANGED: 基础数据第四项任务改名为 factor_events_snapshot
 //
 // 职责：
-//   - symbol_index / profile_snapshot：固定语义最小请求体
-//   - 其它尚未改造完成的任务：暂继续使用 declareTask 旧壳
+//   - symbol_index / profile_snapshot / factor_events_snapshot：固定语义最小请求体
+//   - trade_calendar / current_kline 以及其它旧链路：暂继续使用 declareTask 壳
 //
 // 说明：
 //   - 本文件只负责 HTTP 声明，不做等待、不做状态管理
-//   - current_profile 旧路径已彻底删除
 // ==============================
 
 import { api } from "@/api/client";
@@ -106,6 +105,15 @@ export async function declareSymbolIndex() {
  */
 export async function declareProfileSnapshot() {
   return declareFixedTypeTask("profile_snapshot");
+}
+
+/**
+ * factor_events_snapshot 集中导入（固定语义）
+ * 请求体：
+ *   { "type": "factor_events_snapshot" }
+ */
+export async function declareFactorEventsSnapshot() {
+  return declareFixedTypeTask("factor_events_snapshot");
 }
 
 /**

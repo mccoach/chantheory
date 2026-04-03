@@ -4,19 +4,58 @@
     <div class="cols">
       <div class="col table-col">
         <div class="table-head-inline">
-          <div class="table-head-left">导入候选</div>
-          <button
-            class="mini-btn"
-            type="button"
-            :disabled="ctl.state.loadingCandidates.value"
-            @click="handleRefreshCandidates"
-            :title="ctl.state.loadingCandidates.value ? '正在刷新候选...' : '重新扫描本地文件并刷新候选'"
-          >
-            {{ ctl.state.loadingCandidates.value ? "刷新中..." : "刷新候选" }}
-          </button>
+          <div class="table-head-left-group">
+            <div class="table-head-left">导入候选</div>
+
+            <div
+              class="path-inline"
+              :title="importRootDirDisplayTitle"
+            >
+              <span class="path-label">盘后数据源文件根目录：</span>
+              <span class="path-value">
+                {{ importRootDirDisplayText }}
+              </span>
+            </div>
+
+            <button
+              class="mini-btn"
+              type="button"
+              :disabled="settingDirBusy"
+              @click="handleSetImportRootDir"
+              title="设置盘后数据源文件根目录"
+            >
+              {{ settingDirBusy ? "设置中..." : "设置目录" }}
+            </button>
+
+            <div
+              v-if="dirFeedbackText"
+              class="dir-feedback"
+              :class="{ err: dirFeedbackIsError }"
+              :title="dirFeedbackText"
+            >
+              {{ dirFeedbackText }}
+            </div>
+          </div>
+
+          <div class="table-head-right">
+            <button
+              class="mini-btn"
+              type="button"
+              :disabled="ctl.state.refreshingCandidates.value || settingDirBusy"
+              @click="handleRefreshCandidates"
+              :title="ctl.state.refreshingCandidates.value ? '正在刷新候选...' : '重新扫描本地文件并刷新候选'"
+            >
+              {{ ctl.state.refreshingCandidates.value ? "刷新中..." : "刷新候选" }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="!ctl.state.candidatesReady.value" class="not-ready-box">
+          {{ candidatesDisplayMessage }}
         </div>
 
         <SymbolUniverseTable
+          v-else
           title=""
           :rows="tableRows"
           :columns="tableColumns"
@@ -56,16 +95,22 @@
     </div>
 
     <div class="hint-line">
-      当前阶段仅支持通达信本地 <span class="mono">.day</span> 文件导入，
-      固定导入为 <span class="mono">freq=1d</span>、
-      <span class="mono">adjust=none</span>。
-      选择的是导入任务，不是文件路径；文件候选完全以后端扫描结果为准。
+      当前支持通达信本地
+      <span class="mono">.day</span>、
+      <span class="mono">.lc1</span>、
+      <span class="mono">.lc5</span>
+      文件导入，对应周期分别为
+      <span class="mono">1d</span>、
+      <span class="mono">1m</span>、
+      <span class="mono">5m</span>；
+      固定导入为 <span class="mono">adjust=none</span>。
+      选择的是导入任务项，不是文件路径；同一标的不同周期会分别占用独立导入项，文件候选完全以后端当前唯一候选结果为准。
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, onBeforeUnmount, inject, watch } from "vue";
 import SymbolUniverseTable from "@/components/ui/SymbolUniverseTable.vue";
 import LocalImportFooterLeft from "@/components/ui/LocalImportFooterLeft.vue";
 import LocalImportQuickSelect from "@/components/ui/localImport/LocalImportQuickSelect.vue";
@@ -76,6 +121,7 @@ const ROW_H = 28;
 const APPROX_ROWS = 17;
 
 const ctl = useLocalImportController();
+const dialogManager = inject("dialogManager", null);
 
 const {
   ALL_SCOPE_KEY,
@@ -107,6 +153,37 @@ const {
   candidatesRef: computed(() => ctl.state.candidates.value || []),
 });
 
+const dirFeedbackText = ref("");
+const dirFeedbackIsError = ref(false);
+
+const settingDirBusy = computed(() => {
+  return (
+    ctl.state.importRootDirLoading.value ||
+    ctl.state.importRootDirBrowsing.value ||
+    ctl.state.importRootDirSaving.value
+  );
+});
+
+const importRootDirDisplayText = computed(() => {
+  if (ctl.state.importRootDirLoaded.value !== true) {
+    return "读取中...";
+  }
+
+  const dir = String(ctl.state.importRootDir.value || "").trim();
+  return dir || "未设置";
+});
+
+const importRootDirDisplayTitle = computed(() => {
+  if (ctl.state.importRootDirLoaded.value !== true) {
+    return "读取中...";
+  }
+  return String(ctl.state.importRootDir.value || "").trim() || "未设置";
+});
+
+const candidatesDisplayMessage = computed(() => {
+  return ctl.state.candidatesDisplayMessage.value || "候选尚未就绪，请刷新后等待完成。";
+});
+
 const tableColumns = [
   { key: "check", label: "", sortable: true, min: 32, max: 90, default: 30, align: "center" },
   { key: "star", label: "自选", sortable: true, min: 40, max: 80, default: 48, align: "center" },
@@ -124,18 +201,14 @@ function asStr(x) {
   return String(x == null ? "" : x).trim();
 }
 
-onMounted(async () => {
-  await ctl.initialize();
-});
-
-onBeforeUnmount(() => {
-  ctl.dispose?.();
-});
+function setDirFeedback(text, isError = false) {
+  dirFeedbackText.value = asStr(text);
+  dirFeedbackIsError.value = !!isError;
+}
 
 const tableRows = computed(() => sortedCandidates.value.map((row) => ({ ...row })));
 const uiMessage = computed(() => ctl.state.uiMessage.value || "");
 
-// 保留“自选”列占位；后续你会追加真实功能
 function isStarred(_row) {
   return false;
 }
@@ -152,7 +225,43 @@ function buildRowKey(row) {
 }
 
 function onToggleStarNoop() {
-  // 导入候选表暂保留“自选”列占位，后续会追加真实功能
+  // 导入候选表暂保留“自选”列占位
+}
+
+async function handleSetImportRootDir() {
+  if (settingDirBusy.value) return;
+
+  setDirFeedback("");
+
+  const browseResp = await ctl.browseSettingsDir();
+  if (browseResp?.ok !== true) {
+    setDirFeedback(browseResp?.message || "用户取消选择", true);
+    return;
+  }
+
+  const selectedDir = asStr(browseResp?.selected_dir);
+  const currentDir = asStr(ctl.state.importRootDir.value);
+
+  if (!selectedDir) {
+    setDirFeedback("后端未返回有效目录", true);
+    return;
+  }
+
+  if (selectedDir === currentDir) {
+    setDirFeedback("目录未改变", false);
+    return;
+  }
+
+  const saveResp = await ctl.saveSettingsDir(selectedDir);
+  if (saveResp?.ok !== true) {
+    setDirFeedback(saveResp?.message || "目录设置失败", true);
+    return;
+  }
+
+  setDirFeedback(
+    saveResp?.message || "源目录已变更，原候选已失效，请重新刷新。",
+    false
+  );
 }
 
 async function handleStartImport() {
@@ -202,11 +311,45 @@ async function handleRetryImport() {
 }
 
 async function handleRefreshCandidates() {
-  const r = await ctl.loadCandidates();
+  const r = await ctl.refreshCandidates();
   if (!r.ok) {
     alert(r.message || "刷新候选失败");
+    return;
+  }
+
+  // 若弹窗当前开着，且刷新成功使 snapshotValid=true，则立即触发一次显示
+  const dialog = dialogManager?.activeDialog?.value;
+  if (isLocalImportDialogOpen(dialog) && ctl.state.snapshotValid.value === true) {
+    await ctl.loadCandidates();
   }
 }
+
+function isLocalImportDialogOpen(dialog) {
+  const title = String(dialog?.title || "").trim();
+  return title === "盘后数据导入";
+}
+
+// 唯一判定：弹窗打开 + snapshotValid
+watch(
+  () => ({
+    open: isLocalImportDialogOpen(dialogManager?.activeDialog?.value),
+    valid: ctl.state.snapshotValid.value,
+  }),
+  async (next, prev) => {
+    const wasReady = !!(prev?.open && prev?.valid);
+    const isReady = !!(next?.open && next?.valid);
+
+    if (wasReady && !isReady) {
+      ctl.clearCandidates();
+      return;
+    }
+
+    if (!wasReady && isReady) {
+      await ctl.loadCandidates();
+    }
+  },
+  { immediate: true, deep: false }
+);
 
 const dialogFooterLeftProps = computed(() => ({
   batchId: ctl.state.displayBatch.value?.batch_id || "",
@@ -219,7 +362,8 @@ const dialogFooterLeftProps = computed(() => ({
   uiMessage: uiMessage.value || "",
   busy:
     ctl.state.loadingStatus.value ||
-    ctl.state.loadingTasks.value ||
+    ctl.state.loadingCandidates.value ||
+    ctl.state.refreshingCandidates.value ||
     ctl.state.submittingStart.value ||
     ctl.state.submittingCancel.value ||
     ctl.state.submittingRetry.value,
@@ -238,6 +382,10 @@ const dialogActions = {
     await handleRetryImport();
   },
 };
+
+onBeforeUnmount(() => {
+  ctl.clearCandidates();
+});
 
 defineExpose({
   dialogActions,
@@ -297,12 +445,68 @@ defineExpose({
   justify-content: space-between;
   padding: 8px 10px;
   border-bottom: 1px solid #2a2a2a;
+  gap: 10px;
+}
+
+.table-head-left-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
 }
 
 .table-head-left {
   font-size: 13px;
   font-weight: 700;
   color: #ddd;
+  flex: 0 0 auto;
+}
+
+.table-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.path-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 360px;
+  color: #bbb;
+  font-size: 12px;
+  flex: 0 1 auto;
+}
+
+.path-label {
+  flex: 0 0 auto;
+  color: #999;
+}
+
+.path-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #ddd;
+}
+
+.dir-feedback {
+  min-width: 0;
+  color: #8fd19e;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+}
+
+.dir-feedback.err {
+  color: #e67e22;
 }
 
 .mini-btn {
@@ -324,6 +528,18 @@ defineExpose({
 .mini-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.not-ready-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bbb;
+  font-size: 13px;
+  padding: 20px;
+  text-align: center;
+  min-height: 463px;
 }
 
 .hint-line {

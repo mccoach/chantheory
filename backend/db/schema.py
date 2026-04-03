@@ -2,39 +2,34 @@
 # ==============================
 # Schema 初始化
 #
-# 本轮改动（盘后数据导入 import 第一阶段）：
-#   - 删除旧 bulk 表定义（由你手动删旧表，本文件不再创建旧表）
-#   - 新建：
-#       * local_import_batches
-#       * local_import_tasks
+# 本轮改动（最终收口）：
+#   - symbol_index 删除逐行 updated_at
+#   - symbol_profile 删除逐行 updated_at
+#   - 批量快照表的同步时间统一由 data_task_status 承担
 #
-# 本次重构：
-#   - candles_raw 已按 market+symbol+freq+ts 联合键重构
-#   - local_import_batches 新增 selection_signature
-#   - local_import_tasks 的语义改为：
-#       * 只承载当前/最近有效 running(or recovered paused) 批次的任务
-#       * queued 批次不提前展开为 tasks
+# 本轮改动（watchlist 双主键升级）：
+#   - user_watchlist 从旧 symbol 单主键升级为 (symbol, market) 联合主键
+#   - watchlist 只允许引用 symbol_index 中真实存在的联合键标的
+#   - 彻底废弃 symbol-only 旧语义
 #
 # 说明：
-#   - 本文件只负责“新建当前正式表结构”
-#   - 不承担旧表删除 / 字段迁移逻辑
+#   - 只对批量快照表做去冗余收口
+#   - 逐行/分批写入表保留各自时间字段
 # ==============================
 
 from __future__ import annotations
 
 from backend.db.connection import get_conn
 
-
 def init_schema() -> None:
     conn = get_conn()
     cur = conn.cursor()
 
-    # ===== 表1：K线原始数据（联合键修正版）=====
+    # ===== 表1：日线原始数据（专用真相源表）=====
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS candles_raw (
+    CREATE TABLE IF NOT EXISTS candles_day_raw (
       market TEXT NOT NULL,
       symbol TEXT NOT NULL,
-      freq   TEXT NOT NULL,
       ts     INTEGER NOT NULL,
       open   REAL NOT NULL,
       high   REAL NOT NULL,
@@ -42,15 +37,8 @@ def init_schema() -> None:
       close  REAL NOT NULL,
       volume REAL NOT NULL,
       amount REAL,
-      turnover_rate REAL,
-      source TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      PRIMARY KEY (market, symbol, freq, ts)
-    );
-    """)
-    cur.execute("""
-    CREATE INDEX IF NOT EXISTS idx_candles_raw_main
-      ON candles_raw(market, symbol, freq, ts);
+      PRIMARY KEY (market, symbol, ts)
+    ) WITHOUT ROWID;
     """)
 
     # ===== 表2：复权因子 =====
@@ -69,7 +57,7 @@ def init_schema() -> None:
       ON adj_factors(symbol, date);
     """)
 
-    # ===== 表3：标的索引 =====
+    # ===== 表3：标的索引（批量快照表，删除逐行 updated_at）=====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_index (
       symbol       TEXT NOT NULL,
@@ -78,7 +66,6 @@ def init_schema() -> None:
       class        TEXT,
       type         TEXT,
       listing_date INTEGER,
-      updated_at   TEXT NOT NULL,
       PRIMARY KEY (symbol, market)
     );
     """)
@@ -95,7 +82,7 @@ def init_schema() -> None:
       ON symbol_index(listing_date);
     """)
 
-    # ===== 表4：标的档案（联合主键极简版）=====
+    # ===== 表4：标的档案（批量快照表，删除逐行 updated_at）=====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS symbol_profile (
       symbol       TEXT NOT NULL,
@@ -105,7 +92,6 @@ def init_schema() -> None:
       industry     TEXT,
       region       TEXT,
       concepts     TEXT,
-      updated_at   TEXT,
       PRIMARY KEY (symbol, market),
       FOREIGN KEY (symbol, market) REFERENCES symbol_index (symbol, market)
         ON DELETE CASCADE
@@ -121,54 +107,70 @@ def init_schema() -> None:
       ON symbol_profile(market, region);
     """)
 
-    # ===== 表5：用户自选股 =====
+    # ===== 表5：用户自选股（双主键版，保留逐行 updated_at）=====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS user_watchlist (
-      symbol     TEXT PRIMARY KEY,
+      symbol     TEXT NOT NULL,
+      market     TEXT NOT NULL,
       added_at   TEXT NOT NULL,
       source     TEXT,
       note       TEXT,
       tags       TEXT,
       sort_order INTEGER DEFAULT 0,
       updated_at TEXT,
-      FOREIGN KEY (symbol) REFERENCES symbol_index (symbol)
+      PRIMARY KEY (symbol, market),
+      FOREIGN KEY (symbol, market) REFERENCES symbol_index (symbol, market)
         ON DELETE CASCADE
         ON UPDATE CASCADE
     );
     """)
     cur.execute("""
     CREATE INDEX IF NOT EXISTS idx_watchlist_sort
-      ON user_watchlist(sort_order);
+      ON user_watchlist(sort_order, added_at);
+    """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_watchlist_market_sort
+      ON user_watchlist(market, sort_order, added_at);
     """)
 
     # ===== 表6：交易日历 =====
     cur.execute("""
     CREATE TABLE IF NOT EXISTS trade_calendar (
-      date          INTEGER PRIMARY KEY,
-      market        TEXT NOT NULL,
+      date           INTEGER PRIMARY KEY,
+      market         TEXT NOT NULL,
       is_trading_day INTEGER NOT NULL
     );
     """)
 
+    # ===== 表7：gbbq 原始事件真相源 =====
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS gbbq_events_raw (
+      market   TEXT NOT NULL,
+      symbol   TEXT NOT NULL,
+      date     INTEGER NOT NULL,
+      category INTEGER NOT NULL,
+      field1   REAL,
+      field2   REAL,
+      field3   REAL,
+      field4   REAL,
+      PRIMARY KEY (market, symbol, date, category)
+    ) WITHOUT ROWID;
+    """)
+
     # ==========================================================
-    # 表7：盘后数据导入批次（local_import_batches）
+    # 表8：盘后数据导入批次（保留 started/finished 语义字段）
     # ==========================================================
     cur.execute("""
     CREATE TABLE IF NOT EXISTS local_import_batches (
-      batch_id             TEXT PRIMARY KEY,
-      state                TEXT NOT NULL,
-      created_at           TEXT NOT NULL,
-      started_at           TEXT,
-      finished_at          TEXT,
-      progress_total       INTEGER NOT NULL DEFAULT 0,
-      progress_done        INTEGER NOT NULL DEFAULT 0,
-      progress_success     INTEGER NOT NULL DEFAULT 0,
-      progress_failed      INTEGER NOT NULL DEFAULT 0,
-      progress_cancelled   INTEGER NOT NULL DEFAULT 0,
-      retryable            INTEGER NOT NULL DEFAULT 0,
-      cancelable           INTEGER NOT NULL DEFAULT 0,
-      ui_message           TEXT,
-      selection_signature  TEXT
+      batch_id            TEXT PRIMARY KEY,
+      state               TEXT NOT NULL,
+      created_at          TEXT NOT NULL,
+      started_at          TEXT,
+      finished_at         TEXT,
+      retryable           INTEGER NOT NULL DEFAULT 0,
+      cancelable          INTEGER NOT NULL DEFAULT 0,
+      ui_message          TEXT,
+      selection_signature TEXT
     );
     """)
     cur.execute("""
@@ -181,23 +183,23 @@ def init_schema() -> None:
     """)
 
     # ==========================================================
-    # 表8：盘后数据导入任务（local_import_tasks）
+    # 表9：盘后数据导入任务（保留 started/finished 语义字段）
     # ==========================================================
-    # 设计语义：
-    #   - 只为“当前/最近有效 running(or recovered paused)”批次展开任务
-    #   - queued 批次不提前写入 tasks
     cur.execute("""
     CREATE TABLE IF NOT EXISTS local_import_tasks (
-      id             INTEGER PRIMARY KEY AUTOINCREMENT,
-      batch_id       TEXT NOT NULL,
-      market         TEXT NOT NULL,
-      symbol         TEXT NOT NULL,
-      freq           TEXT NOT NULL,
-      state          TEXT NOT NULL,
-      attempts       INTEGER NOT NULL DEFAULT 0,
-      error_code     TEXT,
-      error_message  TEXT,
-      updated_at     TEXT NOT NULL,
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id         TEXT NOT NULL,
+      market           TEXT NOT NULL,
+      symbol           TEXT NOT NULL,
+      freq             TEXT NOT NULL,
+      state            TEXT NOT NULL,
+      attempts         INTEGER NOT NULL DEFAULT 0,
+      signal_code      TEXT,
+      signal_message   TEXT,
+      appended_rows    INTEGER,
+      source_file_path TEXT,
+      started_at       TEXT,
+      finished_at      TEXT,
       UNIQUE(batch_id, market, symbol, freq),
       FOREIGN KEY (batch_id) REFERENCES local_import_batches (batch_id)
         ON DELETE CASCADE
@@ -213,8 +215,22 @@ def init_schema() -> None:
       ON local_import_tasks(batch_id, market, symbol, freq);
     """)
 
-    conn.commit()
+    # ==========================================================
+    # 表10：批量任务稳定状态真相源（保留 updated_at）
+    # ==========================================================
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS data_task_status (
+      task_type          TEXT PRIMARY KEY,
+      task_status        TEXT NOT NULL,
+      idle_reason        TEXT,
+      last_success_at    TEXT,
+      last_failure_at    TEXT,
+      last_error_message TEXT,
+      updated_at         TEXT NOT NULL
+    );
+    """)
 
+    conn.commit()
 
 def ensure_initialized() -> None:
     init_schema()

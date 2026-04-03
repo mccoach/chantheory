@@ -2,15 +2,20 @@
 # ==============================
 # 盘后数据导入 import - 串行总编排器
 #
-# 最优模型：
-#   - scan.py 负责生成标准扫描快照
-#   - runtime.py 负责缓存快照 + TTL 复用 + file_path 索引
-#   - candidates.py / orchestrator.py 都只消费快照，不私自重扫
+# 职责（修复后）：
+#   - 只负责流程编排
+#   - 不再负责 display/status 视图构造
+#   - 不再直接解释 progress
 #
-# 目标：
-#   - 打开弹窗扫描一次后，start / retry / pipeline 在 TTL 内直接复用
-#   - 保持职责边界清晰
-#   - 保留完整耗时打点，便于继续验证体验
+# 真相源收敛：
+#   - 候选结果真相源：本地持久化候选结果文件
+#   - 执行真相源：local_import_tasks
+#   - 批次表：只保留元信息与调度状态
+#   - 对前端展示视图统一由 repository.build_status_snapshot() 构造
+#
+# 本轮改动（refresh / get 拆分版）：
+#   - orchestrator / pipeline 不再消费 runtime 内存扫描快照
+#   - 统一只消费本地持久化候选结果真相源
 # ==============================
 
 from __future__ import annotations
@@ -23,10 +28,7 @@ from typing import Dict, Any, List, Optional
 
 from backend.services.local_import.runtime import get_local_import_runtime
 from backend.services.local_import.executor import execute_import_file_task
-from backend.services.local_import.events import (
-    emit_local_import_status,
-    emit_local_import_task_changed,
-)
+from backend.services.local_import.events import emit_local_import_status
 from backend.services.local_import.repository import (
     create_batch,
     get_batch,
@@ -38,15 +40,18 @@ from backend.services.local_import.repository import (
     get_latest_active_batch_by_signature,
     build_status_snapshot,
     mark_batch_running,
+    mark_batch_paused,
     mark_batch_queued_for_retry,
+    mark_batch_terminal_state,
+    update_batch_ui_message,
     mark_task_running,
     mark_task_terminal,
     cancel_queued_tasks_in_batch,
     reset_retryable_tasks,
-    recompute_batch_progress_and_state,
     create_tasks_for_batch,
     list_tasks_for_batch,
     delete_batches,
+    get_batch_counts,
 )
 from backend.services.local_import.repository.tasks import (
     delete_tasks_except_batch_ids,
@@ -114,43 +119,53 @@ def _delete_all_batches_except(keep_batch_id: str) -> None:
     delete_tasks_except_batch_ids([keep_bid])
 
 
-def _schedule_drive_pipeline(
-    preferred_batch_id: Optional[str] = None,
-    preferred_items: Optional[List[Dict[str, Any]]] = None,
-    trigger: str = "unknown",
-) -> None:
-    schedule_ts = time.perf_counter()
-    _log_stage(
-        "pipeline.scheduled",
-        schedule_ts,
-        trigger=trigger,
-        preferred_batch_id=preferred_batch_id,
-        preferred_items_count=len(preferred_items or []),
-    )
+def _settle_batch_state_from_tasks(batch_id: str, ui_message: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    batch = get_batch(batch_id)
+    if not batch:
+        return None
 
-    async def _runner() -> None:
-        runner_ts = time.perf_counter()
-        _log_stage(
-            "pipeline.runner_started",
-            runner_ts,
-            trigger=trigger,
-            preferred_batch_id=preferred_batch_id,
+    old_state = str(batch.get("state") or "").strip().lower()
+    if old_state == "paused":
+        if ui_message is not None:
+            return update_batch_ui_message(batch_id, ui_message)
+        return batch
+
+    queued_count, running_count, success_count, failed_count, cancelled_count = get_batch_counts(batch_id)
+    total = queued_count + running_count + success_count + failed_count + cancelled_count
+    done = success_count + failed_count + cancelled_count
+
+    if old_state == "queued" and not batch.get("started_at"):
+        if ui_message is not None:
+            return update_batch_ui_message(batch_id, ui_message)
+        return batch
+
+    if done < total:
+        b = get_batch(batch_id)
+        if b and str(b.get("state") or "").strip().lower() != "running":
+            mark_batch_running(batch_id, ui_message or "正在导入本地盘后文件")
+            return get_batch(batch_id)
+
+        if ui_message is not None:
+            return update_batch_ui_message(batch_id, ui_message)
+        return get_batch(batch_id)
+
+    if cancelled_count > 0:
+        return mark_batch_terminal_state(
+            batch_id,
+            "cancelled",
+            ui_message or "导入已结束：存在已取消任务",
         )
-        try:
-            await drive_pipeline(
-                preferred_batch_id=preferred_batch_id,
-                preferred_items=preferred_items,
-                trigger=trigger,
-                scheduled_at=schedule_ts,
-            )
-        except Exception as e:
-            _LOG.exception("[LOCAL_IMPORT] background drive_pipeline failed: %s", e)
-
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_runner())
-    except RuntimeError:
-        _LOG.exception("[LOCAL_IMPORT] failed to schedule background pipeline: no running event loop")
+    if failed_count > 0:
+        return mark_batch_terminal_state(
+            batch_id,
+            "failed",
+            ui_message or "导入已结束：存在失败任务",
+        )
+    return mark_batch_terminal_state(
+        batch_id,
+        "success",
+        ui_message or "导入完成",
+    )
 
 
 async def _run_single_batch_until_blocked(
@@ -191,7 +206,7 @@ async def _run_single_batch_until_blocked(
 
         next_task = get_next_queued_task(bid)
         if not next_task:
-            recompute_batch_progress_and_state(bid)
+            _settle_batch_state_from_tasks(bid)
             _emit_status_snapshot()
             if pipeline_start_ts is not None:
                 _log_stage(
@@ -230,23 +245,21 @@ async def _run_single_batch_until_blocked(
         runtime = get_local_import_runtime()
         file_path = runtime.get_file_path(market, symbol, freq)
         if not file_path:
-            task = mark_task_running(bid, market, symbol, freq)
-            if task:
-                emit_local_import_task_changed(batch_id=bid, task=task, refresh_tasks=True)
+            mark_task_running(bid, market, symbol, freq)
 
-            failed_task = mark_task_terminal(
+            mark_task_terminal(
                 bid,
                 market,
                 symbol,
                 freq,
                 "failed",
                 "FILE_NOT_FOUND",
-                "未能在当前扫描快照中定位到目标本地文件",
+                "未能在当前候选结果真相源中定位到目标本地文件",
+                None,
+                None,
             )
-            if failed_task:
-                emit_local_import_task_changed(batch_id=bid, task=failed_task, refresh_tasks=True)
 
-            recompute_batch_progress_and_state(bid)
+            _settle_batch_state_from_tasks(bid, "导入执行中：存在文件定位失败")
             _emit_status_snapshot("导入执行中：存在文件定位失败")
 
             if pipeline_start_ts is not None and not first_task_finished_logged:
@@ -260,15 +273,11 @@ async def _run_single_batch_until_blocked(
                     symbol=symbol,
                     freq=freq,
                     result="failed",
-                    error_code="FILE_NOT_FOUND",
+                    signal_code="FILE_NOT_FOUND",
                 )
             continue
 
-        task = mark_task_running(bid, market, symbol, freq)
-        if task:
-            emit_local_import_task_changed(batch_id=bid, task=task, refresh_tasks=True)
-
-        _emit_status_snapshot("正在导入本地盘后文件")
+        mark_task_running(bid, market, symbol, freq)
 
         if pipeline_start_ts is not None and not first_task_running_logged:
             first_task_running_logged = True
@@ -283,24 +292,37 @@ async def _run_single_batch_until_blocked(
             )
 
         try:
-            await execute_import_file_task(
+            result = await execute_import_file_task(
                 batch_id=bid,
                 market=market,
                 symbol=symbol,
                 freq=freq,
                 file_path=file_path,
             )
-            done_task = mark_task_terminal(
+
+            signal_code = result.get("signal_code")
+            signal_message = result.get("signal_message")
+            appended_rows = result.get("appended_rows")
+            source_file_path = result.get("source_file_path")
+
+            mark_task_terminal(
                 bid,
                 market,
                 symbol,
                 freq,
                 "success",
-                None,
-                None,
+                signal_code,
+                signal_message,
+                appended_rows,
+                source_file_path,
             )
-            if done_task:
-                emit_local_import_task_changed(batch_id=bid, task=done_task, refresh_tasks=True)
+
+            if signal_code and signal_message:
+                _settle_batch_state_from_tasks(bid, signal_message)
+                _emit_status_snapshot(signal_message)
+            else:
+                _settle_batch_state_from_tasks(bid)
+                _emit_status_snapshot()
 
             if pipeline_start_ts is not None and not first_task_finished_logged:
                 first_task_finished_logged = True
@@ -313,10 +335,11 @@ async def _run_single_batch_until_blocked(
                     symbol=symbol,
                     freq=freq,
                     result="success",
+                    signal_code=signal_code,
                 )
 
         except FileNotFoundError as e:
-            done_task = mark_task_terminal(
+            mark_task_terminal(
                 bid,
                 market,
                 symbol,
@@ -324,9 +347,12 @@ async def _run_single_batch_until_blocked(
                 "failed",
                 "FILE_NOT_FOUND",
                 str(e),
+                None,
+                file_path,
             )
-            if done_task:
-                emit_local_import_task_changed(batch_id=bid, task=done_task, refresh_tasks=True)
+
+            _settle_batch_state_from_tasks(bid)
+            _emit_status_snapshot()
 
             if pipeline_start_ts is not None and not first_task_finished_logged:
                 first_task_finished_logged = True
@@ -339,21 +365,27 @@ async def _run_single_batch_until_blocked(
                     symbol=symbol,
                     freq=freq,
                     result="failed",
-                    error_code="FILE_NOT_FOUND",
+                    signal_code="FILE_NOT_FOUND",
                 )
 
         except ValueError as e:
-            done_task = mark_task_terminal(
+            msg = str(e)
+            signal_code = "PARSE_OR_NORMALIZE_FAILED"
+
+            mark_task_terminal(
                 bid,
                 market,
                 symbol,
                 freq,
                 "failed",
-                "PARSE_OR_NORMALIZE_FAILED",
-                str(e),
+                signal_code,
+                msg,
+                None,
+                file_path,
             )
-            if done_task:
-                emit_local_import_task_changed(batch_id=bid, task=done_task, refresh_tasks=True)
+
+            _settle_batch_state_from_tasks(bid)
+            _emit_status_snapshot()
 
             if pipeline_start_ts is not None and not first_task_finished_logged:
                 first_task_finished_logged = True
@@ -366,11 +398,11 @@ async def _run_single_batch_until_blocked(
                     symbol=symbol,
                     freq=freq,
                     result="failed",
-                    error_code="PARSE_OR_NORMALIZE_FAILED",
+                    signal_code=signal_code,
                 )
 
         except Exception as e:
-            done_task = mark_task_terminal(
+            mark_task_terminal(
                 bid,
                 market,
                 symbol,
@@ -378,9 +410,12 @@ async def _run_single_batch_until_blocked(
                 "failed",
                 "IMPORT_EXECUTION_FAILED",
                 str(e),
+                None,
+                file_path,
             )
-            if done_task:
-                emit_local_import_task_changed(batch_id=bid, task=done_task, refresh_tasks=True)
+
+            _settle_batch_state_from_tasks(bid)
+            _emit_status_snapshot()
 
             if pipeline_start_ts is not None and not first_task_finished_logged:
                 first_task_finished_logged = True
@@ -393,11 +428,9 @@ async def _run_single_batch_until_blocked(
                     symbol=symbol,
                     freq=freq,
                     result="failed",
-                    error_code="IMPORT_EXECUTION_FAILED",
+                    signal_code="IMPORT_EXECUTION_FAILED",
                 )
 
-        recompute_batch_progress_and_state(bid)
-        _emit_status_snapshot()
         await asyncio.sleep(0)
 
 
@@ -431,6 +464,8 @@ async def _promote_batch_to_running_if_possible(
         )
 
     create_tasks_for_batch(bid, _normalize_items(items))
+    _settle_batch_state_from_tasks(bid, "正在导入本地盘后文件")
+
     if pipeline_start_ts is not None:
         _log_stage(
             "pipeline.tasks_created",
@@ -527,6 +562,45 @@ async def _advance_pipeline_if_possible(
     return build_status_snapshot()
 
 
+def _schedule_drive_pipeline(
+    preferred_batch_id: Optional[str] = None,
+    preferred_items: Optional[List[Dict[str, Any]]] = None,
+    trigger: str = "unknown",
+) -> None:
+    schedule_ts = time.perf_counter()
+    _log_stage(
+        "pipeline.scheduled",
+        schedule_ts,
+        trigger=trigger,
+        preferred_batch_id=preferred_batch_id,
+        preferred_items_count=len(preferred_items or []),
+    )
+
+    async def _runner() -> None:
+        runner_ts = time.perf_counter()
+        _log_stage(
+            "pipeline.runner_started",
+            runner_ts,
+            trigger=trigger,
+            preferred_batch_id=preferred_batch_id,
+        )
+        try:
+            await drive_pipeline(
+                preferred_batch_id=preferred_batch_id,
+                preferred_items=preferred_items,
+                trigger=trigger,
+                scheduled_at=schedule_ts,
+            )
+        except Exception as e:
+            _LOG.exception("[LOCAL_IMPORT] background drive_pipeline failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        _LOG.exception("[LOCAL_IMPORT] failed to schedule background pipeline: no running event loop")
+
+
 async def start_import_batch(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     req_ts = time.perf_counter()
     _log_stage("start.request_received", req_ts, items_count=len(items or []))
@@ -559,11 +633,15 @@ async def start_import_batch(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     runtime = get_local_import_runtime()
 
-    # 只通过 runtime 获取/刷新扫描快照，不直接自行扫描
-    _log_stage("start.before_get_or_refresh_scan_snapshot", req_ts)
-    snapshot = runtime.get_or_refresh_scan_snapshot()
+    _log_stage("start.before_require_persisted_snapshot", req_ts)
+    try:
+        snapshot = runtime.require_persisted_snapshot()
+    except Exception:
+        _log_stage("start.persisted_snapshot_missing", req_ts)
+        return build_status_snapshot("当前没有可用候选结果，请先刷新候选")
+
     _log_stage(
-        "start.after_get_or_refresh_scan_snapshot",
+        "start.after_require_persisted_snapshot",
         req_ts,
         snapshot_generated_at=snapshot.get("generated_at"),
         snapshot_items_count=len(snapshot.get("items") or []),
@@ -620,17 +698,11 @@ async def cancel_import_batch(batch_id: str) -> Dict[str, Any]:
     if state not in ("queued", "running", "paused"):
         return build_status_snapshot("当前批次不可取消")
 
-    changed_tasks = cancel_queued_tasks_in_batch(bid)
-    for task in changed_tasks:
-        emit_local_import_task_changed(
-            batch_id=bid,
-            task=task,
-            refresh_tasks=True,
-        )
+    cancel_queued_tasks_in_batch(bid)
 
-    recompute_batch_progress_and_state(
+    _settle_batch_state_from_tasks(
         bid,
-        ui_message="取消已提交：当前正在导入的文件会执行完，未开始任务将被取消",
+        "取消已提交：当前正在导入的文件会执行完，未开始任务将被取消",
     )
 
     snap = _emit_status_snapshot("取消已提交：当前正在导入的文件会执行完，未开始任务将被取消")
@@ -663,10 +735,16 @@ async def retry_import_batch(batch_id: str) -> Dict[str, Any]:
     _log_stage("retry.items_normalized", req_ts, batch_id=bid, normalized_items_count=len(norm_items))
 
     runtime = get_local_import_runtime()
-    _log_stage("retry.before_get_or_refresh_scan_snapshot", req_ts, batch_id=bid)
-    snapshot = runtime.get_or_refresh_scan_snapshot()
+
+    _log_stage("retry.before_require_persisted_snapshot", req_ts, batch_id=bid)
+    try:
+        snapshot = runtime.require_persisted_snapshot()
+    except Exception:
+        _log_stage("retry.persisted_snapshot_missing", req_ts, batch_id=bid)
+        return build_status_snapshot("当前没有可用候选结果，请先刷新候选")
+
     _log_stage(
-        "retry.after_get_or_refresh_scan_snapshot",
+        "retry.after_require_persisted_snapshot",
         req_ts,
         batch_id=bid,
         snapshot_generated_at=snapshot.get("generated_at"),
@@ -678,12 +756,11 @@ async def retry_import_batch(batch_id: str) -> Dict[str, Any]:
 
     changed_tasks = reset_retryable_tasks(bid)
     _log_stage("retry.tasks_reset_done", req_ts, batch_id=bid, reset_count=len(changed_tasks or []))
-    for task in changed_tasks:
-        emit_local_import_task_changed(
-            batch_id=bid,
-            task=task,
-            refresh_tasks=True,
-        )
+
+    _settle_batch_state_from_tasks(
+        bid,
+        "批次已重新启动，正在准备导入任务",
+    )
 
     snap = _emit_status_snapshot("批次已重新启动，正在准备导入任务")
     _log_stage("retry.first_status_emitted", req_ts, batch_id=bid)
@@ -734,12 +811,13 @@ async def drive_pipeline(
     )
 
     try:
+        snapshot = runtime.require_persisted_snapshot()
         _log_stage(
-            "pipeline.scan_snapshot_reused",
+            "pipeline.persisted_snapshot_consumed",
             pipeline_ts,
             trigger=trigger,
             preferred_batch_id=preferred_batch_id,
-            snapshot_generated_at=runtime.get_snapshot_generated_at(),
+            snapshot_generated_at=snapshot.get("generated_at"),
         )
 
         snap = await _advance_pipeline_if_possible(

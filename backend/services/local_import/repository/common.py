@@ -28,14 +28,10 @@ def _row_to_batch_dict(row) -> Dict[str, Any]:
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
-        "progress_total": int(row["progress_total"] or 0),
-        "progress_done": int(row["progress_done"] or 0),
-        "progress_success": int(row["progress_success"] or 0),
-        "progress_failed": int(row["progress_failed"] or 0),
-        "progress_cancelled": int(row["progress_cancelled"] or 0),
         "retryable": bool(int(row["retryable"] or 0) == 1),
         "cancelable": bool(int(row["cancelable"] or 0) == 1),
         "ui_message": row["ui_message"],
+        "selection_signature": row["selection_signature"],
     }
 
 
@@ -49,7 +45,10 @@ def _joined_row_to_task_dict(row) -> Dict[str, Any]:
         "type": row["type"],
         "state": row["state"],
         "attempts": int(row["attempts"] or 0),
-        "error_code": row["error_code"],
-        "error_message": row["error_message"],
-        "updated_at": row["updated_at"],
+        "signal_code": row["signal_code"],
+        "signal_message": row["signal_message"],
+        "appended_rows": row["appended_rows"],
+        "source_file_path": row["source_file_path"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
     }

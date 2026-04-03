@@ -1,45 +1,38 @@
 # backend/datasource/registry.py
 # ==============================
-# 数据源方法目录 V13.0
+# 数据源方法目录 V16.0
 #
-# 本轮改动（最终收尾）：
-#   - remote profile 能力已彻底删除
-#   - trade_calendar 已切换为 TDX 本地完整自然日历构建
-#   - 仅保留：
-#       * TDX 本地 symbol_index / profile_snapshot / trade_calendar
-#       * baostock / eastmoney / sina 的现有业务能力
+# 本轮改动（gbbq 原始事件快照）：
+#   - 正式废弃 factors_snapshot 全量成品因子任务思路
+#   - 基础数据第4项改为：
+#       gbbq_events_snapshot
+#   - 新增：
+#       * gbbq_events_raw
+#         返回 gbbq 全量原始事件表
 # ==============================
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Any, Dict, List, Tuple, Optional
 
-# 原子化调用函数
 from .providers import baostock_adapter as bs
 from .providers import eastmoney_adapter
 from .providers import sina_adapter
 from .providers import tdx_local_adapter
 
 
-# --- 1. 方法描述符 (标准化的弹药规格) ---
-
 @dataclass(frozen=True)
 class MethodDescriptor:
-    """
-    定义一个数据获取方法的完整元数据。
-    """
-    id: str  # 全局唯一ID, 格式: provider.name。例如: "sse.get_stock_list_sh_sse"
-    name: str  # 人类可读的名称
-    provider: str  # 数据提供商标识符: "sse"/"szse"/"baostock"/"eastmoney"/"sina"
-    category: str  # 标准化的数据类别，如 "stock_daily_bars"
-    callable: Callable  # 实际调用的函数引用
-    priority: int  # 优先级, 数值越小越高。10=主方案, 50=备选, 100=不稳定备用
-    tags: Tuple[str, ...] = field(default_factory=tuple)  # 标签, 用于快速过滤
-    params_template: Dict[str, Any] = field(default_factory=dict)  # 参数模板, 用于校验和提示
-    description: str = ""  # 详细描述
+    id: str
+    name: str
+    provider: str
+    category: str
+    callable: Callable
+    priority: int
+    tags: Tuple[str, ...] = field(default_factory=tuple)
+    params_template: Dict[str, Any] = field(default_factory=dict)
+    description: str = ""
 
-
-# --- 2. 全部可用方法列表 (军火库清单) ---
 
 _ALL_METHODS: List[MethodDescriptor] = [
     # ==========================================================================
@@ -105,17 +98,17 @@ _ALL_METHODS: List[MethodDescriptor] = [
     ),
 
     # ==========================================================================
-    # 静态与衍生数据
+    # gbbq 原始事件（TDX 本地）
     # ==========================================================================
     MethodDescriptor(
-        id="baostock.get_adj_factors",
-        name="Baostock-前/后复权因子",
-        provider="baostock",
-        category="adj_factor",
-        callable=bs.get_raw_adj_factors_bs,
+        id="tdx_local.gbbq_events_raw",
+        name="通达信本地-gbbq全量原始事件表",
+        provider="tdx_local",
+        category="gbbq_events_raw",
+        callable=tdx_local_adapter.get_gbbq_events_raw_tdx,
         priority=10,
-        tags=("stock", "factor", "baostock"),
-        description="一次性从 Baostock 获取前/后复权因子原始数据",
+        tags=("local", "tdx", "gbbq", "raw"),
+        description="解析 gbbq 并返回全量原始事件表",
     ),
 
     # ==========================================================================

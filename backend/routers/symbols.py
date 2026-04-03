@@ -6,17 +6,10 @@
 #   - GET /api/symbols/index   : 返回当前 symbol_index 快照（只读，不刷新）
 #   - GET /api/symbols/summary : 标的列表摘要统计
 #
-# 刷新标的列表的唯一入口：
-#   - POST /api/ensure-data
-#       {
-#         "type": "symbol_index",
-#         "scope": "global",
-#         "symbol": null,
-#         "freq": null,
-#         "adjust": "none",
-#         "params": { "force_fetch": true|false }
-#       }
-#   - 然后等待 SSE 中 task_type='symbol_index' 的 task_done，再 GET /api/symbols/index 读取快照。
+# 说明：
+#   - symbol_index 作为批量快照表
+#   - 不再返回逐行 updated_at
+#   - 最近同步时间应统一从基础任务状态接口读取
 # ==============================
 
 from __future__ import annotations
@@ -37,18 +30,6 @@ _LOG = get_logger("symbols.router")
 async def api_get_symbol_index(
     request: Request,
 ) -> Dict[str, Any]:
-    """
-    返回 symbol_index 快照（只读，不触发刷新）
-
-    返回字段：
-      - symbol
-      - market
-      - name
-      - class
-      - type
-      - listing_date
-      - updated_at
-    """
     tid = request.headers.get("x-trace-id")
 
     log_event(
@@ -107,29 +88,6 @@ async def api_get_symbol_index(
 
 @router.get("/summary")
 async def api_symbols_summary(request: Request) -> Dict[str, Any]:
-    """
-    标的列表摘要统计
-
-    返回：
-      {
-        "ok": true,
-        "by_class": [
-          { "class": "stock", "n": 7000 },
-          { "class": "fund", "n": 3000 },
-          ...
-        ],
-        "by_type": [
-          { "type": "主板", "n": 5000 },
-          { "type": "ETF", "n": 2000 },
-          ...
-        ],
-        "by_type_market": [
-          { "type": "主板", "market": "SH", "n": 2000 },
-          ...
-        ],
-        "trace_id": "..."
-      }
-    """
     tid = request.headers.get("x-trace-id")
 
     log_event(
@@ -204,12 +162,6 @@ async def api_symbols_summary(request: Request) -> Dict[str, Any]:
 
 
 def _select_symbol_index_only() -> list:
-    """
-    查询 symbol_index 全量快照（只读）
-
-    Returns:
-        List[Dict]
-    """
     conn = get_conn()
     cur = conn.cursor()
 
@@ -221,8 +173,7 @@ def _select_symbol_index_only() -> list:
             name,
             class,
             type,
-            listing_date,
-            updated_at
+            listing_date
         FROM symbol_index
         ORDER BY market ASC, symbol ASC;
         """

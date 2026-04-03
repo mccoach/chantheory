@@ -2,30 +2,38 @@
 // ==============================
 // Local Import 控制器
 //
-// 职责：
-//   - 管理 candidates / status 的加载
-//   - 管理 start / cancel / retry 提交
-//   - 管理 SSE 主更新链路
-//   - 管理初始化快照与 watchdog 纠偏
+// 最终正式契约：
+//   - initialize(): 只做 settings/status/SSE 预热
+//   - refreshCandidates(): 只触发后端生成并持久化候选快照；成功返回即 snapshotValid=true
+//   - loadCandidates(): 只读候选快照并装入前端内存；前提是 snapshotValid=true
+//   - clearCandidates(): 只清理前端候选内存，不改变快照有效性
 //
-// 当前前端语义（已拉直）：
-//   - start / retry 只负责“启动确认”
-//   - 不再同步拉 tasks（任务区 UI 已移除）
-//   - 批次后续推进完全依赖：
-//       1) local_import.status / local_import.task_changed
-//       2) /api/local-import/status watchdog 纠偏
+// 有效快照：
+//   - refreshCandidates() 成功返回 => 有效
+//   - saveSettingsDir() 修改目录 => 失效
+//
+// 不再保留：
+//   - 会话首刷状态
+//   - 等待 SSE 才算完成
+//   - 刷新失败状态机
+//   - 刷新后补读等待链
 // ==============================
 
 import { computed } from "vue";
-import { useEventStream } from "@/composables/useEventStream";
+import { useLocalImportEventStream } from "@/composables/useEventStream";
 import {
   fetchLocalImportCandidates,
+  refreshLocalImportCandidates,
   startLocalImport,
   fetchLocalImportStatus,
-  fetchLocalImportTasks,
   cancelLocalImport,
   retryLocalImport,
 } from "@/services/localImportService";
+import {
+  fetchLocalImportSettings,
+  browseLocalImportSettingsDir,
+  saveLocalImportSettings,
+} from "@/services/localImportSettingsService";
 import { createLocalImportState } from "./state";
 import { createLocalImportSseTracker } from "./sseTracker";
 
@@ -83,35 +91,13 @@ function normalizeQueuedBatch(item) {
   };
 }
 
-function normalizeTask(item) {
-  const it = item && typeof item === "object" ? item : {};
-  return {
-    market: asStr(it.market).toUpperCase(),
-    symbol: asStr(it.symbol),
-    freq: asStr(it.freq),
-    name: asStr(it.name),
-    class: asStr(it.class),
-    type: asStr(it.type),
-    state: asStr(it.state),
-    attempts: Number.isFinite(+it.attempts) ? +it.attempts : 0,
-    error_code: it.error_code == null ? null : asStr(it.error_code),
-    error_message: it.error_message == null ? null : asStr(it.error_message),
-    updated_at: it.updated_at == null ? null : asStr(it.updated_at),
-  };
-}
-
-function taskIdentityKey(task) {
-  const t = task && typeof task === "object" ? task : {};
-  return `${asStr(t.market).toUpperCase()}:${asStr(t.symbol)}|${asStr(t.freq)}`;
-}
-
 let _singleton = null;
 
 export function useLocalImportController() {
   if (_singleton) return _singleton;
 
   const state = createLocalImportState();
-  const eventStream = useEventStream();
+  const eventStream = useLocalImportEventStream();
 
   function applyStatusSnapshot(payload) {
     const p = payload && typeof payload === "object" ? payload : {};
@@ -119,46 +105,134 @@ export function useLocalImportController() {
     state.displayBatch.value = normalizeBatch(p.display_batch);
     state.queuedBatches.value = safeArray(p.queued_batches).map(normalizeQueuedBatch);
     state.uiMessage.value = p.ui_message == null ? null : asStr(p.ui_message);
+  }
 
-    const bid = asStr(state.displayBatch.value?.batch_id);
-    if (!bid) {
-      state.tasksBatchId.value = null;
-      state.tasks.value = [];
+  function clearCandidates() {
+    state.candidatesReady.value = false;
+    state.candidates.value = [];
+    state.candidatesGeneratedAt.value = null;
+  }
+
+  function setCandidatesDisplayMessage(message) {
+    state.candidatesDisplayMessage.value = asStr(message);
+  }
+
+  function invalidateSnapshot(message) {
+    state.snapshotValid.value = false;
+    clearCandidates();
+    setCandidatesDisplayMessage(message);
+  }
+
+  function validateSnapshot(message = "") {
+    state.snapshotValid.value = true;
+    if (message) {
+      setCandidatesDisplayMessage(message);
+    } else {
+      setCandidatesDisplayMessage("");
     }
   }
 
   async function loadCandidates() {
+    if (state.snapshotValid.value !== true) {
+      clearCandidates();
+      if (!asStr(state.candidatesDisplayMessage.value)) {
+        setCandidatesDisplayMessage("候选尚未就绪，请刷新后等待完成。");
+      }
+      return {
+        ok: false,
+        ready: false,
+        message: state.candidatesDisplayMessage.value,
+      };
+    }
+
     state.loadingCandidates.value = true;
     try {
       const resp = await fetchLocalImportCandidates();
-      state.candidates.value = safeArray(resp?.items).map(normalizeCandidate);
+      const ready = resp?.ready === true;
+      const items = safeArray(resp?.items).map(normalizeCandidate);
+
+      if (!ready) {
+        clearCandidates();
+        setCandidatesDisplayMessage("当前还没有可显示的候选结果，请稍候或重新刷新。");
+        return {
+          ok: false,
+          ready: false,
+          message: state.candidatesDisplayMessage.value,
+        };
+      }
+
+      // NEW: 快照已可读，但候选为空时，明确给提示，避免页面空白误导
+      if (items.length === 0) {
+        clearCandidates();
+        setCandidatesDisplayMessage(
+          asStr(resp?.ui_message) || "刷新完成，但未找到可导入的本地盘后数据文件。"
+        );
+        return {
+          ok: true,
+          ready: false,
+          message: state.candidatesDisplayMessage.value,
+        };
+      }
+
+      state.candidatesReady.value = true;
+      state.candidates.value = items;
       state.candidatesGeneratedAt.value =
         resp?.generated_at == null ? null : asStr(resp.generated_at);
-      if (resp?.ui_message != null) {
-        state.uiMessage.value = asStr(resp.ui_message);
-      }
-      return { ok: true };
+      setCandidatesDisplayMessage("");
+
+      return { ok: true, ready: true };
     } catch (e) {
-      return { ok: false, message: e?.message || "加载导入候选失败" };
+      clearCandidates();
+      setCandidatesDisplayMessage(e?.message || "候选读取失败，请稍后重试。");
+      return {
+        ok: false,
+        ready: false,
+        message: state.candidatesDisplayMessage.value,
+      };
     } finally {
       state.loadingCandidates.value = false;
     }
   }
 
-  async function loadStatus({ syncTasks = false } = {}) {
+  async function refreshCandidates() {
+    // 刷新一旦发起，旧显示立即失效；是否重新有效只看 refresh HTTP 成功返回
+    invalidateSnapshot("候选尚未就绪，请刷新后等待完成。");
+
+    state.refreshingCandidates.value = true;
+    try {
+      const resp = await refreshLocalImportCandidates();
+      const ok = resp?.ok === true;
+
+      if (!ok) {
+        invalidateSnapshot(
+          asStr(resp?.message || resp?.ui_message) ||
+            "候选刷新失败，当前结果不可用，请重试刷新。"
+        );
+        return { ok: false, message: state.candidatesDisplayMessage.value };
+      }
+
+      // FIX: 后端已明确说明：refresh 成功返回即代表
+      // - 扫描完成
+      // - 快照已写入本地持久化
+      // - GET /candidates 已可读取
+      validateSnapshot(
+        asStr(resp?.ui_message) || ""
+      );
+
+      return { ok: true, message: asStr(resp?.message || resp?.ui_message || "") };
+    } catch (e) {
+      invalidateSnapshot(e?.message || "候选刷新失败，当前结果不可用，请重试刷新。");
+      return { ok: false, message: state.candidatesDisplayMessage.value };
+    } finally {
+      state.refreshingCandidates.value = false;
+    }
+  }
+
+  async function loadStatus() {
     state.loadingStatus.value = true;
     try {
       const resp = await fetchLocalImportStatus();
       applyStatusSnapshot(resp);
-
-      const batchId = asStr(state.displayBatch.value?.batch_id);
-      if (syncTasks && batchId) {
-        await loadTasks({ batch_id: batchId });
-      } else if (!batchId) {
-        state.tasksBatchId.value = null;
-        state.tasks.value = [];
-      }
-
       return { ok: true };
     } catch (e) {
       return { ok: false, message: e?.message || "加载导入状态失败" };
@@ -167,27 +241,96 @@ export function useLocalImportController() {
     }
   }
 
-  async function loadTasks({ batch_id } = {}) {
-    const batchId = asStr(batch_id);
-    if (!batchId) {
-      state.tasksBatchId.value = null;
-      state.tasks.value = [];
-      return { ok: true };
+  async function refreshSettings() {
+    state.importRootDirLoading.value = true;
+    try {
+      const resp = await fetchLocalImportSettings();
+      state.importRootDir.value = asStr(resp?.tdx_vipdoc_dir);
+      state.importRootDirLoaded.value = true;
+
+      if (resp?.ok !== true) {
+        return {
+          ok: false,
+          tdx_vipdoc_dir: state.importRootDir.value,
+          message: resp?.message || "读取目录设置失败",
+        };
+      }
+
+      return {
+        ok: true,
+        tdx_vipdoc_dir: state.importRootDir.value,
+        message: asStr(resp?.message),
+      };
+    } catch (e) {
+      state.importRootDirLoaded.value = true;
+      return {
+        ok: false,
+        tdx_vipdoc_dir: asStr(state.importRootDir.value),
+        message: e?.message || "读取目录设置失败",
+      };
+    } finally {
+      state.importRootDirLoading.value = false;
+    }
+  }
+
+  async function browseSettingsDir() {
+    const latest = await refreshSettings();
+    const initialDir = asStr(latest?.tdx_vipdoc_dir);
+
+    state.importRootDirBrowsing.value = true;
+    try {
+      const resp = await browseLocalImportSettingsDir({
+        initial_dir: initialDir,
+      });
+
+      return {
+        ok: resp?.ok === true,
+        selected_dir: asStr(resp?.selected_dir),
+        message: resp?.message || (resp?.ok === true ? "" : "用户取消选择"),
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        selected_dir: "",
+        message: e?.message || "打开目录选择窗口失败",
+      };
+    } finally {
+      state.importRootDirBrowsing.value = false;
+    }
+  }
+
+  async function saveSettingsDir(nextDir) {
+    const dir = asStr(nextDir);
+    if (!dir) {
+      return { ok: false, tdx_vipdoc_dir: "", message: "目录不能为空" };
     }
 
-    state.loadingTasks.value = true;
+    state.importRootDirSaving.value = true;
     try {
-      const resp = await fetchLocalImportTasks({ batch_id: batchId });
-      state.tasksBatchId.value = asStr(resp?.batch_id || batchId);
-      state.tasks.value = safeArray(resp?.items).map(normalizeTask);
-      if (resp?.ui_message != null) {
-        state.uiMessage.value = asStr(resp.ui_message);
-      }
-      return { ok: true };
+      const resp = await saveLocalImportSettings({
+        tdx_vipdoc_dir: dir,
+      });
+
+      const savedDir = asStr(resp?.tdx_vipdoc_dir) || dir;
+      state.importRootDir.value = savedDir;
+      state.importRootDirLoaded.value = true;
+
+      invalidateSnapshot("源目录已变更，原候选已失效，请重新刷新。");
+
+      return {
+        ok: resp?.ok === true,
+        tdx_vipdoc_dir: savedDir,
+        message:
+          resp?.message || "源目录已变更，原候选已失效，请重新刷新。",
+      };
     } catch (e) {
-      return { ok: false, message: e?.message || "加载任务列表失败" };
+      return {
+        ok: false,
+        tdx_vipdoc_dir: asStr(state.importRootDir.value),
+        message: e?.message || "目录设置失败",
+      };
     } finally {
-      state.loadingTasks.value = false;
+      state.importRootDirSaving.value = false;
     }
   }
 
@@ -242,63 +385,24 @@ export function useLocalImportController() {
 
   async function handleStatusEvent(data) {
     applyStatusSnapshot(data);
-
-    const nextBatchId = asStr(state.displayBatch.value?.batch_id);
-    const currentTasksBatchId = asStr(state.tasksBatchId.value);
-
-    if (!nextBatchId) {
-      state.tasksBatchId.value = null;
-      state.tasks.value = [];
-      return;
-    }
-
-    if (currentTasksBatchId && currentTasksBatchId !== nextBatchId) {
-      state.tasksBatchId.value = null;
-      state.tasks.value = [];
-    }
-  }
-
-  async function handleTaskChangedEvent(data) {
-    const batchId = asStr(data?.batch_id);
-    const currentTasksBatchId = asStr(state.tasksBatchId.value);
-
-    if (!batchId || !currentTasksBatchId) return;
-    if (batchId !== currentTasksBatchId) return;
-
-    const refreshTasks = data?.refresh_tasks === true;
-
-    if (refreshTasks) {
-      await loadTasks({ batch_id: batchId });
-      return;
-    }
-
-    const taskPatch = normalizeTask(data?.task || {});
-    const key = taskIdentityKey(taskPatch);
-    if (!key) {
-      await loadTasks({ batch_id: batchId });
-      return;
-    }
-
-    const arr = safeArray(state.tasks.value).slice();
-    const idx = arr.findIndex((x) => taskIdentityKey(x) === key);
-
-    if (idx >= 0) {
-      arr[idx] = { ...arr[idx], ...taskPatch };
-    } else {
-      arr.push(taskPatch);
-    }
-
-    state.tasks.value = arr;
   }
 
   const tracker = createLocalImportSseTracker({
     state,
     eventStream,
     onStatusEvent: handleStatusEvent,
-    onTaskChangedEvent: handleTaskChangedEvent,
   });
 
   let watchdogTimer = null;
+  let trackerStarted = false;
+  let controllerInitialized = false;
+  let initPromise = null;
+
+  function ensureTrackerStarted() {
+    if (trackerStarted) return;
+    tracker.start();
+    trackerStarted = true;
+  }
 
   function clearWatchdog() {
     if (watchdogTimer) {
@@ -308,7 +412,7 @@ export function useLocalImportController() {
     state.watchdogTimerActive.value = false;
   }
 
-  function startWatchdog() {
+  function ensureWatchdogStarted() {
     if (watchdogTimer) return;
 
     state.watchdogTimerActive.value = true;
@@ -323,28 +427,57 @@ export function useLocalImportController() {
         const t1 = state.lastStatusEventAt.value
           ? new Date(state.lastStatusEventAt.value).getTime()
           : 0;
-        const t2 = state.lastTaskEventAt.value
-          ? new Date(state.lastTaskEventAt.value).getTime()
-          : 0;
-        const last = Math.max(t1, t2);
+        const last = t1;
 
         if (!last) return;
         if (now - last < 18000) return;
 
-        await loadStatus({ syncTasks: false });
+        await loadStatus();
       } catch {}
     }, 5000);
   }
 
+  async function doInitialize() {
+    ensureTrackerStarted();
+    ensureWatchdogStarted();
+    eventStream.connect();
+
+    await Promise.all([
+      refreshSettings(),
+      loadStatus(),
+    ]);
+
+    controllerInitialized = true;
+  }
+
   async function initialize() {
-    tracker.start();
-    await loadCandidates();
-    await loadStatus({ syncTasks: false });
-    startWatchdog();
+    if (controllerInitialized) {
+      ensureTrackerStarted();
+      ensureWatchdogStarted();
+      eventStream.connect();
+      return { ok: true };
+    }
+
+    if (initPromise) {
+      await initPromise;
+      return { ok: true };
+    }
+
+    initPromise = doInitialize()
+      .catch(() => {})
+      .finally(() => {
+        initPromise = null;
+      });
+
+    await initPromise;
+    return { ok: true };
   }
 
   async function recoverAfterSseReconnect() {
-    await loadStatus({ syncTasks: false });
+    ensureTrackerStarted();
+    ensureWatchdogStarted();
+    eventStream.connect();
+    await loadStatus();
   }
 
   const displayBatchId = computed(() => asStr(state.displayBatch.value?.batch_id));
@@ -359,8 +492,13 @@ export function useLocalImportController() {
     recoverAfterSseReconnect,
 
     loadCandidates,
+    refreshCandidates,
+    clearCandidates,
     loadStatus,
-    loadTasks,
+
+    refreshSettings,
+    browseSettingsDir,
+    saveSettingsDir,
 
     startImport,
     cancelImport,
@@ -373,7 +511,11 @@ export function useLocalImportController() {
 
     dispose() {
       tracker.stop();
+      trackerStarted = false;
       clearWatchdog();
+      controllerInitialized = false;
+      initPromise = null;
+      eventStream.disconnect();
     },
   };
 

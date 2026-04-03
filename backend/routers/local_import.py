@@ -4,11 +4,18 @@
 #
 # 正式接口：
 #   - GET  /api/local-import/candidates
+#       * 只读取当前已保存候选结果（轻操作）
+#   - POST /api/local-import/candidates/refresh
+#       * 显式重新扫描并覆盖当前候选结果（重操作）
 #   - POST /api/local-import/start
 #   - GET  /api/local-import/status
-#   - GET  /api/local-import/tasks?batch_id=...
 #   - POST /api/local-import/cancel
 #   - POST /api/local-import/retry
+#
+# 路径设置接口：
+#   - GET  /api/local-import/settings
+#   - POST /api/local-import/settings/browse
+#   - POST /api/local-import/settings
 #
 # 说明：
 #   - SSE 为主状态同步链路
@@ -16,25 +23,35 @@
 #       * 初始化快照
 #       * 用户操作入口
 #       * SSE 断连后的状态恢复与纠偏
+#
+# 当前阶段说明：
+#   - 前端只关心聚合数量变化，不展示任务明细
+#   - 因此已删除 /api/local-import/tasks 明细接口
+#   - 后端唯一实时状态路径统一收敛为：
+#       local_import.status
 # ==============================
 
 from __future__ import annotations
 
 from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from backend.services.local_import.candidates import build_import_candidates_snapshot
-from backend.services.local_import.repository import (
-    build_status_snapshot,
-    get_batch,
-    list_tasks_for_batch,
+from backend.services.local_import.candidates import (
+    get_import_candidates_snapshot,
+    refresh_import_candidates_snapshot,
 )
+from backend.services.local_import.repository import build_status_snapshot
 from backend.services.local_import.orchestrator import (
     start_import_batch,
     cancel_import_batch,
     retry_import_batch,
+)
+from backend.services.local_import.settings_service import (
+    get_local_import_settings,
+    browse_local_import_root_dir,
+    save_local_import_root_dir,
 )
 from backend.utils.logger import get_logger, log_event
 from backend.utils.errors import http_500_from_exc
@@ -57,8 +74,21 @@ class BatchOpRequest(BaseModel):
     batch_id: str
 
 
+class BrowseDirRequest(BaseModel):
+    initial_dir: Optional[str] = None
+
+
+class SaveSettingsRequest(BaseModel):
+    tdx_vipdoc_dir: str
+
+
 @router.get("/candidates")
 async def api_local_import_candidates(request: Request) -> Dict[str, Any]:
+    """
+    轻操作：
+      - 只读取当前已保存候选结果
+      - 不触发重扫描
+    """
     tid = request.headers.get("x-trace-id")
 
     log_event(
@@ -69,12 +99,12 @@ async def api_local_import_candidates(request: Request) -> Dict[str, Any]:
         func="api_local_import_candidates",
         line=0,
         trace_id=tid,
-        event="local_import.candidates.start",
+        event="local_import.candidates.get.start",
         message="GET /api/local-import/candidates",
     )
 
     try:
-        payload = build_import_candidates_snapshot()
+        payload = get_import_candidates_snapshot()
 
         log_event(
             logger=_LOG,
@@ -84,9 +114,12 @@ async def api_local_import_candidates(request: Request) -> Dict[str, Any]:
             func="api_local_import_candidates",
             line=0,
             trace_id=tid,
-            event="local_import.candidates.done",
+            event="local_import.candidates.get.done",
             message="GET /api/local-import/candidates done",
-            extra={"rows": len(payload.get("items") or [])},
+            extra={
+                "ready": bool(payload.get("ready")),
+                "rows": len(payload.get("items") or []),
+            },
         )
         return payload
 
@@ -99,8 +132,66 @@ async def api_local_import_candidates(request: Request) -> Dict[str, Any]:
             func="api_local_import_candidates",
             line=0,
             trace_id=tid,
-            event="local_import.candidates.fail",
+            event="local_import.candidates.get.fail",
             message="GET /api/local-import/candidates failed",
+            extra={"error": str(e)},
+        )
+        raise http_500_from_exc(e, trace_id=tid)
+
+
+@router.post("/candidates/refresh")
+async def api_local_import_candidates_refresh(request: Request) -> Dict[str, Any]:
+    """
+    重操作：
+      - 显式触发重扫描
+      - 覆盖当前候选结果真相源
+      - 只返回轻状态，不返回候选结果本体
+    """
+    tid = request.headers.get("x-trace-id")
+
+    log_event(
+        logger=_LOG,
+        service="local_import.router",
+        level="INFO",
+        file=__file__,
+        func="api_local_import_candidates_refresh",
+        line=0,
+        trace_id=tid,
+        event="local_import.candidates.refresh.start",
+        message="POST /api/local-import/candidates/refresh",
+    )
+
+    try:
+        payload = refresh_import_candidates_snapshot()
+
+        log_event(
+            logger=_LOG,
+            service="local_import.router",
+            level="INFO",
+            file=__file__,
+            func="api_local_import_candidates_refresh",
+            line=0,
+            trace_id=tid,
+            event="local_import.candidates.refresh.done",
+            message="POST /api/local-import/candidates/refresh done",
+            extra={
+                "ready": bool(payload.get("ready")),
+                "generated_at": payload.get("generated_at"),
+            },
+        )
+        return payload
+
+    except Exception as e:
+        log_event(
+            logger=_LOG,
+            service="local_import.router",
+            level="ERROR",
+            file=__file__,
+            func="api_local_import_candidates_refresh",
+            line=0,
+            trace_id=tid,
+            event="local_import.candidates.refresh.fail",
+            message="POST /api/local-import/candidates/refresh failed",
             extra={"error": str(e)},
         )
         raise http_500_from_exc(e, trace_id=tid)
@@ -133,12 +224,12 @@ async def api_local_import_start(request: Request, payload: ImportStartRequest) 
                     "queued_batches": [],
                     "ui_message": f"非法 symbol: {symbol}",
                 }
-            if freq != "1d":
+            if freq not in ("1d", "1m", "5m"):
                 return {
                     "ok": False,
                     "display_batch": None,
                     "queued_batches": [],
-                    "ui_message": f"当前仅支持 freq=1d，收到: {freq}",
+                    "ui_message": f"当前仅支持 freq=1d/1m/5m，收到: {freq}",
                 }
 
             key = (market, symbol, freq)
@@ -189,35 +280,6 @@ async def api_local_import_status(request: Request) -> Dict[str, Any]:
         raise http_500_from_exc(e, trace_id=tid)
 
 
-@router.get("/tasks")
-async def api_local_import_tasks(
-    request: Request,
-    batch_id: str = Query(..., description="要查看任务列表的批次ID"),
-) -> Dict[str, Any]:
-    tid = request.headers.get("x-trace-id")
-    bid = str(batch_id or "").strip()
-
-    try:
-        batch = get_batch(bid)
-        if not batch:
-            return {
-                "ok": True,
-                "batch_id": bid,
-                "items": [],
-                "ui_message": "未找到对应批次",
-            }
-
-        items = list_tasks_for_batch(bid)
-        return {
-            "ok": True,
-            "batch_id": bid,
-            "items": items,
-            "ui_message": None if items else "当前批次暂无任务列表",
-        }
-    except Exception as e:
-        raise http_500_from_exc(e, trace_id=tid)
-
-
 @router.post("/cancel")
 async def api_local_import_cancel(request: Request, payload: BatchOpRequest) -> Dict[str, Any]:
     tid = request.headers.get("x-trace-id")
@@ -248,3 +310,57 @@ async def api_local_import_retry(request: Request, payload: BatchOpRequest) -> D
         }
     except Exception as e:
         raise http_500_from_exc(e, trace_id=tid)
+
+
+@router.get("/settings")
+async def api_local_import_settings(request: Request) -> Dict[str, Any]:
+    tid = request.headers.get("x-trace-id")
+
+    try:
+        return get_local_import_settings()
+    except Exception as e:
+        return {
+            "ok": False,
+            "tdx_vipdoc_dir": "",
+            "message": f"读取配置失败: {e}",
+        }
+
+
+@router.post("/settings/browse")
+async def api_local_import_settings_browse(
+    request: Request,
+    payload: BrowseDirRequest,
+) -> Dict[str, Any]:
+    tid = request.headers.get("x-trace-id")
+
+    try:
+        return await browse_local_import_root_dir(payload.initial_dir)
+    except Exception as e:
+        return {
+            "ok": False,
+            "selected_dir": "",
+            "message": f"打开文件夹选择窗口失败: {e}",
+        }
+
+
+@router.post("/settings")
+async def api_local_import_settings_save(
+    request: Request,
+    payload: SaveSettingsRequest,
+) -> Dict[str, Any]:
+    tid = request.headers.get("x-trace-id")
+
+    try:
+        return save_local_import_root_dir(payload.tdx_vipdoc_dir)
+    except ValueError as e:
+        return {
+            "ok": False,
+            "tdx_vipdoc_dir": str(payload.tdx_vipdoc_dir or "").strip(),
+            "message": f"保存失败: {e}",
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "tdx_vipdoc_dir": str(payload.tdx_vipdoc_dir or "").strip(),
+            "message": f"保存失败: {e}",
+        }

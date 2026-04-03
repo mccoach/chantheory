@@ -1,7 +1,17 @@
 # backend/db/watchlist.py
 # ==============================
 # 说明：用户自选池表操作模块
-# - 职责：user_watchlist 表的所有CRUD操作
+#
+# 本轮改动（watchlist 双主键升级）：
+#   - watchlist 唯一标识正式升级为 (symbol, market)
+#   - 不再允许 symbol-only 增删查改
+#   - watchlist 是对 symbol_index 真标的的引用集合，不允许孤儿记录
+#
+# 当前正式职责：
+#   - insert_watchlist
+#   - delete_watchlist
+#   - select_user_watchlist
+#   - select_user_watchlist_with_details
 # ==============================
 
 from __future__ import annotations
@@ -11,76 +21,103 @@ import json
 
 from backend.db.connection import get_conn
 
-def insert_watchlist(symbol: str, source: str = "manual", note: str = None, tags: List[str] = None, sort_order: int = 0) -> bool:
+def insert_watchlist(
+    symbol: str,
+    market: str,
+    source: str = "manual",
+    note: str = None,
+    tags: List[str] = None,
+    sort_order: int = 0,
+) -> bool:
     """
-    添加标的到自选池（V2.0版：支持tags和sort_order）。
-    
-    Args:
-        symbol: 标的代码
-        source: 添加来源，默认 'manual'
-        note: 用户备注，可选
-        tags: 用户标签列表，如 ['核心', '短线']
-        sort_order: 排序权重，数值越小越靠前
-    
-    Returns:
-        bool: 是否成功
+    添加标的到自选池（双主键版）
+
+    规则：
+      - 唯一键为 (symbol, market)
+      - 若已存在则幂等成功
+      - 仅允许引用 symbol_index 中真实存在的联合键标的
     """
+    s = str(symbol or "").strip()
+    m = str(market or "").strip().upper()
+
+    if not s or not m:
+        return False
+
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.now().isoformat()
-    
-    # tags: 转为JSON字符串
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM symbol_index
+        WHERE symbol=? AND market=?
+        LIMIT 1;
+        """,
+        (s, m),
+    )
+    if cur.fetchone() is None:
+        return False
+
     tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
-    
+
     try:
         cur.execute(
             """
-            INSERT INTO user_watchlist (symbol, added_at, source, note, tags, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol) DO UPDATE SET
+            INSERT INTO user_watchlist (
+                symbol, market, added_at, source, note, tags, sort_order, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, market) DO UPDATE SET
                 note=excluded.note,
                 tags=excluded.tags,
                 sort_order=excluded.sort_order,
                 updated_at=excluded.updated_at;
             """,
-            (symbol, now, source, note, tags_json, sort_order, now)
+            (s, m, now, source, note, tags_json, sort_order, now)
         )
         conn.commit()
         return True
     except Exception:
         return False
 
+def delete_watchlist(symbol: str, market: str) -> bool:
+    """
+    从自选池删除标的（双主键版）
+    """
+    s = str(symbol or "").strip()
+    m = str(market or "").strip().upper()
 
-def delete_watchlist(symbol: str) -> bool:
-    """
-    从自选池删除标的。
-    
-    Returns:
-        bool: 是否成功
-    """
+    if not s or not m:
+        return False
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM user_watchlist WHERE symbol=?;", (symbol,))
+    cur.execute(
+        "DELETE FROM user_watchlist WHERE symbol=? AND market=?;",
+        (s, m),
+    )
     conn.commit()
     return cur.rowcount > 0
 
-
 def select_user_watchlist() -> List[Dict[str, Any]]:
     """
-    查询用户自选池的所有标的（V2.0版：按sort_order排序）。
-    
-    Returns:
-        List[Dict]: 自选标的列表，已按 sort_order ASC, added_at ASC 排序
+    查询用户自选池的所有标的（双主键版）
     """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM user_watchlist ORDER BY sort_order ASC, added_at ASC;")
+    cur.execute(
+        """
+        SELECT *
+        FROM user_watchlist
+        ORDER BY sort_order ASC, added_at ASC, market ASC, symbol ASC;
+        """
+    )
     rows = cur.fetchall()
-    
+
     results = []
     for row in rows:
         result = dict(row)
-        # tags: 解析JSON
         if result.get('tags'):
             try:
                 result['tags'] = json.loads(result['tags'])
@@ -89,118 +126,46 @@ def select_user_watchlist() -> List[Dict[str, Any]]:
         else:
             result['tags'] = []
         results.append(result)
-    
+
     return results
-
-
-def update_watchlist_tags(symbol: str, tags: List[str]) -> bool:
-    """
-    更新自选池中某标的的tags。
-    
-    Args:
-        symbol: 标的代码
-        tags: 新的标签列表
-    
-    Returns:
-        bool: 是否成功
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    now = datetime.now().isoformat()
-    
-    tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
-    
-    cur.execute(
-        "UPDATE user_watchlist SET tags=?, updated_at=? WHERE symbol=?;",
-        (tags_json, now, symbol)
-    )
-    conn.commit()
-    return cur.rowcount > 0
-
-
-def update_watchlist_sort_order(symbol: str, sort_order: int) -> bool:
-    """
-    更新自选池中某标的的排序权重。
-    
-    Args:
-        symbol: 标的代码
-        sort_order: 新的排序权重
-    
-    Returns:
-        bool: 是否成功
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    now = datetime.now().isoformat()
-    
-    cur.execute(
-        "UPDATE user_watchlist SET sort_order=?, updated_at=? WHERE symbol=?;",
-        (sort_order, now, symbol)
-    )
-    conn.commit()
-    return cur.rowcount > 0
 
 def select_user_watchlist_with_details() -> List[Dict[str, Any]]:
     """
-    查询用户自选池（包含标的详细信息）
+    查询用户自选池（包含标的详细信息，双主键精确关联）
 
-    说明：
-      - user_watchlist 当前仍以 symbol 为主键；
-      - symbol_index 当前为 (symbol, market) 联合主键；
-      - 在当前可见业务里，watchlist 仍默认 symbol 唯一，因此这里按 symbol 关联，
-        再用子查询稳定取一条 market/name/type/listing_date。
+    返回字段：
+      - symbol, market, added_at, source, note, tags, sort_order, updated_at
+      - name, class, type, listing_date
     """
     conn = get_conn()
     cur = conn.cursor()
-    
+
     cur.execute("""
-    SELECT 
+    SELECT
         w.symbol,
+        w.market,
         w.added_at,
         w.source,
         w.note,
         w.tags,
         w.sort_order,
         w.updated_at,
-        (
-          SELECT s.name
-          FROM symbol_index s
-          WHERE s.symbol = w.symbol
-          ORDER BY s.market ASC
-          LIMIT 1
-        ) AS name,
-        (
-          SELECT s.market
-          FROM symbol_index s
-          WHERE s.symbol = w.symbol
-          ORDER BY s.market ASC
-          LIMIT 1
-        ) AS market,
-        (
-          SELECT s.type
-          FROM symbol_index s
-          WHERE s.symbol = w.symbol
-          ORDER BY s.market ASC
-          LIMIT 1
-        ) AS type,
-        (
-          SELECT s.listing_date
-          FROM symbol_index s
-          WHERE s.symbol = w.symbol
-          ORDER BY s.market ASC
-          LIMIT 1
-        ) AS listing_date
+        s.name,
+        s.class,
+        s.type,
+        s.listing_date
     FROM user_watchlist w
-    ORDER BY w.sort_order ASC, w.added_at ASC;
+    INNER JOIN symbol_index s
+      ON w.symbol = s.symbol AND w.market = s.market
+    ORDER BY w.sort_order ASC, w.added_at ASC, w.market ASC, w.symbol ASC;
     """)
-    
+
     rows = cur.fetchall()
-    
+
     results = []
     for row in rows:
         result = dict(row)
-        
-        # tags: 解析JSON
+
         if result.get('tags'):
             try:
                 result['tags'] = json.loads(result['tags'])
@@ -208,7 +173,7 @@ def select_user_watchlist_with_details() -> List[Dict[str, Any]]:
                 result['tags'] = []
         else:
             result['tags'] = []
-        
+
         results.append(result)
-    
+
     return results

@@ -12,6 +12,8 @@
 #       * TDX infoharbor_block.dat 解析
 #       * TDX needini.dat 解析
 #       * TDX .day 解析
+#       * TDX .lc1 / .lc5 解析
+#       * TDX gbbq 解析
 #
 # 设计原则：
 #   - 这里只做“文件怎么解析”
@@ -27,6 +29,8 @@ from .tdxzs3_cfg import load_tdxzs3_cfg_df
 from .infoharbor_block_dat import load_infoharbor_block_df
 from .needini_dat import load_needini_holidays_df, get_needini_latest_year
 from .tdx_day import load_tdx_day_df
+from .tdx_minute import load_tdx_minute_df
+from .tdx_gbbq import load_tdx_gbbq_df
 
 __all__ = [
     "load_tnf_df",
@@ -38,4 +42,6 @@ __all__ = [
     "load_needini_holidays_df",
     "get_needini_latest_year",
     "load_tdx_day_df",
+    "load_tdx_minute_df",
+    "load_tdx_gbbq_df",
 ]

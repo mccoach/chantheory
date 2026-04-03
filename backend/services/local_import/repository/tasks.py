@@ -5,7 +5,23 @@
 # 最终模型：
 #   - queued batch 不提前展开为 tasks
 #   - 只有 running/paused/最后有效终态批次允许在 tasks 表中存在任务
-#   - tasks 表始终只服务于“唯一有效批次真相源”
+#   - tasks 表始终是执行态唯一真相源
+#
+# 当前重构重点：
+#   - 所有进度一律从 tasks 聚合得到
+#   - batch 不再持有 progress_* 解释权
+#
+# 本轮改动（任务追溯字段）：
+#   - 删除 updated_at
+#   - 删除 error_code / error_message
+#   - 收敛为：
+#       * signal_code
+#       * signal_message
+#   - 新增：
+#       * appended_rows
+#       * source_file_path
+#       * started_at
+#       * finished_at
 # ==============================
 
 from __future__ import annotations
@@ -22,17 +38,12 @@ def create_tasks_for_batch(batch_id: str, items: List[Dict[str, Any]]) -> int:
     """
     为某个 batch 显式创建 tasks。
     只应在 batch 正式进入 running 时调用。
-
-    说明：
-      - 若同 batch 的 task 已存在，则静默跳过（依赖 UNIQUE 约束 + INSERT OR IGNORE）
     """
     bid = str(batch_id or "").strip()
     if not bid:
         return 0
     if not items:
         return 0
-
-    now = now_iso()
 
     payload = []
     for item in items:
@@ -50,7 +61,10 @@ def create_tasks_for_batch(batch_id: str, items: List[Dict[str, Any]]) -> int:
             0,
             None,
             None,
-            now,
+            None,
+            None,
+            None,
+            None,
         ))
 
     if not payload:
@@ -68,11 +82,14 @@ def create_tasks_for_batch(batch_id: str, items: List[Dict[str, Any]]) -> int:
                 freq,
                 state,
                 attempts,
-                error_code,
-                error_message,
-                updated_at
+                signal_code,
+                signal_message,
+                appended_rows,
+                source_file_path,
+                started_at,
+                finished_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             payload,
         )
@@ -111,12 +128,6 @@ def delete_tasks_for_batches(batch_ids: List[str]) -> int:
 
 
 def delete_tasks_except_batch_ids(keep_batch_ids: List[str]) -> int:
-    """
-    删除所有不属于 keep_batch_ids 的任务。
-
-    这是当前最终一致性清理的主工具：
-      - 唯一有效批次真相源之外的 task 必须全部清除
-    """
     keep_ids = [str(x).strip() for x in (keep_batch_ids or []) if str(x).strip()]
 
     with get_write_lock():
@@ -155,9 +166,6 @@ def delete_orphan_tasks() -> int:
 
 
 def list_tasks_for_batch(batch_id: str) -> List[Dict[str, Any]]:
-    """
-    任务列表一次性 JOIN symbol_index，避免 N+1 查询。
-    """
     bid = str(batch_id or "").strip()
     if not bid:
         return []
@@ -173,9 +181,12 @@ def list_tasks_for_batch(batch_id: str) -> List[Dict[str, Any]]:
             t.freq,
             t.state,
             t.attempts,
-            t.error_code,
-            t.error_message,
-            t.updated_at,
+            t.signal_code,
+            t.signal_message,
+            t.appended_rows,
+            t.source_file_path,
+            t.started_at,
+            t.finished_at,
             s.name AS name,
             s.class AS class,
             s.type AS type
@@ -233,9 +244,6 @@ def get_running_task(batch_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_task(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dict[str, Any]]:
-    """
-    单任务读取同样直接 JOIN symbol_index，避免重复查库。
-    """
     bid = str(batch_id or "").strip()
     m = str(market or "").strip().upper()
     s = str(symbol or "").strip()
@@ -254,9 +262,12 @@ def get_task(batch_id: str, market: str, symbol: str, freq: str) -> Optional[Dic
             t.freq,
             t.state,
             t.attempts,
-            t.error_code,
-            t.error_message,
-            t.updated_at,
+            t.signal_code,
+            t.signal_message,
+            t.appended_rows,
+            t.source_file_path,
+            t.started_at,
+            t.finished_at,
             si.name AS name,
             si.class AS class,
             si.type AS type
@@ -289,9 +300,12 @@ def mark_task_running(batch_id: str, market: str, symbol: str, freq: str) -> Opt
             UPDATE local_import_tasks
             SET state='running',
                 attempts=attempts+1,
-                error_code=NULL,
-                error_message=NULL,
-                updated_at=?
+                signal_code=NULL,
+                signal_message=NULL,
+                appended_rows=NULL,
+                source_file_path=NULL,
+                started_at=?,
+                finished_at=NULL
             WHERE batch_id=? AND market=? AND symbol=? AND freq=? AND state='queued';
             """,
             (now, bid, m, s, f),
@@ -307,14 +321,11 @@ def mark_task_terminal(
     symbol: str,
     freq: str,
     terminal_state: str,
-    error_code: Optional[str],
-    error_message: Optional[str],
+    signal_code: Optional[str],
+    signal_message: Optional[str],
+    appended_rows: Optional[int],
+    source_file_path: Optional[str],
 ) -> Optional[Dict[str, Any]]:
-    """
-    只允许：
-      - running -> success
-      - running -> failed
-    """
     bid = str(batch_id or "").strip()
     m = str(market or "").strip().upper()
     s = str(symbol or "").strip()
@@ -324,7 +335,7 @@ def mark_task_terminal(
     if st not in ("success", "failed"):
         raise ValueError(f"invalid terminal task state: {terminal_state}")
 
-    now = now_iso()
+    finished_at = now_iso()
 
     with get_write_lock():
         conn = get_conn()
@@ -333,12 +344,25 @@ def mark_task_terminal(
             """
             UPDATE local_import_tasks
             SET state=?,
-                error_code=?,
-                error_message=?,
-                updated_at=?
+                signal_code=?,
+                signal_message=?,
+                appended_rows=?,
+                source_file_path=?,
+                finished_at=?
             WHERE batch_id=? AND market=? AND symbol=? AND freq=? AND state='running';
             """,
-            (st, error_code, error_message, now, bid, m, s, f),
+            (
+                st,
+                signal_code,
+                signal_message,
+                appended_rows,
+                source_file_path,
+                finished_at,
+                bid,
+                m,
+                s,
+                f,
+            ),
         )
         conn.commit()
 
@@ -346,9 +370,6 @@ def mark_task_terminal(
 
 
 def cancel_queued_tasks_in_batch(batch_id: str) -> List[Dict[str, Any]]:
-    """
-    取消当前有效批次中所有 queued 任务，并返回真正发生 queued->cancelled 的任务列表。
-    """
     bid = str(batch_id or "").strip()
     if not bid:
         return []
@@ -364,9 +385,12 @@ def cancel_queued_tasks_in_batch(batch_id: str) -> List[Dict[str, Any]]:
             t.freq,
             t.state,
             t.attempts,
-            t.error_code,
-            t.error_message,
-            t.updated_at,
+            t.signal_code,
+            t.signal_message,
+            t.appended_rows,
+            t.source_file_path,
+            t.started_at,
+            t.finished_at,
             s.name AS name,
             s.class AS class,
             s.type AS type
@@ -382,7 +406,17 @@ def cancel_queued_tasks_in_batch(batch_id: str) -> List[Dict[str, Any]]:
     if not before_rows:
         return []
 
-    now = now_iso()
+    out: List[Dict[str, Any]] = []
+    for row in before_rows:
+        item = _joined_row_to_task_dict(row)
+        item["state"] = "cancelled"
+        item["signal_code"] = None
+        item["signal_message"] = None
+        item["appended_rows"] = None
+        item["source_file_path"] = None
+        item["started_at"] = None
+        item["finished_at"] = None
+        out.append(item)
 
     with get_write_lock():
         conn2 = get_conn()
@@ -391,19 +425,17 @@ def cancel_queued_tasks_in_batch(batch_id: str) -> List[Dict[str, Any]]:
             """
             UPDATE local_import_tasks
             SET state='cancelled',
-                updated_at=?
+                signal_code=NULL,
+                signal_message=NULL,
+                appended_rows=NULL,
+                source_file_path=NULL,
+                started_at=NULL,
+                finished_at=NULL
             WHERE batch_id=? AND state='queued';
             """,
-            (now, bid),
+            (bid,),
         )
         conn2.commit()
-
-    out: List[Dict[str, Any]] = []
-    for row in before_rows:
-        item = _joined_row_to_task_dict(row)
-        item["state"] = "cancelled"
-        item["updated_at"] = now
-        out.append(item)
 
     return out
 
@@ -430,9 +462,12 @@ def reset_retryable_tasks(batch_id: str) -> List[Dict[str, Any]]:
             t.freq,
             t.state,
             t.attempts,
-            t.error_code,
-            t.error_message,
-            t.updated_at,
+            t.signal_code,
+            t.signal_message,
+            t.appended_rows,
+            t.source_file_path,
+            t.started_at,
+            t.finished_at,
             s.name AS name,
             s.class AS class,
             s.type AS type
@@ -448,7 +483,18 @@ def reset_retryable_tasks(batch_id: str) -> List[Dict[str, Any]]:
     if not before_rows:
         return []
 
-    now = now_iso()
+    out: List[Dict[str, Any]] = []
+    for row in before_rows:
+        item = _joined_row_to_task_dict(row)
+        item["state"] = "queued"
+        item["signal_code"] = None
+        item["signal_message"] = None
+        item["appended_rows"] = None
+        item["source_file_path"] = None
+        item["started_at"] = None
+        item["finished_at"] = None
+        out.append(item)
+
     with get_write_lock():
         conn2 = get_conn()
         cur2 = conn2.cursor()
@@ -456,33 +502,22 @@ def reset_retryable_tasks(batch_id: str) -> List[Dict[str, Any]]:
             """
             UPDATE local_import_tasks
             SET state='queued',
-                error_code=NULL,
-                error_message=NULL,
-                updated_at=?
+                signal_code=NULL,
+                signal_message=NULL,
+                appended_rows=NULL,
+                source_file_path=NULL,
+                started_at=NULL,
+                finished_at=NULL
             WHERE batch_id=? AND state IN ('failed', 'cancelled');
             """,
-            (now, bid),
+            (bid,),
         )
         conn2.commit()
-
-    out: List[Dict[str, Any]] = []
-    for row in before_rows:
-        item = _joined_row_to_task_dict(row)
-        item["state"] = "queued"
-        item["error_code"] = None
-        item["error_message"] = None
-        item["updated_at"] = now
-        out.append(item)
 
     return out
 
 
 def mark_interrupted_running_tasks_failed(batch_id: str) -> List[Dict[str, Any]]:
-    """
-    启动恢复时使用：
-      - 将该批次内仍处于 running 的任务纠偏为 failed(INTERRUPTED)
-      - 返回真正被纠偏的任务列表
-    """
     bid = str(batch_id or "").strip()
     if not bid:
         return []
@@ -498,9 +533,12 @@ def mark_interrupted_running_tasks_failed(batch_id: str) -> List[Dict[str, Any]]
             t.freq,
             t.state,
             t.attempts,
-            t.error_code,
-            t.error_message,
-            t.updated_at,
+            t.signal_code,
+            t.signal_message,
+            t.appended_rows,
+            t.source_file_path,
+            t.started_at,
+            t.finished_at,
             s.name AS name,
             s.class AS class,
             s.type AS type
@@ -516,7 +554,19 @@ def mark_interrupted_running_tasks_failed(batch_id: str) -> List[Dict[str, Any]]
     if not before_rows:
         return []
 
-    now = now_iso()
+    finished_at = now_iso()
+
+    out: List[Dict[str, Any]] = []
+    for row in before_rows:
+        item = _joined_row_to_task_dict(row)
+        item["state"] = "failed"
+        item["signal_code"] = "INTERRUPTED"
+        item["signal_message"] = "服务异常中断，任务未正常完成，请检查后重试"
+        item["appended_rows"] = None
+        item["source_file_path"] = None
+        item["finished_at"] = finished_at
+        out.append(item)
+
     with get_write_lock():
         conn2 = get_conn()
         cur2 = conn2.cursor()
@@ -524,28 +574,26 @@ def mark_interrupted_running_tasks_failed(batch_id: str) -> List[Dict[str, Any]]
             """
             UPDATE local_import_tasks
             SET state='failed',
-                error_code='INTERRUPTED',
-                error_message='服务异常中断，任务未正常完成，请检查后重试',
-                updated_at=?
+                signal_code='INTERRUPTED',
+                signal_message='服务异常中断，任务未正常完成，请检查后重试',
+                appended_rows=NULL,
+                source_file_path=NULL,
+                finished_at=?
             WHERE batch_id=? AND state='running';
             """,
-            (now, bid),
+            (finished_at, bid),
         )
         conn2.commit()
-
-    out: List[Dict[str, Any]] = []
-    for row in before_rows:
-        item = _joined_row_to_task_dict(row)
-        item["state"] = "failed"
-        item["error_code"] = "INTERRUPTED"
-        item["error_message"] = "服务异常中断，任务未正常完成，请检查后重试"
-        item["updated_at"] = now
-        out.append(item)
 
     return out
 
 
 def get_batch_counts(batch_id: str) -> Tuple[int, int, int, int, int]:
+    """
+    从 tasks 真相源聚合任务状态计数。
+    返回：
+      queued, running, success, failed, cancelled
+    """
     bid = str(batch_id or "").strip()
     if not bid:
         return 0, 0, 0, 0, 0

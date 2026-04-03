@@ -184,7 +184,7 @@ defineEmits(["toggle-scope"]);
 
 .quick-grid {
   display: grid;
-  grid-template-columns: 120px 160px;
+  grid-template-columns: 135px 160px;
   gap: 8px;
   align-items: start;
 }

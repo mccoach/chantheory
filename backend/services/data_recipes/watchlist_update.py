@@ -1,6 +1,11 @@
-# backend/services/data_recipes/watchlist.py
+# backend/services/data_recipes/watchlist_update.py
 # ==============================
-# watchlist_update 任务配方（统一状态/错误码/SSE协议版）
+# watchlist_update 任务配方（统一状态/错误码/SSE协议双主键最终版）
+#
+# 本轮改动：
+#   - watchlist 正式升级为 (symbol, market) 双主键体系
+#   - 不再允许 symbol-only 自选更新
+#   - 直接输出最终错误码，避免中间层二次转译
 # ==============================
 
 from __future__ import annotations
@@ -16,14 +21,15 @@ from backend.db.watchlist import (
     delete_watchlist,
     select_user_watchlist_with_details,
 )
+from backend.db.symbols import select_symbol_index
 from backend.utils.logger import get_logger
 
-_LOG = get_logger("data_recipes.watchlist")
-
+_LOG = get_logger("data_recipes.watchlist_update")
 
 async def run_watchlist_update(task: Task) -> Dict[str, Any]:
     trace_id = task.trace_id
     symbol = (task.symbol or "").strip()
+    market = str(task.market or "").strip().upper()
     action = (task.params.get("action") or "").strip().lower()
     tags = task.params.get("tags") or []
     sort_order = int(task.params.get("sort_order") or 0)
@@ -31,7 +37,7 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
     job_type = "apply_watchlist_update"
     jobs_status: Dict[str, str] = {}
 
-    if not symbol:
+    if not symbol or not market:
         jobs_status[job_type] = "failed"
         emit_job_finished(
             task,
@@ -41,11 +47,11 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             status="failed",
             result={
                 "rows": 0,
-                "message": "自选更新失败：缺少 symbol 参数",
-                "error_code": "INVALID_PARAMS",
-                "error_message": "symbol missing",
+                "message": "自选更新失败：缺少 symbol 或 market 参数",
+                "error_code": "WATCHLIST_PARAM_ERROR",
+                "error_message": "symbol or market missing",
                 "details": None,
-                "extra": {"action": action},
+                "extra": {"action": action, "symbol": symbol, "market": market},
             },
         )
         emit_task_finished(
@@ -55,10 +61,10 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             summary={
                 "total_rows": 0,
                 "message": "watchlist_update 失败：参数错误",
-                "error_code": "INVALID_PARAMS",
-                "error_message": "symbol missing",
+                "error_code": "WATCHLIST_PARAM_ERROR",
+                "error_message": "symbol or market missing",
                 "details": None,
-                "extra": {"action": action},
+                "extra": {"action": action, "symbol": symbol, "market": market, "items": []},
             },
         )
         return {
@@ -67,8 +73,8 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             "rows": 0,
             "items": [],
             "status": "failed",
-            "error_code": "INVALID_PARAMS",
-            "error_message": "symbol missing",
+            "error_code": "WATCHLIST_PARAM_ERROR",
+            "error_message": "symbol or market missing",
         }
 
     if action not in ("add", "remove"):
@@ -82,10 +88,10 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             result={
                 "rows": 0,
                 "message": "自选更新失败：action 不支持",
-                "error_code": "INVALID_PARAMS",
+                "error_code": "WATCHLIST_ACTION_ERROR",
                 "error_message": f"unsupported action={action}",
                 "details": "supported: add/remove",
-                "extra": {"action": action},
+                "extra": {"action": action, "symbol": symbol, "market": market},
             },
         )
         emit_task_finished(
@@ -95,10 +101,10 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             summary={
                 "total_rows": 0,
                 "message": "watchlist_update 失败：action 不支持",
-                "error_code": "INVALID_PARAMS",
+                "error_code": "WATCHLIST_ACTION_ERROR",
                 "error_message": f"unsupported action={action}",
                 "details": None,
-                "extra": {"action": action},
+                "extra": {"action": action, "symbol": symbol, "market": market, "items": []},
             },
         )
         return {
@@ -107,13 +113,13 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             "rows": 0,
             "items": [],
             "status": "failed",
-            "error_code": "INVALID_PARAMS",
+            "error_code": "WATCHLIST_ACTION_ERROR",
             "error_message": f"unsupported action={action}",
         }
 
     _LOG.info(
-        "[watchlist_update配方] action=%s symbol=%s tags=%s sort_order=%s task_id=%s",
-        action, symbol, tags, sort_order, task.task_id
+        "[watchlist_update配方] action=%s symbol=%s market=%s tags=%s sort_order=%s task_id=%s",
+        action, symbol, market, tags, sort_order, task.task_id
     )
 
     rows_changed = 0
@@ -126,30 +132,42 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
 
     try:
         if action == "add":
-            ok = await asyncio.to_thread(
-                insert_watchlist,
+            symbol_rows = await asyncio.to_thread(
+                select_symbol_index,
                 symbol=symbol,
-                source="manual",
-                note=None,
-                tags=tags,
-                sort_order=sort_order,
+                market=market,
             )
-            if not ok:
+            if not symbol_rows:
                 status = "failed"
-                code = "DB_WRITE_FAILED"
-                emsg = "insert_watchlist returned False"
-                msg = "自选添加失败"
+                code = "WATCHLIST_SYMBOL_NOT_FOUND"
+                emsg = f"symbol not found in symbol_index: {market}.{symbol}"
+                msg = "标的不存在，无法加入自选池"
             else:
-                status = "success"
-                rows_changed = 1
-                msg = "已添加到自选池"
+                ok = await asyncio.to_thread(
+                    insert_watchlist,
+                    symbol=symbol,
+                    market=market,
+                    source="manual",
+                    note=None,
+                    tags=tags,
+                    sort_order=sort_order,
+                )
+                if not ok:
+                    status = "failed"
+                    code = "WATCHLIST_INSERT_FAILED"
+                    emsg = "insert_watchlist returned False"
+                    msg = "自选添加失败"
+                else:
+                    status = "success"
+                    rows_changed = 1
+                    msg = "已添加到自选池"
 
         else:  # remove
-            ok = await asyncio.to_thread(delete_watchlist, symbol)
+            ok = await asyncio.to_thread(delete_watchlist, symbol, market)
             if not ok:
                 status = "failed"
-                code = "INVALID_PARAMS"
-                emsg = "symbol not in watchlist"
+                code = "WATCHLIST_NOT_FOUND"
+                emsg = f"watchlist item not found: {market}.{symbol}"
                 msg = "标的不在自选池中"
             else:
                 status = "success"
@@ -164,7 +182,7 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
 
     except Exception as e:
         status = "failed"
-        code = "INTERNAL_ERROR"
+        code = "WATCHLIST_EXCEPTION"
         emsg = str(e)
         details = "exception in watchlist_update recipe"
         msg = "自选更新失败：内部异常"
@@ -188,7 +206,12 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             "error_code": code,
             "error_message": emsg,
             "details": details,
-            "extra": {"action": action, "items": items},
+            "extra": {
+                "action": action,
+                "symbol": symbol,
+                "market": market,
+                "items": items,
+            },
         },
     )
 
@@ -202,7 +225,12 @@ async def run_watchlist_update(task: Task) -> Dict[str, Any]:
             "error_code": code if status != "success" else None,
             "error_message": emsg if status != "success" else None,
             "details": details,
-            "extra": {"action": action, "items": items},
+            "extra": {
+                "action": action,
+                "symbol": symbol,
+                "market": market,
+                "items": items,
+            },
         },
     )
 

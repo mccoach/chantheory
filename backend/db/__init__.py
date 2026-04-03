@@ -3,28 +3,31 @@
 # DB 模块导出接口
 #
 # 本轮改动：
-#   - 移除旧 bulk 相关导出
-#   - 仅保留当前仍在使用的正式导出
+#   - 新增 gbbq_events_raw 原始事件表操作导出
+#   - watchlist 正式升级为 (symbol, market) 双主键语义
 # ==============================
 
 from backend.db.connection import get_conn, close_all_connections
 from backend.db.schema import init_schema, ensure_initialized
 
-# K线数据操作
 from backend.db.candles import (
-    upsert_candles_raw,
-    select_candles_raw,
-    get_latest_ts_from_raw,
+    upsert_candles_day_raw,
+    select_candles_day_raw,
+    get_latest_ts_from_day_raw,
 )
 
-# 复权因子操作
 from backend.db.factors import (
     upsert_factors,
     select_factors,
     get_latest_factor_date,
 )
 
-# 标的元数据操作
+from backend.db.gbbq_events import (
+    upsert_gbbq_events_raw,
+    select_gbbq_events_raw,
+    get_gbbq_events_row_count,
+)
+
 from backend.db.symbols import (
     upsert_symbol_index,
     select_symbol_index,
@@ -33,16 +36,12 @@ from backend.db.symbols import (
     select_symbol_profile,
 )
 
-# 自选池操作
 from backend.db.watchlist import (
     insert_watchlist,
     delete_watchlist,
     select_user_watchlist,
-    update_watchlist_tags,
-    update_watchlist_sort_order,
 )
 
-# 交易日历操作
 from backend.db.calendar import (
     upsert_trade_calendar,
     is_trading_day,
@@ -50,40 +49,54 @@ from backend.db.calendar import (
     select_trading_days_in_range,
 )
 
+from backend.db.data_task_status import (
+    upsert_data_task_status,
+    mark_data_task_running,
+    mark_data_task_success,
+    mark_data_task_failed,
+    mark_data_task_idle,
+    select_data_task_status,
+    select_all_data_task_status,
+)
+
 __all__ = [
-    # 连接与Schema
     "get_conn",
     "close_all_connections",
     "init_schema",
     "ensure_initialized",
 
-    # K线
-    "upsert_candles_raw",
-    "select_candles_raw",
-    "get_latest_ts_from_raw",
+    "upsert_candles_day_raw",
+    "select_candles_day_raw",
+    "get_latest_ts_from_day_raw",
 
-    # 因子
     "upsert_factors",
     "select_factors",
     "get_latest_factor_date",
 
-    # 标的
+    "upsert_gbbq_events_raw",
+    "select_gbbq_events_raw",
+    "get_gbbq_events_row_count",
+
     "upsert_symbol_index",
     "select_symbol_index",
     "get_listing_date",
     "upsert_symbol_profile",
     "select_symbol_profile",
 
-    # 自选池
     "insert_watchlist",
     "delete_watchlist",
     "select_user_watchlist",
-    "update_watchlist_tags",
-    "update_watchlist_sort_order",
 
-    # 日历
     "upsert_trade_calendar",
     "is_trading_day",
     "get_recent_trading_days",
     "select_trading_days_in_range",
+
+    "upsert_data_task_status",
+    "mark_data_task_running",
+    "mark_data_task_success",
+    "mark_data_task_failed",
+    "mark_data_task_idle",
+    "select_data_task_status",
+    "select_all_data_task_status",
 ]

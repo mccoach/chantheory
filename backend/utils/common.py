@@ -6,6 +6,11 @@
 #   - 保留既有远程能力所需的兼容工具
 #   - 新增按 (market, symbol) 精确查询 symbol_index 的辅助函数
 #   - 新的本地导入 import 主链统一以 (market, symbol) 联合键为准
+#
+# 本轮修复：
+#   - 修复 get_symbol_record_from_db 查询已删除字段 updated_at 的问题
+#   - 当前 symbol_index 表已不再包含 updated_at
+#   - 因此该函数严格按现行 schema 返回真实存在字段
 # ==============================
 
 from __future__ import annotations
@@ -101,6 +106,11 @@ def get_symbol_record_from_db(symbol: str, market: str) -> Optional[Dict[str, An
       - 本地导入候选快照补充展示信息
       - 本地导入任务列表补充 name/class/type
       - K线主链精确确定标的市场语义
+
+    说明：
+      - 当前 symbol_index 现行 schema 字段为：
+          symbol, name, market, class, type, listing_date
+      - updated_at 已从 symbol_index 表结构中移除，因此这里不能再查询该字段
     """
     s = (symbol or "").strip()
     m = (market or "").strip().upper()
@@ -118,8 +128,7 @@ def get_symbol_record_from_db(symbol: str, market: str) -> Optional[Dict[str, An
                 name,
                 class,
                 type,
-                listing_date,
-                updated_at
+                listing_date
             FROM symbol_index
             WHERE symbol=? AND market=?
             LIMIT 1;

@@ -8,11 +8,15 @@
 //   - 不做 SSE
 //   - 不做前端推导
 //
-// 契约：
+// 当前正式契约：
 //   - GET  /api/local-import/candidates
+//       * 只读取当前已有候选结果
+//       * 不触发扫描
+//   - POST /api/local-import/candidates/refresh
+//       * 显式重新扫描候选
+//       * 不返回候选结果本体
 //   - POST /api/local-import/start
 //   - GET  /api/local-import/status
-//   - GET  /api/local-import/tasks?batch_id=...
 //   - POST /api/local-import/cancel
 //   - POST /api/local-import/retry
 // ==============================
@@ -39,6 +43,11 @@ export async function fetchLocalImportCandidates() {
   return data;
 }
 
+export async function refreshLocalImportCandidates() {
+  const { data } = await api.post("/api/local-import/candidates/refresh");
+  return data;
+}
+
 export async function startLocalImport({ items } = {}) {
   const list = Array.isArray(items) ? items : [];
   const normalized = list.map(normalizeSelectionItem).filter(Boolean);
@@ -52,15 +61,6 @@ export async function startLocalImport({ items } = {}) {
 
 export async function fetchLocalImportStatus() {
   const { data } = await api.get("/api/local-import/status");
-  return data;
-}
-
-export async function fetchLocalImportTasks({ batch_id } = {}) {
-  const batchId = asStr(batch_id);
-  const qs = new URLSearchParams();
-  qs.set("batch_id", batchId);
-
-  const { data } = await api.get(`/api/local-import/tasks?${qs.toString()}`);
   return data;
 }
 

@@ -6,6 +6,9 @@
 #   - 不做缺口判断
 #   - 触发即全量解析本地文件并批量写库
 #   - 保持 task.finished / task.job.finished 事件语义
+#
+# 本轮改动：
+#   - 增加基础数据任务稳定状态写入
 # ==============================
 
 from __future__ import annotations
@@ -16,6 +19,11 @@ import asyncio
 import pandas as pd
 
 from backend.datasource import dispatcher
+from backend.db.data_task_status import (
+    mark_data_task_running,
+    mark_data_task_success,
+    mark_data_task_failed,
+)
 from backend.services.task_model import Task
 from backend.services.task_events import emit_job_finished, emit_task_finished
 from backend.db.symbols import upsert_symbol_profile
@@ -31,6 +39,8 @@ async def run_profile_snapshot(task: Task) -> Dict[str, Any]:
     jobs_status: Dict[str, str] = {}
     total_rows = 0
     source_id = None
+
+    mark_data_task_running("profile_snapshot")
 
     log_event(
         logger=_LOG,
@@ -50,6 +60,7 @@ async def run_profile_snapshot(task: Task) -> Dict[str, Any]:
 
         if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
             jobs_status[job_type] = "failed"
+            mark_data_task_failed("profile_snapshot", "profile_snapshot raw dataframe is empty")
             emit_job_finished(
                 task,
                 job_type=job_type,
@@ -69,6 +80,7 @@ async def run_profile_snapshot(task: Task) -> Dict[str, Any]:
             clean_df = normalize_profile_snapshot_df(raw_df, source_tag="tdx_profile_snapshot")
             if clean_df is None or clean_df.empty:
                 jobs_status[job_type] = "failed"
+                mark_data_task_failed("profile_snapshot", "normalized profile_snapshot is empty")
                 emit_job_finished(
                     task,
                     job_type=job_type,
@@ -89,6 +101,7 @@ async def run_profile_snapshot(task: Task) -> Dict[str, Any]:
                 rows_written = await asyncio.to_thread(upsert_symbol_profile, records)
                 total_rows = int(rows_written or 0)
                 jobs_status[job_type] = "success"
+                mark_data_task_success("profile_snapshot")
                 emit_job_finished(
                     task,
                     job_type=job_type,
@@ -107,6 +120,7 @@ async def run_profile_snapshot(task: Task) -> Dict[str, Any]:
 
     except Exception as e:
         jobs_status[job_type] = "failed"
+        mark_data_task_failed("profile_snapshot", str(e))
         emit_job_finished(
             task,
             job_type=job_type,

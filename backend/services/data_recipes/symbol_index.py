@@ -1,27 +1,35 @@
-# backend/services/data_recipes/symbol.py
+# backend/services/data_recipes/symbol_index.py
 # ==============================
 # 标的列表任务配方（symbol_index）
 #
-# 本轮改动：
+# 当前语义：
 #   - 主数据源已切换为 TDX 本地文件解析
 #   - 配方改为三市场并列：
 #       * sync_sh_symbols
 #       * sync_sz_symbols
 #       * sync_bj_symbols
 #   - 不再做缺口判断，始终执行三市场全量同步
+#
+# 本轮改动：
+#   - 增加基础数据任务稳定状态写入
+#   - 文件名按任务全名统一
 # ==============================
 
 from __future__ import annotations
 
 from typing import Dict, Any
 
+from backend.db.data_task_status import (
+    mark_data_task_running,
+    mark_data_task_success,
+    mark_data_task_failed,
+)
 from backend.services.task_model import Task
 from backend.services.task_events import emit_job_finished, emit_task_finished
 from backend.services.sync_helper import fetch_normalize_save_symbol_index
 from backend.utils.logger import get_logger, log_event
 
-_LOG = get_logger("data_recipes.symbol")
-
+_LOG = get_logger("data_recipes.symbol_index")
 
 async def run_symbol_index(task: Task) -> Dict[str, Any]:
     trace_id = task.trace_id
@@ -30,9 +38,11 @@ async def run_symbol_index(task: Task) -> Dict[str, Any]:
     jobs_status: Dict[str, str] = {}
     total_rows = 0
 
+    mark_data_task_running("symbol_index")
+
     log_event(
         logger=_LOG,
-        service="data_recipes.symbol",
+        service="data_recipes.symbol_index",
         level="INFO",
         file=__file__,
         func="run_symbol_index",
@@ -106,18 +116,20 @@ async def run_symbol_index(task: Task) -> Dict[str, Any]:
         overall_status = "success"
         overall_code = None
         overall_err = None
+        mark_data_task_success("symbol_index")
     elif succ and fail:
         overall_msg = f"symbol_index 部分失败（成功 {succ}，失败 {fail}），共写入 {total_rows} 条"
         overall_status = "partial_fail"
         overall_code = "INTERNAL_ERROR"
         overall_err = "partial failure; see jobs"
+        mark_data_task_failed("symbol_index", overall_err)
     else:
         overall_msg = "symbol_index 全部失败"
         overall_status = "failed"
         overall_code = "INTERNAL_ERROR"
         overall_err = "all jobs failed"
+        mark_data_task_failed("symbol_index", overall_err)
 
-    # task.finished 聚合（emit_task_finished 内部也会再聚合一次 overall_status，但 summary 仍需写清楚）
     emit_task_finished(
         task,
         jobs=jobs_status,

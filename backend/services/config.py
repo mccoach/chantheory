@@ -1,18 +1,26 @@
 # backend/services/config.py
 # ==============================
-# 说明：用户配置管理服务 (REFACTORED - Simplified)
-# - (FIX) 移除了对 migrate_db_file 和 close_conn 的依赖。
-# - (SIMPLIFIED) 不再支持运行时动态更改数据库路径。
-#   用户如需更改数据库路径，应修改环境变量或配置文件后重启应用。
+# 用户配置管理服务
+#
+# 说明：
+#   - 用户可编辑配置统一落在 config.json
+#   - settings.py 仅保留默认值定义角色，不再作为运行期用户配置真相源
+#
+# 最终收敛（本轮重构）：
+#   - config.py 只负责通用配置文件读写
+#   - 不再负责把 local-import 目录配置回写到 settings，避免形成“两层皮”
+#   - local-import 目录的业务生效解释统一由：
+#       backend.services.local_import.settings_service
+#     负责
 # ==============================
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Dict, Any
 
 from backend.settings import settings
+
 
 def get_config() -> Dict[str, Any]:
     """从配置文件读取用户配置。"""
@@ -25,17 +33,39 @@ def get_config() -> Dict[str, Any]:
     except Exception:
         return {}
 
-def set_config(data: Dict[str, Any]) -> None:
-    """将用户配置写入配置文件。"""
-    try:
-        settings.user_config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # (REMOVED) 数据库路径变更逻辑已移除
-        # 用户需要更改数据库路径时，应：
-        # 1. 修改环境变量 CHAN_DB_PATH 或直接修改 settings.py
-        # 2. 重启应用
-        
-        with open(settings.user_config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        raise RuntimeError(f"Failed to save config: {e}")
+
+def _normalize_path_text(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    # 去掉末尾多余斜杠，避免路径显示与 raw string 保存歧义
+    s = s.rstrip("\\/")
+    return s
+
+
+def set_config(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    合并并保存用户配置。
+
+    Args:
+        patch: 局部配置补丁
+
+    Returns:
+        Dict[str, Any]: 保存后的完整配置
+    """
+    current = get_config()
+    merged = dict(current)
+
+    for k, v in (patch or {}).items():
+        merged[str(k)] = v
+
+    # 规范化已知路径项
+    if "tdx_vipdoc_dir" in merged:
+        merged["tdx_vipdoc_dir"] = _normalize_path_text(merged.get("tdx_vipdoc_dir"))
+
+    settings.user_config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(settings.user_config_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+        f.flush()
+
+    return merged

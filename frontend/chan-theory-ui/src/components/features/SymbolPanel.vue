@@ -23,8 +23,8 @@
           class="refresh-symbols-btn-inline"
           :class="{ refreshing: refreshing }"
           :disabled="refreshing"
-          @click="forceRefreshSymbols"
-          title="强制刷新标的列表"
+          @click="refreshSymbolIndexAndProfile"
+          title="刷新标的列表与档案快照"
         >
           {{ refreshing ? "⏳" : "🔄" }}
         </button>
@@ -59,10 +59,6 @@
         <span v-if="middleListingDate" class="sym-meta-chip">
           上市日期：{{ middleListingDate }}
         </span>
-        <span v-if="profileInfo.updatedAt" class="sym-meta-chip">|</span>
-        <span v-if="profileInfo.updatedAt" class="sym-meta-chip">
-          档案更新：{{ formatUpdatedAt(profileInfo.updatedAt) }}
-        </span>
       </div>
 
       <div class="info-line-2" v-if="hasProfileInfo">
@@ -92,7 +88,60 @@
     <div class="col-right">
       <SymbolActions :loading="vm.loading.value" />
 
-      <div class="seg seg-download-refresh">
+      <div class="seg seg-top-actions">
+        <div class="seg-item" ref="foundationRootRef">
+          <button
+            class="seg-btn"
+            title="基础数据刷新"
+            @click="toggleFoundationMenu"
+          >
+            基础数据
+          </button>
+
+          <div v-if="foundationMenuOpen" class="foundation-menu">
+            <div class="foundation-head">基础数据任务</div>
+
+            <div class="foundation-actions">
+              <button class="mini-btn" type="button" :disabled="foundationBusyAll" @click="runAllFoundation">
+                刷新全部
+              </button>
+            </div>
+
+            <div class="foundation-list">
+              <div v-for="item in foundationItems" :key="item.key" class="foundation-item">
+                <div class="foundation-main">
+                  <div class="foundation-title">{{ item.label }}</div>
+                  <div class="foundation-meta">
+                    <span class="tag" :class="foundationTagClass(item.status)">
+                      {{ foundationStatusText(item.status) }}
+                    </span>
+                    <span v-if="item.lastSuccessAt" class="meta">
+                      成功：{{ formatUpdatedAt(item.lastSuccessAt) }}
+                    </span>
+                    <span v-if="item.lastFailureAt" class="meta">
+                      失败：{{ formatUpdatedAt(item.lastFailureAt) }}
+                    </span>
+                  </div>
+                  <div v-if="item.lastErrorMessage" class="foundation-error" :title="item.lastErrorMessage">
+                    {{ item.lastErrorMessage }}
+                  </div>
+                </div>
+
+                <div class="foundation-side">
+                  <button
+                    class="mini-btn"
+                    type="button"
+                    :disabled="item.status === 'running'"
+                    @click="runOneFoundation(item.key)"
+                  >
+                    刷新
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <button
           class="seg-btn"
           title="盘后数据导入"
@@ -117,11 +166,12 @@
 </template>
 
 <script setup>
-import { inject, ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { inject, ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
-import { useProfileSnapshot } from "@/composables/useProfileSnapshot";
+import { useFoundationDataCenter } from "@/composables/useFoundationDataCenter";
+import { useCurrentSymbolData } from "@/composables/useCurrentSymbolData";
 
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
@@ -154,12 +204,14 @@ const vm = inject("marketView");
 const hotkeys = inject("hotkeys", null);
 const settings = useUserSettings();
 const symbolIndex = useSymbolIndex();
-const profileSnapshot = useProfileSnapshot();
 const wl = useWatchlist();
 const dialogManager = inject("dialogManager", null);
 const hub = inject("viewCommandHub");
 
-const { ready, search, findBySymbol, ensureIndexReady } = symbolIndex;
+const foundationData = useFoundationDataCenter();
+const currentSymbolData = useCurrentSymbolData();
+
+const { ready, search, findBySymbol, ensureLoaded } = symbolIndex;
 
 const placeholder = "输入代码/拼音首字母（例：000001 + 市场区分）";
 const inputText = ref(settings.preferences.lastSymbol || vm.code.value || "");
@@ -169,10 +221,40 @@ const suggestions = ref([]);
 const invalidHint = ref("");
 const error = ref("");
 
-const refreshing = ref(false);
-
 const searchRef = ref(null);
 const watchlistRef = ref(null);
+
+const foundationMenuOpen = ref(false);
+const foundationRootRef = ref(null);
+
+const refreshing = ref(false);
+
+const foundationItems = computed(() => [
+  {
+    key: "symbol_index",
+    label: "标的列表",
+    ...foundationData.state.symbol_index,
+  },
+  {
+    key: "profile_snapshot",
+    label: "档案快照",
+    ...foundationData.state.profile_snapshot,
+  },
+  {
+    key: "trade_calendar",
+    label: "交易日历",
+    ...foundationData.state.trade_calendar,
+  },
+  {
+    key: "factor_events_snapshot",
+    label: "复权事件快照",
+    ...foundationData.state.factor_events_snapshot,
+  },
+]);
+
+const foundationBusyAll = computed(() =>
+  foundationItems.value.some((x) => x.status === "running")
+);
 
 const lastRenderedIdentity = ref(identityKey(vm.code.value, vm.market.value));
 
@@ -210,10 +292,24 @@ async function selectItem(item) {
     market: identity.market,
   });
 
-  vm.setSymbolIdentity({
-    symbol: identity.symbol,
-    market: identity.market,
-  });
+  try {
+    await currentSymbolData.prepare({
+      symbol: identity.symbol,
+      market: identity.market,
+      freq: vm.freq.value,
+      adjust: vm.adjust.value,
+      force_refresh: false,
+    });
+
+    vm.setSymbolIdentity({
+      symbol: identity.symbol,
+      market: identity.market,
+    });
+
+    await vm.reload({ with_profile: true });
+  } catch (e) {
+    console.error("[SymbolPanel] selectItem failed:", e);
+  }
 
   invalidHint.value = "";
   suggestions.value = [];
@@ -267,45 +363,54 @@ function onRefreshClick() {
   vm.reload?.({ force_refresh: true, with_profile: true });
 }
 
-async function forceRefreshSymbols() {
-  if (refreshing.value) return;
-
-  refreshing.value = true;
-
-  try {
-    console.log("[SymbolPanel] 🔄 强制刷新标的列表 + 档案快照...");
-
-    const [indexRes, profileRes] = await Promise.all([
-      ensureIndexReady({ mode: "force", timeoutMs: 60000 }),
-      profileSnapshot.ensureReady({ timeoutMs: 60000 }),
-    ]);
-
-    if (!indexRes?.ok) {
-      throw new Error(indexRes?.message || "标的列表刷新失败");
-    }
-    if (!profileRes?.ok) {
-      throw new Error(profileRes?.message || "档案快照刷新失败");
-    }
-
-    if (vm.code?.value && vm.market?.value) {
-      await vm.reload?.({ force_refresh: false, with_profile: true });
-    }
-
-    console.log("[SymbolPanel] ✅ 标的列表 + 档案快照刷新完成");
-  } catch (e) {
-    console.error("[SymbolPanel] ❌ 强制刷新失败", e);
-    alert(`刷新失败：${e.message || "网络错误"}`);
-  } finally {
-    refreshing.value = false;
-  }
-}
-
 async function handleOpenLocalImportDialog() {
   try {
     await openLocalImportDialog(dialogManager);
   } catch (e) {
     console.error("[SymbolPanel] openLocalImportDialog failed:", e);
   }
+}
+
+function toggleFoundationMenu() {
+  foundationMenuOpen.value = !foundationMenuOpen.value;
+}
+
+async function runAllFoundation() {
+  await foundationData.runAll();
+}
+
+async function runOneFoundation(key) {
+  await foundationData.runOne(key);
+}
+
+async function refreshSymbolIndexAndProfile() {
+  if (refreshing.value) return;
+  refreshing.value = true;
+
+  try {
+    await foundationData.runOne("symbol_index");
+    await foundationData.runOne("profile_snapshot");
+    await ensureLoaded();
+    updateSuggestions();
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+function foundationStatusText(status) {
+  const s = String(status || "");
+  if (s === "running") return "同步中";
+  if (s === "success") return "同步成功";
+  if (s === "failed") return "同步失败";
+  return "未同步";
+}
+
+function foundationTagClass(status) {
+  const s = String(status || "");
+  if (s === "running") return "running";
+  if (s === "success") return "success";
+  if (s === "failed") return "failed";
+  return "idle";
 }
 
 function registerPanelHotkeys() {
@@ -358,20 +463,25 @@ const showHistory = computed(
     asStr(inputText.value).length === 0
 );
 
+// FIX: 只要输入框里有内容且当前处于输入态，就稳定进入“候选模式”
+// 不再依赖 suggestions.length > 0 才显示，否则会表现成“有输入但没触发下拉”
 const showSuggest = computed(
   () =>
     isInputFocused.value &&
     !isWatchlistOpen.value &&
-    asStr(inputText.value).length > 0 &&
-    suggestions.value.length > 0
+    asStr(inputText.value).length > 0
 );
 
-function onFocus() {
+async function onFocus() {
   isInputFocused.value = true;
   invalidHint.value = "";
-  if (asStr(inputText.value)) {
-    updateSuggestions();
-  }
+
+  // FIX: focus 时主动确保索引已尝试加载，并刷新候选
+  try {
+    await ensureLoaded();
+  } catch {}
+
+  updateSuggestions();
   hotkeys?.pushScope("panel:symbol");
 }
 
@@ -385,18 +495,39 @@ function onBlur() {
   }, 150);
 }
 
-watch(inputText, () => {
+watch(inputText, async () => {
   invalidHint.value = "";
+
+  // FIX: 输入有内容时，确保候选刷新链稳定执行
+  if (asStr(inputText.value)) {
+    try {
+      await ensureLoaded();
+    } catch {}
+  }
+
   updateSuggestions();
 });
 
+// FIX: 当索引 ready 状态或内容来源切换后，如果当前输入框里已有内容，也立即重算候选
+watch(
+  () => ready.value,
+  async () => {
+    if (!asStr(inputText.value)) return;
+    await nextTick();
+    updateSuggestions();
+  }
+);
+
 function updateSuggestions() {
   const q = asStr(inputText.value);
-  if (!q || !ready.value) {
+
+  if (!q) {
     suggestions.value = [];
     return;
   }
-  suggestions.value = search(q, 20);
+
+  const result = search(q, 20);
+  suggestions.value = Array.isArray(result) ? result : [];
 }
 
 function onWatchlistOpen() {
@@ -410,11 +541,17 @@ function onWatchlistClose() {
 
 function onDocClick(e) {
   const target = e.target;
+
   if (searchRef.value && !searchRef.value.$el.contains(target)) {
     isInputFocused.value = false;
   }
+
   if (watchlistRef.value && !watchlistRef.value.$el.contains(target)) {
     watchlistRef.value.close(true);
+  }
+
+  if (foundationRootRef.value && !foundationRootRef.value.contains(target)) {
+    foundationMenuOpen.value = false;
   }
 }
 
@@ -451,7 +588,6 @@ const profileInfo = computed(() => {
       industry: null,
       region: null,
       concepts: [],
-      updatedAt: null,
     };
   }
 
@@ -461,7 +597,6 @@ const profileInfo = computed(() => {
     industry: pf.industry ?? null,
     region: pf.region ?? null,
     concepts: Array.isArray(pf.concepts) ? pf.concepts : [],
-    updatedAt: pf.updated_at ?? null,
   };
 });
 
@@ -472,8 +607,7 @@ const hasProfileInfo = computed(() => {
     p.floatValue ||
     p.industry ||
     p.region ||
-    p.concepts.length > 0 ||
-    p.updatedAt
+    p.concepts.length > 0
   );
 });
 
@@ -640,7 +774,7 @@ function formatListingDate(intVal) {
   }
 }
 
-.seg-download-refresh {
+.seg-top-actions {
   height: 36px;
 }
 
@@ -649,8 +783,15 @@ function formatListingDate(intVal) {
   align-items: center;
   border: 1px solid #444;
   border-radius: 10px;
-  overflow: hidden;
+  overflow: visible;
   background: #1a1a1a;
+  height: 36px;
+}
+
+.seg-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
   height: 36px;
 }
 
@@ -668,6 +809,7 @@ function formatListingDate(intVal) {
   border-radius: 0;
 }
 
+.seg-item + .seg-btn,
 .seg-btn + .seg-btn {
   border-left: 1px solid #444;
 }
@@ -680,5 +822,140 @@ function formatListingDate(intVal) {
 .seg-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.foundation-menu {
+  position: absolute;
+  top: 42px;
+  right: 0;
+  width: 420px;
+  background: #1b1b1b;
+  border: 1px solid #333;
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+  padding: 10px;
+  z-index: 1200;
+}
+
+.foundation-head {
+  font-size: 13px;
+  font-weight: 700;
+  color: #ddd;
+  margin-bottom: 8px;
+}
+
+.foundation-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.foundation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.foundation-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.foundation-main {
+  min-width: 0;
+}
+
+.foundation-title {
+  font-size: 13px;
+  color: #ddd;
+  font-weight: 600;
+}
+
+.foundation-meta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meta {
+  color: #999;
+  font-size: 12px;
+}
+
+.foundation-error {
+  margin-top: 4px;
+  color: #e67e22;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.foundation-side {
+  display: flex;
+  align-items: flex-start;
+}
+
+.mini-btn {
+  height: 26px;
+  padding: 0 10px;
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 24px;
+}
+
+.mini-btn:hover:not(:disabled) {
+  border-color: #5b7fb3;
+}
+
+.mini-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #bbb;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tag.running {
+  background: rgba(46, 204, 113, 0.12);
+  border-color: rgba(46, 204, 113, 0.25);
+  color: #7ee2b8;
+}
+
+.tag.success {
+  background: rgba(155, 183, 230, 0.10);
+  border-color: rgba(155, 183, 230, 0.22);
+  color: #9db7e6;
+}
+
+.tag.failed {
+  background: rgba(230, 179, 92, 0.12);
+  border-color: rgba(230, 179, 92, 0.25);
+  color: #e6b35c;
+}
+
+.tag.idle {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #bbb;
 }
 </style>

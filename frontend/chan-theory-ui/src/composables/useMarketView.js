@@ -1,31 +1,21 @@
 // src/composables/useMarketView.js
 // ==============================
-// V23.0 - useMarketView 回归单文件 + 保留唯一当前标的加载链
+// V24.0 - useMarketView 收敛为纯业务执行器
 //
-// 本轮目标：
-//   1) 撤销前一轮不必要的伪拆包，回归单文件实现；
-//   2) 保留唯一当前标的加载链：
-//        setSymbolIdentity()
-//          -> code/market 变化
-//          -> watch([code, market])
-//          -> reload()
-//   3) 删除“恢复身份后再显式 reload”的重复业务路径（由 App/useAppStartup 配合完成）；
-//   4) 严格双主键：symbol + market 任一缺失都不进入主加载流程；
-//   5) 不改变既有公开 API，保证现有页面调用方式回归。
+// 当前职责：
+//   - 读取后端当前标的结果
+//   - 应用复权
+//   - 计算指标
+//   - 更新页面状态
 //
-// 说明：
-//   - 本文件当前虽然体量较大，但本轮不再做形式主义拆包；
-//   - 这里的 reload 主流程与 state/watch/public API 强耦合，强拆会增加理解与维护成本；
-//   - 因此本轮按“极简、直接、去重复”的原则保留单文件实现。
+// 命令权收敛：
+//   - 不再自行 declareCurrentKline / declareCurrentFactors
+//   - 不再自行 waitTasksDone
+//   - 命令由 useCurrentSymbolData 在启动链/页面交互中显式发出
 // ==============================
 
 import { ref, watch, computed } from "vue";
 import { fetchCandles } from "@/services/marketService";
-import {
-  declareCurrentKline,
-  declareCurrentFactors,
-} from "@/services/ensureDataAPI";
-import { waitTasksDone } from "@/composables/useTaskWaiter";
 import { fetchFactors } from "@/services/factorsAPI";
 import { computeIndicators } from "@/composables/engines/indicators";
 import { applyAdjustment } from "@/composables/engines/adjustment";
@@ -33,7 +23,6 @@ import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/viewRenderHub";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
-import { useProfileSnapshot } from "@/composables/useProfileSnapshot";
 import { fetchProfile } from "@/services/profileService";
 
 let _abortCtl = null;
@@ -70,7 +59,6 @@ export function useMarketView(options = {}) {
   const settings = useUserSettings();
   const renderHub = useViewRenderHub();
   const symbolIndex = useSymbolIndex();
-  const profileSnapshot = useProfileSnapshot();
 
   const initialIdentity = settings.getLastSymbolIdentity
     ? settings.getLastSymbolIdentity()
@@ -81,7 +69,6 @@ export function useMarketView(options = {}) {
 
   const normalizedInitialIdentity = normalizeIdentity(initialIdentity);
 
-  // BREAKING: 当前标的身份严格升级为双主键
   const code = ref(normalizedInitialIdentity.symbol);
   const market = ref(normalizedInitialIdentity.market);
 
@@ -136,23 +123,7 @@ export function useMarketView(options = {}) {
     const currentMarket = identity.market;
     const currentFreq = freq.value;
     const currentAdjust = adjust.value;
-    const forceRefresh = !!opts.force_refresh;
     const withProfile = opts.with_profile === true;
-
-    // 读取前避让 index/profile 导入中状态
-    {
-      const [idxReadable, pfReadable] = await Promise.all([
-        symbolIndex.waitReadable({ timeoutMs: 60000 }),
-        profileSnapshot.waitReadable({ timeoutMs: 60000 }),
-      ]);
-
-      if (!idxReadable?.ok) {
-        throw new Error(idxReadable?.message || "symbol_index still importing");
-      }
-      if (!pfReadable?.ok) {
-        throw new Error(pfReadable?.message || "profile_snapshot still importing");
-      }
-    }
 
     const entry = symbolIndex.findBySymbol(currentSymbol, currentMarket);
     const cls = String(entry?.class || "").toLowerCase();
@@ -173,58 +144,7 @@ export function useMarketView(options = {}) {
     error.value = "";
 
     try {
-      console.log(
-        `${ts()} [MarketView] declare symbol=${currentSymbol} market=${currentMarket} freq=${currentFreq} adjust=${currentAdjust} force=${forceRefresh} profile_read=${withProfile}`
-      );
-
       await renderHub._executeBatch(async () => {
-        const majorTaskIds = [];
-
-        try {
-          const kTask = await declareCurrentKline({
-            symbol: currentSymbol,
-            freq: currentFreq,
-            adjust: requestAdjust,
-            force_fetch: forceRefresh,
-          });
-          if (kTask?.task_id) {
-            majorTaskIds.push(String(kTask.task_id));
-          }
-        } catch (e) {
-          console.error(`${ts()} [MarketView] declare-current_kline-failed`, e);
-          throw e;
-        }
-
-        if (shouldFetchFactors) {
-          try {
-            const fTask = await declareCurrentFactors({
-              symbol: currentSymbol,
-              force_fetch: forceRefresh,
-            });
-            if (fTask?.task_id) {
-              majorTaskIds.push(String(fTask.task_id));
-            }
-          } catch (e) {
-            console.error(`${ts()} [MarketView] declare-current_factors-failed`, e);
-            throw e;
-          }
-        }
-
-        if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
-          return;
-        }
-
-        if (majorTaskIds.length) {
-          await waitTasksDone({
-            taskIds: majorTaskIds,
-            timeoutMs: 30000,
-          });
-
-          if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
-            return;
-          }
-        }
-
         const [candlesRes, factorsRes] = await Promise.all([
           fetchCandles(currentSymbol, currentFreq, {
             signal: ctl.signal,
@@ -324,12 +244,6 @@ export function useMarketView(options = {}) {
           }
         }
       });
-
-      if (forceRefresh && isLatestRequest(mySeq) && !ctl.signal.aborted) {
-        try {
-          renderHub.requestRender({ intent: "force_full" });
-        } catch {}
-      }
     } catch (e) {
       const msg = String(e?.message || "");
       const isCanceled =
@@ -361,15 +275,6 @@ export function useMarketView(options = {}) {
     }
   }
 
-  watch(adjust, () => {
-    const identity = normalizeIdentity({
-      symbol: code.value,
-      market: market.value,
-    });
-    if (!isValidIdentity(identity)) return;
-    reload({ force_refresh: false, with_profile: false });
-  });
-
   watch(
     indicatorConfig,
     () => {
@@ -382,7 +287,6 @@ export function useMarketView(options = {}) {
     { deep: true }
   );
 
-  // 唯一业务链：身份变化即自动 reload
   watch(
     [code, market],
     ([newCode, newMarket]) => {
@@ -403,8 +307,6 @@ export function useMarketView(options = {}) {
         symbol: identity.symbol,
         market: identity.market,
       });
-
-      reload({ force_refresh: false, with_profile: true });
     }
   );
 
@@ -415,7 +317,7 @@ export function useMarketView(options = {}) {
   hub.initFromPersist(code.value, market.value, freq.value);
 
   if (autoStart) {
-    reload({ force_refresh: false, with_profile: true });
+    reload({ with_profile: true });
   }
 
   function setSymbolIdentity(input = {}) {
@@ -436,8 +338,13 @@ export function useMarketView(options = {}) {
       freq: newFreq,
       allRows: candles.value.length,
     });
+  }
 
-    reload({ force_refresh: false, with_profile: false });
+  function setAdjust(newAdjust) {
+    const next = String(newAdjust || "none");
+    if (next === adjust.value) return;
+    adjust.value = next;
+    settings.setAdjust(next);
   }
 
   function applyPreset(preset) {
@@ -480,6 +387,7 @@ export function useMarketView(options = {}) {
     displayBars,
     setSymbolIdentity,
     setFreq,
+    setAdjust,
     applyPreset,
     setBars,
     zoomIn,

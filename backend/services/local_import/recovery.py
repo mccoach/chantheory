@@ -15,6 +15,11 @@
 #   2) 最新 paused
 #   3) 最新终态（success/failed/cancelled）
 #   4) 最新 queued
+#
+# 本轮 SSE 收敛：
+#   - 前端只关心聚合数量，不关心任务明细
+#   - recovery 阶段不再逐任务推送 task_changed
+#   - 启动恢复完成后只推送一次 local_import.status
 # ==============================
 
 from __future__ import annotations
@@ -32,12 +37,8 @@ from backend.services.local_import.repository.tasks import (
     delete_orphan_tasks,
     delete_tasks_for_batch,
     mark_interrupted_running_tasks_failed,
-    list_tasks_for_batch,
 )
-from backend.services.local_import.events import (
-    emit_local_import_status,
-    emit_local_import_task_changed,
-)
+from backend.services.local_import.events import emit_local_import_status
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("local_import.recovery")
@@ -68,6 +69,10 @@ async def recover_interrupted_local_import_batches() -> int:
       4) tasks 只保留该唯一批次
       5) queued 批次若有 tasks，则清空
       6) 若保留的是 running，则修为 paused + running task -> failed(INTERRUPTED)
+
+    说明：
+      - recovery 阶段不再逐任务推送明细事件
+      - 所有恢复结果统一收敛为一次 status 推送
     """
     recovered = 0
 
@@ -132,13 +137,8 @@ async def recover_interrupted_local_import_batches() -> int:
 
     # 若 keep 是 running，执行异常中断恢复
     if keep_reason == "running":
-        changed_tasks = mark_interrupted_running_tasks_failed(keep_bid)
-        for task in changed_tasks:
-            emit_local_import_task_changed(
-                batch_id=keep_bid,
-                task=task,
-                refresh_tasks=True,
-            )
+        # 只做真相源修正，不再逐任务推 SSE
+        mark_interrupted_running_tasks_failed(keep_bid)
 
         mark_batch_paused(
             keep_bid,

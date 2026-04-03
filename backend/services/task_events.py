@@ -9,6 +9,9 @@
 #       * task.finished 事件
 #   - 不再推进任何旧盘后 bulk 真相源
 #   - local-import 有自己独立的 SSE 事件链路，不走这里
+#
+# 本轮改动（Task market 字段接入）：
+#   - task/job SSE 事件显式携带 market
 # ==============================
 
 from __future__ import annotations
@@ -21,20 +24,16 @@ from backend.utils.logger import get_logger
 
 _LOG = get_logger("task_events")
 
-
 _ALLOWED_JOB_STATUS = {"success", "failed", "cancelled", "skipped"}
 _ALLOWED_TASK_STATUS = {"success", "failed", "cancelled", "skipped", "partial_fail"}
-
 
 def _safe_job_status(value: str) -> str:
     v = (value or "").strip().lower()
     return v if v in _ALLOWED_JOB_STATUS else "failed"
 
-
 def _safe_task_status(value: str) -> str:
     v = (value or "").strip().lower()
     return v if v in _ALLOWED_TASK_STATUS else "failed"
-
 
 def _extract_error_fields(obj: Dict[str, Any] | None) -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, Any]]:
     if not isinstance(obj, dict):
@@ -54,7 +53,6 @@ def _extract_error_fields(obj: Dict[str, Any] | None) -> Tuple[Optional[str], Op
 
     extra = obj.get("extra") if isinstance(obj.get("extra"), dict) else {}
     return code, msg, details, extra
-
 
 def emit_job_finished(
     task: Task,
@@ -79,6 +77,7 @@ def emit_job_finished(
         "task_type": task.type,
         "task_scope": task.scope,
         "symbol": task.symbol,
+        "market": task.market,
         "freq": task.freq,
         "adjust": task.adjust,
         "class": task.cls,
@@ -111,7 +110,6 @@ def emit_job_finished(
         code,
     )
 
-
 def _summarize_overall_status(job_status_map: Dict[str, str]) -> str:
     if not job_status_map:
         return "failed"
@@ -133,7 +131,6 @@ def _summarize_overall_status(job_status_map: Dict[str, str]) -> str:
     if fail and not succ:
         return "failed"
     return "success"
-
 
 def emit_task_finished(
     task: Task,
@@ -163,6 +160,7 @@ def emit_task_finished(
         "task_type": task.type,
         "task_scope": task.scope,
         "symbol": task.symbol,
+        "market": task.market,
         "freq": task.freq,
         "adjust": task.adjust,
         "class": task.cls,

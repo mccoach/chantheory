@@ -7,12 +7,11 @@
 #   - symbol_index
 #   - profile_snapshot
 #   - current_kline
-#   - current_factors
+#   - factor_events_snapshot
 #   - watchlist_update
 #
-# 本轮改动：
-#   - 彻底移除 old bulk 相关逻辑
-#   - local-import 不走本执行器
+# 本轮改动（Task market 字段接入）：
+#   - 执行日志显式打印 market，便于双主键任务排查
 # ==============================
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from backend.services.data_recipes import (
     run_symbol_index,
     run_profile_snapshot,
     run_current_kline,
-    run_current_factors,
+    run_factor_events_snapshot,
     run_watchlist_update,
 )
 from backend.db.async_writer import get_async_writer
@@ -37,7 +36,6 @@ from backend.utils.logger import get_logger
 from backend.services.task_events import emit_task_finished, emit_job_finished
 
 _LOG = get_logger("sync_executor")
-
 
 def _primary_error(
     *,
@@ -52,7 +50,6 @@ def _primary_error(
         "details": str(details) if details is not None else None,
         "extra": extra or {},
     }
-
 
 class UnifiedSyncExecutor:
     def __init__(self):
@@ -136,8 +133,8 @@ class UnifiedSyncExecutor:
             return await run_profile_snapshot(task)
         if task.type == "current_kline":
             return await run_current_kline(task)
-        if task.type == "current_factors":
-            return await run_current_factors(task)
+        if task.type == "factor_events_snapshot":
+            return await run_factor_events_snapshot(task)
         if task.type == "watchlist_update":
             return await run_watchlist_update(task)
         return None
@@ -186,8 +183,8 @@ class UnifiedSyncExecutor:
 
     async def _execute_task(self, task: Task, worker_id: int = 0) -> None:
         _LOG.info(
-            "[执行器] worker-%s execute task_id=%s type=%s scope=%s symbol=%s freq=%s adjust=%s class=%s",
-            worker_id, task.task_id, task.type, task.scope, task.symbol, task.freq, task.adjust, task.cls,
+            "[执行器] worker-%s execute task_id=%s type=%s scope=%s symbol=%s market=%s freq=%s adjust=%s class=%s",
+            worker_id, task.task_id, task.type, task.scope, task.symbol, task.market, task.freq, task.adjust, task.cls,
         )
 
         timeout_s = float(getattr(settings, "task_timeout_seconds", 30.0) or 30.0)
@@ -215,9 +212,7 @@ class UnifiedSyncExecutor:
         else:
             _LOG.info("[执行器] worker-%s done task_id=%s type=%s", worker_id, task.task_id, task.type)
 
-
 _executor: Optional[UnifiedSyncExecutor] = None
-
 
 def get_sync_executor() -> UnifiedSyncExecutor:
     global _executor

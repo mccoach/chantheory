@@ -2,18 +2,21 @@
 # ==============================
 # 盘后数据导入 import - SSE 事件统一出口
 #
-# 冻结事件：
-#   1) local_import.status
-#      - 主界面真相源
-#      - 直接携带 display_batch / queued_batches / ui_message
+# 当前最终收敛模型：
+#   - local_import 只保留一种 SSE：
+#       1) local_import.status
+#          * 主界面唯一实时真相事件
+#          * 由“批次元信息 + tasks 聚合进度”统一构造后发出
 #
-#   2) local_import.task_changed
-#      - 任务表变化事件
-#      - 携带 batch_id / task / refresh_tasks
+# 设计原则（本轮重构）：
+#   - 前端只关心数量变化，不关心单任务明细
+#   - 后端聚合数值是唯一真相源
+#   - 批量状态瞬变（start/cancel/retry/批次收敛）统一收敛成一次 status 推送
+#   - 单个任务真实完成/失败时，再逐次推送 status，以体现实时进度跳变
 #
-# 说明：
-#   - SSE 是本地导入主状态同步链路
-#   - HTTP status/tasks 只做初始化、断线恢复和纠偏补充
+# 明确删除：
+#   - local_import.task_changed
+#   - 一切逐任务明细型 SSE 冗余路径
 # ==============================
 
 from __future__ import annotations
@@ -35,23 +38,6 @@ def emit_local_import_status(
         "display_batch": display_batch,
         "queued_batches": queued_batches,
         "ui_message": ui_message,
-        "timestamp": now_iso(),
-    }
-    publish_event(event)
-    return event
-
-
-def emit_local_import_task_changed(
-    *,
-    batch_id: str,
-    task: Dict[str, Any],
-    refresh_tasks: bool = True,
-) -> Dict[str, Any]:
-    event = {
-        "type": "local_import.task_changed",
-        "batch_id": str(batch_id or "").strip(),
-        "task": dict(task or {}),
-        "refresh_tasks": bool(refresh_tasks),
         "timestamp": now_iso(),
     }
     publish_event(event)

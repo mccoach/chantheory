@@ -1,10 +1,10 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\symbol\WatchlistMenu.vue -->
 <!-- ==============================
 说明：自选池下拉菜单
-V4.0 - BREAKING: UI 层双主键语义彻底化
-- 选中语义升级为完整 identity（symbol + market）
-- 内部统一使用 identityKey，禁止 symbol-only 思维残留
-- 本轮不改 watchlist 后端契约，只清理前端 UI 层 identity 表达
+V5.0 - BREAKING: watchlist 终态对齐双主键
+- 底层 useWatchlist 已彻底升级为 (symbol, market) 双主键
+- 本组件继续保持 UI 层身份语义一致
+- 不再存在 symbol-only 残留调用
 ============================== -->
 <template>
   <div class="watchlist-wrapper">

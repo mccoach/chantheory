@@ -13,6 +13,9 @@
 #       * running batch -> paused
 #       * running task -> failed(INTERRUPTED)
 #   - SSE 通道保持复用 /api/events/stream
+#
+# 本轮改动（基础数据任务稳定状态）：
+#   - 新增 /api/system/basic-data-status 路由
 # ==============================
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from backend.routers.profile import router as profile_router
 from backend.routers.trade_calendar import router as trade_calendar_router
 from backend.routers.local_import import router as local_import_router
 from backend.routers.data_sync import router as data_sync_router
+from backend.routers.basic_data_status import router as basic_data_status_router
 
 from backend.services.unified_sync_executor import get_sync_executor
 from backend.db.async_writer import get_async_writer
@@ -195,6 +199,7 @@ app.include_router(profile_router)
 app.include_router(trade_calendar_router)
 app.include_router(local_import_router)
 app.include_router(data_sync_router)
+app.include_router(basic_data_status_router)
 
 
 if __name__ == "__main__":

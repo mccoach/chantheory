@@ -1,13 +1,15 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartControls.vue -->
 <!-- ============================== -->
-<!-- V8.2 - REFACTOR: 主图控制区数值输入统一走 @commit（根因整合，去掉 @blur 的重复触发）
+<!-- V8.3 - 当前标的链命令权收敛到 useCurrentSymbolData
 目标：
-  - 充分利用 NumberSpinner 的统一能力：
-      * Enter 提交 + 自动跳转下一格（由全局 hotkeys 处理）
-      * Blur 提交（同样会 emit commit）
-  - 上层只监听一个通道：@commit，用于“确认并生效”
-  - 起止时间：仅最后一格 @commit 触发 apply，其余格不绑定任何 apply（满足“前 N-1 不刷新，最后一格刷新”）
-  - 保持现有功能不减少：分时仍支持时分输入（10格）
+  - 主图控制区只表达用户意图
+  - 频率切换按钮不再自己承担“半命令半执行”混合链
+  - 频率切换链路：
+      activateK(freq)
+        -> useCurrentSymbolData.prepare(...)
+        -> vm.setFreq(...)
+        -> vm.reload(...)
+  - 其余区间/Bars/ATR 控制职责保持原样
 -->
 <template>
   <div class="controls-grid-2x2">
@@ -42,8 +44,14 @@
 
     <div class="row1 col-right">
       <div class="seg">
-        <button v-for="p in FIXED_PRESETS" :key="p" class="seg-btn" :class="{ active: activePresetKey === p }"
-          @click="onClickPreset(p)" :title="`快捷区间：${p}`">
+        <button
+          v-for="p in FIXED_PRESETS"
+          :key="p"
+          class="seg-btn"
+          :class="{ active: activePresetKey === p }"
+          @click="onClickPreset(p)"
+          :title="`快捷区间：${p}`"
+        >
           {{ p }}
         </button>
       </div>
@@ -104,7 +112,6 @@
             :pad-digits="2"
           />
           <span class="sep">-</span>
-          <!-- 最后一格：只用 @commit 触发应用（Enter/Tab/失焦都会变成 commit） -->
           <NumberSpinner
             class="date-cell short"
             :model-value="endFields.D"
@@ -213,7 +220,6 @@
             :pad-digits="2"
           />
           <span class="sep">:</span>
-          <!-- 最后一格：只用 @commit 触发应用 -->
           <NumberSpinner
             class="time-cell short"
             :model-value="endFields.m"
@@ -295,21 +301,31 @@ import { isMinuteFreq } from "@/utils/timeCheck";
 import { pad2 } from "@/utils/timeFormat";
 import NumberSpinner from "@/components/ui/NumberSpinner.vue";
 import { useUserSettings } from "@/composables/useUserSettings";
-import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/viewRenderHub";
 import { ATR_INPUT_LIMITS, DEFAULT_ATR_STOP_SETTINGS } from "@/constants";
+import { useCurrentSymbolData } from "@/composables/useCurrentSymbolData";
 
 const vm = inject("marketView");
 const hub = inject("viewCommandHub");
 const renderHub = useViewRenderHub();
 const settings = useUserSettings();
+const currentSymbolData = useCurrentSymbolData();
 
 const FIXED_PRESETS = ["5D", "10D", "1M", "3M", "6M", "1Y", "3Y", "5Y", "ALL"];
 
 const isActiveK = (f) => vm.chartType.value === "kline" && vm.freq.value === f;
 
-function activateK(f) {
+async function activateK(f) {
+  await currentSymbolData.prepare({
+    symbol: vm.code.value,
+    market: vm.market.value,
+    freq: f,
+    adjust: vm.adjust.value,
+    force_refresh: false,
+  });
+
   vm.setFreq(f);
+  await vm.reload({ with_profile: false });
 }
 
 function onClickPreset(preset) {
@@ -339,7 +355,7 @@ function onClickPreset(preset) {
       barsCount: nextBars,
       rightTs: arr[eIdx]?.ts,
     });
-  } catch { }
+  } catch {}
 }
 
 const activePresetKey = ref("ALL");
@@ -401,7 +417,7 @@ function updateUIFromState(state) {
         }
       }
     }
-  } catch { }
+  } catch {}
 }
 
 let hubUnsubscribe = null;
@@ -413,7 +429,6 @@ onMounted(() => {
     updateUIFromState(state);
   });
 
-  // 初始化 ATR 草稿值：从 settings 读取（或默认）
   syncAtrDraftsFromSettings();
 });
 
@@ -422,10 +437,6 @@ onBeforeUnmount(() => {
     hub.offChange(hubUnsubscribe);
   }
 });
-
-// ==============================
-// ATR 三参数（归口 RenderHub）
-// ==============================
 
 function getLatestCloseAsDefaultBase() {
   const arr = vm?.candles?.value || [];
@@ -441,10 +452,12 @@ function readBasePriceFromSettings() {
   if (def != null) return def;
   return null;
 }
+
 function readFixedNFromSettings() {
   const v = settings.chartDisplay?.atrStopSettings?.fixed?.long?.n;
   return v != null && Number.isFinite(+v) ? +v : DEFAULT_ATR_STOP_SETTINGS.fixed.long.n;
 }
+
 function readChanNFromSettings() {
   const v = settings.chartDisplay?.atrStopSettings?.chandelier?.long?.n;
   return v != null && Number.isFinite(+v) ? +v : DEFAULT_ATR_STOP_SETTINGS.chandelier.long.n;
@@ -463,7 +476,7 @@ function syncAtrDraftsFromSettings() {
 function requestAtrPatch() {
   try {
     renderHub.requestRender({ reason: "atr_param" });
-  } catch { }
+  } catch {}
 }
 
 function persistFixedN(val) {
@@ -501,18 +514,15 @@ function persistChanN(val) {
 function confirmEdit(kind) {
   try {
     if (kind === "base") {
-      // 清空提交 => 回到“自动对齐”模式
       if (draftBasePrice.value == null || draftBasePrice.value === "") {
         settings.setAtrBasePrice(null);
 
         const def = getLatestCloseAsDefaultBase();
         if (def != null) {
           draftBasePrice.value = def;
-          // 系统默认对齐进入真相源（settings），不写历史
           settings.setAtrBasePrice(def);
         }
 
-        // 请求 RenderHub 在 indicators 更新后进行最小 patch
         requestAtrPatch();
         return;
       }
@@ -551,16 +561,14 @@ function confirmEdit(kind) {
       persistChanN(val);
       requestAtrPatch();
     }
-  } catch { }
+  } catch {}
 }
 
 watch(
   () => vm.candles.value,
   () => {
-    // 数据切换后：先同步草稿
     syncAtrDraftsFromSettings();
 
-    // 若用户未手动持久化基准价，则在 candles 就绪后自动对齐最新收盘价
     const persisted = settings.preferences?.atrBasePrice;
     const hasPersisted = persisted != null && Number.isFinite(+persisted);
     if (hasPersisted) return;
@@ -569,39 +577,33 @@ watch(
     if (def == null) return;
 
     draftBasePrice.value = def;
-    // 系统默认对齐进入真相源（settings），不写历史
     settings.setAtrBasePrice(def);
 
-    // 请求 RenderHub 进行 ATR 最小 patch（等待 indicators 更新）
     requestAtrPatch();
   }
 );
 
-// ==============================
-// 区间/ Bars 应用（原逻辑保持）
-// ==============================
-
 function applyInlineRangeDaily() {
   try {
-    const ys = parseInt(startFields.Y, 10),
-      ms = parseInt(startFields.M, 10),
-      ds = parseInt(startFields.D, 10);
-    const ye = parseInt(endFields.Y, 10),
-      me = parseInt(endFields.M, 10),
-      de = parseInt(endFields.D, 10);
+    const ys = parseInt(startFields.Y, 10);
+    const ms = parseInt(startFields.M, 10);
+    const ds = parseInt(startFields.D, 10);
+    const ye = parseInt(endFields.Y, 10);
+    const me = parseInt(endFields.M, 10);
+    const de = parseInt(endFields.D, 10);
 
     if (![ys, ms, ds, ye, me, de].every(Number.isFinite)) return;
 
     const toYMD = (y, m, d) =>
       `${String(y).padStart(4, "0")}-${pad2(m)}-${pad2(d)}`;
-    const sY = toYMD(ys, ms, ds),
-      eY = toYMD(ye, me, de);
+    const sY = toYMD(ys, ms, ds);
+    const eY = toYMD(ye, me, de);
 
     const arr = vm.candles.value || [];
     if (!arr.length) return;
 
-    let sIdx = -1,
-      eIdx = -1;
+    let sIdx = -1;
+    let eIdx = -1;
 
     for (let i = 0; i < arr.length; i++) {
       const barDate = new Date(arr[i].ts);
@@ -633,24 +635,24 @@ function applyInlineRangeDaily() {
       barsCount: nextBars,
       rightTs: anchorTs,
     });
-  } catch { }
+  } catch {}
 }
 
 function applyInlineRangeMinute() {
   try {
-    const ys = parseInt(startFields.Y, 10),
-      ms = parseInt(startFields.M, 10),
-      ds = parseInt(startFields.D, 10),
-      hs = parseInt(startFields.h, 10),
-      mins = parseInt(startFields.m, 10);
-    const ye = parseInt(endFields.Y, 10),
-      me = parseInt(endFields.M, 10),
-      de = parseInt(endFields.D, 10),
-      he = parseInt(endFields.h, 10),
-      mine = parseInt(endFields.m, 10);
+    const ys = parseInt(startFields.Y, 10);
+    const ms = parseInt(startFields.M, 10);
+    const ds = parseInt(startFields.D, 10);
+    const hs = parseInt(startFields.h, 10);
+    const mins = parseInt(startFields.m, 10);
 
-    if (![ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite))
-      return;
+    const ye = parseInt(endFields.Y, 10);
+    const me = parseInt(endFields.M, 10);
+    const de = parseInt(endFields.D, 10);
+    const he = parseInt(endFields.h, 10);
+    const mine = parseInt(endFields.m, 10);
+
+    if (![ys, ms, ds, hs, mins, ye, me, de, he, mine].every(Number.isFinite)) return;
 
     const startDt = new Date(ys, ms - 1, ds, hs, mins, 0, 0);
     const endDt = new Date(ye, me - 1, de, he, mine, 0, 0);
@@ -664,8 +666,9 @@ function applyInlineRangeMinute() {
 
     const tsArr = arr.map((d) => d.ts);
 
-    let sIdx = -1,
-      eIdx = -1;
+    let sIdx = -1;
+    let eIdx = -1;
+
     for (let i = 0; i < tsArr.length; i++) {
       const t = tsArr[i];
       if (!Number.isFinite(t)) continue;
@@ -674,7 +677,7 @@ function applyInlineRangeMinute() {
     }
 
     if (sIdx < 0) sIdx = 0;
-    if (eIdx < 0) tsArr.length - 1;
+    if (eIdx < 0) eIdx = tsArr.length - 1;
     if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
 
     const nextBars = Math.max(1, eIdx - sIdx + 1);
@@ -695,7 +698,7 @@ function applyInlineRangeMinute() {
       barsCount: nextBars,
       rightTs: anchorTs,
     });
-  } catch { }
+  } catch {}
 }
 
 function applyBarsInline() {
@@ -721,7 +724,7 @@ function applyBarsInline() {
       barsCount: n,
       rightTs: arr[eIdx]?.ts,
     });
-  } catch { }
+  } catch {}
 }
 </script>
 
@@ -782,7 +785,7 @@ function applyBarsInline() {
   border-radius: 0;
 }
 
-.seg-btn+.seg-btn {
+.seg-btn + .seg-btn {
   border-left: 1px solid #444;
 }
 

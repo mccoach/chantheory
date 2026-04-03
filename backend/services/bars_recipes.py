@@ -1,20 +1,22 @@
 # backend/services/bars_recipes.py
 # ==============================
-# 说明：K线动作指令集（Bars Recipes · 统一 dispatcher 版 · 内存推算版 F4）
+# 说明：K线动作指令集（Bars Recipes · 日线收尾优化阶段）
 #
-# 本次改动：
-#   - 强规则落地：凡发生真实远程拉取，若远端返回空数据 => 抛异常（由上层标记 failed）
-#   - candles_raw 联合键重构：
-#       * 补入 market
-#       * 删除 adjust 维度
-#   - 目的：
-#       * 禁止“远端空但 job 仍 success”的漂移
-#       * K线底表统一为 market+symbol+freq+ts 的原始真相源
+# 本阶段改动：
+#   - 日线真相源已切到 candles_day_raw
+#   - 当前阶段只保证日线 DB 链路稳定
+#   - 分钟线后续将切换为“归档 + 实时拼接”独立链路
+#
+# 本轮改动（复权因子本地化）：
+#   - 股票复权因子真相源已切到：
+#       * TDX 本地 gbbq category=1
+#       * 本地原始日线 candles_day_raw
+#   - 不再依赖 Baostock 远程因子
 # ==============================
 
 from __future__ import annotations
 
-from typing import Optional, Dict, Tuple
+from typing import Optional
 
 import asyncio
 import pandas as pd
@@ -22,22 +24,21 @@ import pandas as pd
 from backend.datasource import dispatcher
 from backend.services.normalizer import (
     normalize_bars_df,
-    normalize_baostock_adj_factors_df,
+    normalize_tdx_gbbq_adj_factors_df,
 )
 from backend.db.async_writer import get_async_writer
-from backend.db.candles import select_candles_raw
+from backend.db.candles import select_candles_day_raw
 from backend.db.symbols import select_symbol_index
-from backend.utils.common import get_symbol_record_from_db, get_symbol_market_from_db
+from backend.utils.common import get_symbol_market_from_db
 from backend.utils.gap_checker import check_kline_gap_to_current
 from backend.utils.logger import get_logger, log_event
-from backend.utils.time import to_yyyymmdd
 
 _LOG = get_logger("bars_recipes")
 _writer = get_async_writer()
 
 
 class RemoteEmptyDataError(RuntimeError):
-    """远程真实拉取但返回空数据（强规则：应视为失败）。"""
+    """远程/本地真实拉取但返回空数据（强规则：应视为失败）。"""
 
 
 def _get_symbol_class(symbol: str) -> Optional[str]:
@@ -58,12 +59,11 @@ def _get_symbol_market(symbol: str) -> Optional[str]:
         return None
 
 
-async def _load_bars_from_db(market: str, symbol: str, freq: str) -> pd.DataFrame:
+async def _load_day_bars_from_db(market: str, symbol: str) -> pd.DataFrame:
     rows = await asyncio.to_thread(
-        select_candles_raw,
+        select_candles_day_raw,
         market=market,
         symbol=symbol,
-        freq=freq,
         start_ts=None,
         end_ts=None,
         limit=None,
@@ -74,214 +74,17 @@ async def _load_bars_from_db(market: str, symbol: str, freq: str) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
-async def _save_bars_df(
+async def _save_day_bars_df(
     df_bars: pd.DataFrame,
     market: str,
     symbol: str,
-    freq: str,
-    source: str,
 ) -> None:
     if df_bars is None or df_bars.empty:
         return
     df = df_bars.copy()
     df["market"] = str(market or "").strip().upper()
     df["symbol"] = symbol
-    df["freq"] = freq
-    df["source"] = source
     await _writer.write_candles(df.to_dict("records"))
-
-
-async def _ensure_fund_minutely_unadj_df(
-    symbol: str,
-    freq: str,
-    force_fetch: bool,
-    trace_id: Optional[str],
-) -> Tuple[pd.DataFrame, bool]:
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-
-    category = "fund_minutely_bars"
-
-    if not has_gap:
-        df = await _load_bars_from_db(market, symbol, freq)
-        return df, False
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="_ensure_fund_minutely_unadj_df",
-        line=0,
-        trace_id=trace_id,
-        event="F3.fetch.start",
-        message=f"[ensure] F3 拉取基金分时不复权 {symbol} {freq}",
-        extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq,
-            "category": category,
-        },
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        ma="no",
-    )
-
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq}")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "sina.fund_minutely_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq}")
-
-    await _save_bars_df(
-        df_bars=df_bars,
-        market=market,
-        symbol=symbol,
-        freq=freq,
-        source=source_id or "sina.fund_minutely_kline",
-    )
-
-    return df_bars, True
-
-
-async def _ensure_fund_daily_unadj_df(
-    symbol: str,
-    force_fetch: bool,
-    trace_id: Optional[str],
-) -> Tuple[pd.DataFrame, bool]:
-    freq = "1d"
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-
-    category = "fund_bars"
-
-    if not has_gap:
-        df = await _load_bars_from_db(market, symbol, freq)
-        return df, False
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="_ensure_fund_daily_unadj_df",
-        line=0,
-        trace_id=trace_id,
-        event="F1.fetch.start",
-        message=f"[ensure] F1 拉取基金日线原始K线 {symbol} 1d",
-        extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq,
-            "category": category,
-        },
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        fqt=0,
-    )
-
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq} fqt=0")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.fund_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq} fqt=0")
-
-    await _save_bars_df(
-        df_bars=df_bars,
-        market=market,
-        symbol=symbol,
-        freq=freq,
-        source=source_id or "eastmoney.fund_kline",
-    )
-
-    return df_bars, True
-
-
-async def _ensure_fund_daily_adj_df(
-    symbol: str,
-    adjust: str,
-    force_fetch: bool,
-    trace_id: Optional[str],
-) -> Tuple[pd.DataFrame, bool]:
-    """
-    说明：
-      - candles_raw 底表现在只存原始不复权K线
-      - 因此基金日线复权请求只用于“生成临时结果供后续推算”
-      - 不再以 adjust 维度写入 candles_raw
-    """
-    freq = "1d"
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-
-    category = "fund_bars"
-    fqt = 1 if adjust == "qfq" else 2
-
-    if not has_gap:
-        # 底表只保留原始K线，因此这里直接读取原始底表
-        df = await _load_bars_from_db(market, symbol, freq)
-        return df, False
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="_ensure_fund_daily_adj_df",
-        line=0,
-        trace_id=trace_id,
-        event="F2.fetch.start",
-        message=f"[ensure] F2 拉取基金日线复权临时数据 {symbol} 1d adjust={adjust}",
-        extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq,
-            "adjust": adjust,
-            "category": category,
-            "fqt": fqt,
-        },
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        fqt=fqt,
-    )
-
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq} fqt={fqt}")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.fund_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq} fqt={fqt}")
-
-    # 不写入底表，仅返回临时结果
-    return df_bars, True
 
 
 async def run_stock_dwm_unadj(
@@ -290,13 +93,16 @@ async def run_stock_dwm_unadj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
+    """
+    当前阶段仅稳定支持股票日线（1d）同步入库。
+    """
     cls = _get_symbol_class(symbol)
     if cls != "stock":
         _LOG.info(f"[S1] 跳过：{symbol} class={cls} 非 stock")
         return False
 
-    if freq not in ("1d", "1w", "1M"):
-        _LOG.warning(f"[S1] 不支持的 freq={freq}，仅支持 1d/1w/1M")
+    if freq != "1d":
+        _LOG.warning(f"[S1] 当前阶段仅支持股票日线 1d，收到 freq={freq}")
         return False
 
     market = _get_symbol_market(symbol) or ""
@@ -310,12 +116,7 @@ async def run_stock_dwm_unadj(
         _LOG.info(f"[S1] 无缺口：{market} {symbol} {freq} 本地已最新")
         return False
 
-    if freq == "1d":
-        category = "stock_daily_bars"
-    elif freq == "1w":
-        category = "stock_weekly_bars"
-    else:
-        category = "stock_monthly_bars"
+    category = "stock_daily_bars"
 
     log_event(
         logger=_LOG,
@@ -326,7 +127,7 @@ async def run_stock_dwm_unadj(
         line=0,
         trace_id=trace_id,
         event="S1.fetch.start",
-        message=f"S1 拉取股票日/周/月原始K线 {symbol} {freq}",
+        message=f"S1 拉取股票日线原始K线 {symbol} {freq}",
         extra={
             "symbol": symbol,
             "market": market,
@@ -345,16 +146,14 @@ async def run_stock_dwm_unadj(
     if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
         raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq}")
 
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.stock_kline")
+    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.stock_daily_kline")
     if df_bars is None or df_bars.empty:
         raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq}")
 
-    await _save_bars_df(
+    await _save_day_bars_df(
         df_bars=df_bars,
         market=market,
         symbol=symbol,
-        freq=freq,
-        source=source_id or "eastmoney.stock_kline",
     )
 
     _LOG.info(f"[S1] 完成：{market} {symbol} {freq} 行数={len(df_bars)}")
@@ -367,70 +166,8 @@ async def run_stock_intraday_unadj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
-    cls = _get_symbol_class(symbol)
-    if cls != "stock":
-        _LOG.info(f"[S2] 跳过：{symbol} class={cls} 非 stock")
-        return False
-
-    if freq not in ("1m", "5m", "15m", "30m", "60m"):
-        _LOG.warning(f"[S2] 不支持的 freq={freq}，仅支持 1m/5m/15m/30m/60m")
-        return False
-
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-    if not has_gap:
-        _LOG.info(f"[S2] 无缺口：{market} {symbol} {freq} 本地已最新")
-        return False
-
-    category = "stock_minutely_bars"
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="run_stock_intraday_unadj",
-        line=0,
-        trace_id=trace_id,
-        event="S2.fetch.start",
-        message=f"S2 拉取股票分时原始K线 {symbol} {freq}",
-        extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq,
-            "category": category
-        },
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        ma="no",
-    )
-
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq}")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "sina.stock_minutely_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq}")
-
-    await _save_bars_df(
-        df_bars=df_bars,
-        market=market,
-        symbol=symbol,
-        freq=freq,
-        source=source_id or "sina.stock_minutely_kline",
-    )
-
-    _LOG.info(f"[S2] 完成：{market} {symbol} {freq} 行数={len(df_bars)}")
-    return True
+    _LOG.warning(f"[S2] 当前阶段未启用股票分钟线链路 symbol={symbol} freq={freq}")
+    return False
 
 
 async def run_stock_factors(
@@ -438,10 +175,27 @@ async def run_stock_factors(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
+    """
+    股票复权因子本地化主链：
+
+      TDX 本地 gbbq(category=1)
+      + 本地原始日线 candles_day_raw
+      -> qfq_factor / hfq_factor
+      -> adj_factors
+    """
     sym = (symbol or "").strip()
     if not sym:
         _LOG.warning("[S3] 空 symbol，跳过")
         return False
+
+    market = _get_symbol_market(sym) or ""
+    cls = _get_symbol_class(sym)
+    if cls != "stock":
+        _LOG.info("[S3] 跳过：%s class=%s 非 stock", sym, cls)
+        return False
+
+    if not market:
+        raise ValueError(f"LOCAL_SYMBOL_MARKET_MISSING: symbol={sym}")
 
     log_event(
         logger=_LOG,
@@ -452,30 +206,41 @@ async def run_stock_factors(
         line=0,
         trace_id=trace_id,
         event="S3.fetch.start",
-        message=f"S3 拉取股票因子 {symbol}",
-        extra={"symbol": symbol},
+        message=f"S3 拉取本地股票复权事件 {symbol}",
+        extra={"symbol": symbol, "market": market},
     )
 
     raw_df, source_id = await dispatcher.fetch(
         "adj_factor",
-        symbol=symbol,
+        symbol=sym,
     )
 
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for adj_factor symbol={symbol}")
+    if raw_df is None:
+        raise RemoteEmptyDataError(f"local empty for adj_factor symbol={sym}")
 
-    df = normalize_baostock_adj_factors_df(
+    if isinstance(raw_df, pd.DataFrame) and raw_df.empty:
+        _LOG.info("[S3] 本地无复权事件：%s", sym)
+        return False
+
+    day_df = await _load_day_bars_from_db(market=market, symbol=sym)
+    if day_df is None or day_df.empty:
+        raise ValueError(f"LOCAL_PRICE_DEPENDENCY_MISSING: no local day bars for {market}.{sym}")
+
+    df = normalize_tdx_gbbq_adj_factors_df(
         raw_df,
-        source_id=source_id or "baostock.get_adj_factors",
+        day_df,
+        symbol=sym,
+        market=market,
     )
 
     if df is None or df.empty:
-        raise RemoteEmptyDataError(f"normalized empty for adj_factor symbol={symbol}")
+        _LOG.info("[S3] 复权事件存在，但标准化后无有效因子：%s", sym)
+        return False
 
-    df["symbol"] = symbol
+    df["symbol"] = sym
     await _writer.write_factors(df.to_dict("records"))
 
-    _LOG.info(f"[S3] 完成：{symbol} 因子行数={len(df)}")
+    _LOG.info(f"[S3] 完成：{market} {sym} 本地因子行数={len(df)} source_id={source_id}")
     return True
 
 
@@ -485,57 +250,8 @@ async def run_fund_dwm_unadj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
-    cls = _get_symbol_class(symbol)
-    if cls != "fund":
-        _LOG.info(f"[F1] 跳过：{symbol} class={cls} 非 fund")
-        return False
-
-    if freq not in ("1d", "1w", "1M"):
-        _LOG.warning(f"[F1] 不支持的 freq={freq}，仅支持 1d/1w/1M")
-        return False
-
-    if freq == "1d":
-        _, from_remote = await _ensure_fund_daily_unadj_df(
-            symbol=symbol,
-            force_fetch=force_fetch,
-            trace_id=trace_id,
-        )
-        return bool(from_remote)
-
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-    if not has_gap:
-        _LOG.info(f"[F1] 无缺口：{market} {symbol} {freq} 本地已最新")
-        return False
-
-    category = "fund_bars"
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        fqt=0,
-    )
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq} fqt=0")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.fund_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq} fqt=0")
-
-    await _save_bars_df(
-        df_bars=df_bars,
-        market=market,
-        symbol=symbol,
-        freq=freq,
-        source=source_id or "eastmoney.fund_kline",
-    )
-    return True
+    _LOG.warning(f"[F1] 当前阶段未启用基金日线链路 symbol={symbol} freq={freq}")
+    return False
 
 
 async def run_fund_dwm_adj(
@@ -545,52 +261,8 @@ async def run_fund_dwm_adj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
-    """
-    说明：
-      - candles_raw 底表只存原始不复权K线
-      - 基金日/周/月复权请求在当前架构中不再写入独立底表版本
-      - 返回值语义：若远端拉取过，则返回 True；否则 False
-    """
-    cls = _get_symbol_class(symbol)
-    if cls != "fund":
-        _LOG.info(f"[F2] 跳过：{symbol} class={cls} 非 fund")
-        return False
-
-    if freq not in ("1d", "1w", "1M"):
-        _LOG.warning(f"[F2] 不支持的 freq={freq}，仅支持 1d/1w/1M")
-        return False
-
-    if adjust not in ("qfq", "hfq"):
-        _LOG.warning(f"[F2] 不支持的 adjust={adjust}，仅支持 qfq/hfq")
-        return False
-
-    if freq == "1d":
-        _, from_remote = await _ensure_fund_daily_adj_df(
-            symbol=symbol,
-            adjust=adjust,
-            force_fetch=force_fetch,
-            trace_id=trace_id,
-        )
-        return bool(from_remote)
-
-    # 周/月直接拉取临时复权结果，但不写底表
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(symbol=symbol, freq=freq, market=market, force_fetch=force_fetch)
-    if not has_gap:
-        return False
-
-    category = "fund_bars"
-    fqt = 1 if adjust == "qfq" else 2
-
-    raw_df, source_id = await dispatcher.fetch(category, freq=freq, symbol=symbol, fqt=fqt)
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq} fqt={fqt}")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.fund_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq} fqt={fqt}")
-
-    return True
+    _LOG.warning(f"[F2] 当前阶段未启用基金复权日线链路 symbol={symbol} freq={freq} adjust={adjust}")
+    return False
 
 
 async def run_fund_intraday_unadj(
@@ -599,22 +271,8 @@ async def run_fund_intraday_unadj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
-    cls = _get_symbol_class(symbol)
-    if cls != "fund":
-        _LOG.info(f"[F3] 跳过：{symbol} class={cls} 非 fund")
-        return False
-
-    if freq not in ("1m", "5m", "15m", "30m", "60m"):
-        _LOG.warning(f"[F3] 不支持的 freq={freq}，仅支持 1m/5m/15m/30m/60m")
-        return False
-
-    _, from_remote = await _ensure_fund_minutely_unadj_df(
-        symbol=symbol,
-        freq=freq,
-        force_fetch=force_fetch,
-        trace_id=trace_id,
-    )
-    return bool(from_remote)
+    _LOG.warning(f"[F3] 当前阶段未启用基金分钟线链路 symbol={symbol} freq={freq}")
+    return False
 
 
 async def run_fund_intraday_adj(
@@ -624,78 +282,5 @@ async def run_fund_intraday_adj(
     force_fetch: bool = False,
     trace_id: Optional[str] = None,
 ) -> bool:
-    cls = _get_symbol_class(symbol)
-    if cls != "fund":
-        _LOG.info(f"[F4] 跳过：{symbol} class={cls} 非 fund")
-        return False
-
-    if freq not in ("1m", "5m", "15m", "30m", "60m"):
-        _LOG.warning(f"[F4] 不支持的 freq={freq}，仅支持 1m/5m/15m/30m/60m")
-        return False
-
-    if adjust not in ("qfq", "hfq"):
-        _LOG.warning(f"[F4] 不支持的 adjust={adjust}，仅支持 qfq/hfq")
-        return False
-
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(symbol=symbol, freq=freq, market=market, force_fetch=force_fetch)
-    if not has_gap:
-        return False
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="run_fund_intraday_adj",
-        line=0,
-        trace_id=trace_id,
-        event="F4.fetch.start",
-        message=f"F4 准备基金分时复权所需数据 {symbol} {freq} adjust={adjust}",
-        extra={"symbol": symbol, "market": market, "freq": freq, "adjust": adjust},
-    )
-
-    df_min_unadj, _ = await _ensure_fund_minutely_unadj_df(symbol=symbol, freq=freq, force_fetch=force_fetch, trace_id=trace_id)
-    df_d_unadj, _ = await _ensure_fund_daily_unadj_df(symbol=symbol, force_fetch=force_fetch, trace_id=trace_id)
-    df_d_adj, _ = await _ensure_fund_daily_adj_df(symbol=symbol, adjust=adjust, force_fetch=force_fetch, trace_id=trace_id)
-
-    if df_min_unadj is None or df_min_unadj.empty:
-        raise RemoteEmptyDataError(f"missing dependency: fund intraday unadj empty symbol={symbol} freq={freq}")
-    if df_d_unadj is None or df_d_unadj.empty:
-        raise RemoteEmptyDataError(f"missing dependency: fund daily unadj empty symbol={symbol}")
-    if df_d_adj is None or df_d_adj.empty:
-        raise RemoteEmptyDataError(f"missing dependency: fund daily adj empty symbol={symbol} adjust={adjust}")
-
-    df_d_unadj = df_d_unadj.copy()
-    df_d_adj = df_d_adj.copy()
-    df_d_unadj["date"] = df_d_unadj["ts"].apply(to_yyyymmdd)
-    df_d_adj["date"] = df_d_adj["ts"].apply(to_yyyymmdd)
-
-    df_ratio = pd.merge(
-        df_d_unadj[["date", "close"]],
-        df_d_adj[["date", "close"]],
-        on="date",
-        how="inner",
-        suffixes=("_unadj", "_adj"),
-    )
-
-    df_ratio = df_ratio[(df_ratio["close_unadj"] > 0) & df_ratio["close_adj"].notna()].copy()
-    if df_ratio.empty:
-        raise RemoteEmptyDataError(f"no ratio records for intraday adj symbol={symbol} adjust={adjust}")
-
-    df_ratio["ratio"] = df_ratio["close_adj"] / df_ratio["close_unadj"]
-    ratio_map = {int(row["date"]): float(row["ratio"]) for _, row in df_ratio.iterrows()}
-
-    df_min_unadj = df_min_unadj.copy()
-    df_min_unadj["date"] = df_min_unadj["ts"].apply(to_yyyymmdd)
-    df_min_unadj["ratio"] = df_min_unadj["date"].map(ratio_map).fillna(1.0)
-
-    df_min_adj = df_min_unadj.copy()
-    for col in ("open", "high", "low", "close"):
-        df_min_adj[col] = df_min_adj[col] * df_min_adj["ratio"]
-
-    # 当前不写底表，只完成临时推算
-    _LOG.info(
-        f"[F4] 完成基金分时复权推算：{market} {symbol} {freq} adjust={adjust} 分时行数={len(df_min_adj)}",
-    )
-    return True
+    _LOG.warning(f"[F4] 当前阶段未启用基金分钟复权链路 symbol={symbol} freq={freq} adjust={adjust}")
+    return False

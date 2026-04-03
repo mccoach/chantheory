@@ -1,11 +1,28 @@
 # backend/settings.py
 # ==============================
+# 重要：本文件中的注释务必保留，新增条目也应按同等标准写明注释
+#
 # 设置中心（统一归口版）
 #
 # 本轮改动（盘后数据导入 import 第一阶段）：
 #   - 新增 tdx_vipdoc_dir：通达信本地盘后数据目录（唯一真相源根目录）
 #   - 当前第一阶段只支持从 tdx_vipdoc_dir 递归扫描 .day 文件
 #   - 删除旧 after_hours 远程 bulk 专用配置，不再为旧机制保留冗余开关
+#
+# 本轮改动（分钟线归档接入）：
+#   - 新增 tdx_minute_archive_dir：分钟线累积归档根目录
+#   - 归档文件不写入 SQLite
+#   - 归档文件格式仍保持 TDX 原生 .lc1/.lc5 32字节记录格式
+#   - 目录采用结构化保存：
+#       archive_root/sh/lc1/sh600519.lc1
+#       archive_root/sz/lc5/sz000001.lc5
+#
+# 本轮改动（复权基础事件快照任务接入）：
+#   - 新增 factor_events_snapshot 数据类型定义
+#   - 该任务只负责：
+#       * 全量解析本地 gbbq
+#       * 落库 gbbq 原始事件真相源
+#   - 明确不再把复权因子成品全量计算作为基础数据启动任务
 # ==============================
 
 from __future__ import annotations
@@ -22,6 +39,7 @@ DEFAULT_DB_PATH: Path = DEFAULT_DATA_DIR / "data.sqlite"
 DEFAULT_CONFIG_PATH: Path = DEFAULT_DATA_DIR / "config.json"
 DEFAULT_TDX_HQ_CACHE_DIR: Path = Path(r"D:\TDX_new\T0002\hq_cache")
 DEFAULT_TDX_VIPDOC_DIR: Path = Path(r"D:\TDX_new\vipdoc")
+DEFAULT_TDX_MINUTE_ARCHIVE_DIR: Path = DEFAULT_DATA_DIR / "minute_archive"
 
 
 @dataclass
@@ -55,7 +73,12 @@ class Settings:
     # user_config_path：用户配置文件路径（config.json）
     user_config_path: Path = DEFAULT_CONFIG_PATH
 
-    # TDX 本地行情缓存目录（symbol_index / profile_snapshot / trade_calendar）
+    # TDX 本地行情缓存目录
+    # 当前用于：
+    #   - symbol_index
+    #   - profile_snapshot
+    #   - trade_calendar
+    #   - gbbq 原始事件快照
     tdx_hq_cache_dir: Path = DEFAULT_TDX_HQ_CACHE_DIR
 
     # NEW：通达信盘后本地数据根目录（盘后数据导入 import 唯一真相源）
@@ -64,6 +87,17 @@ class Settings:
     #   - 当前第一阶段只纳入 .day 文件
     #   - 将来 .lc1 / .lc5 会在同一递归扫描框架下扩展
     tdx_vipdoc_dir: Path = DEFAULT_TDX_VIPDOC_DIR
+
+    # NEW：分钟线累积归档根目录
+    # 说明：
+    #   - 仅服务 1m / 5m 分钟线归档真相源
+    #   - 归档文件格式仍保持 TDX 原生 .lc1 / .lc5
+    #   - 当前目录结构约定：
+    #       {archive_root}/{market_lower}/{lc1|lc5}/{market_lower}{symbol}.{lc1|lc5}
+    #     例如：
+    #       var/minute_archive/sh/lc1/sh600519.lc1
+    #       var/minute_archive/sz/lc5/sz000001.lc5
+    tdx_minute_archive_dir: Path = DEFAULT_TDX_MINUTE_ARCHIVE_DIR
 
     # ==========================================================
     # 三、网络与重试（影响“稳定性”与“速度”）
@@ -107,11 +141,21 @@ class Settings:
     # 规则：
     #   - 若某数据源未配置，默认跟随全局限流（不额外限制）
     #   - rps 表示平均每秒允许请求数；burst 表示允许短时间突发的最大令牌数
-    provider_limiters: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
-        "sina": {"rps": 1, "burst": 1},
-        "eastmoney": {"rps": 1, "burst": 1},
-        "baostock": {"rps": 1, "burst": 1},
-    })
+    provider_limiters: Dict[str, Dict[str, Any]] = field(
+        default_factory=lambda: {
+            "sina": {
+                "rps": 1,
+                "burst": 1
+            },
+            "eastmoney": {
+                "rps": 1,
+                "burst": 1
+            },
+            "baostock": {
+                "rps": 1,
+                "burst": 1
+            },
+        })
 
     # ==========================================================
     # 五、执行器并发（盘后提速的核心）
@@ -191,13 +235,15 @@ class Settings:
         self.user_config_path = Path(self.user_config_path).resolve()
         self.tdx_hq_cache_dir = Path(self.tdx_hq_cache_dir).resolve()
         self.tdx_vipdoc_dir = Path(self.tdx_vipdoc_dir).resolve()
+        self.tdx_minute_archive_dir = Path(
+            self.tdx_minute_archive_dir).resolve()
+        self.tdx_minute_archive_dir.mkdir(parents=True, exist_ok=True)
 
         # trace_id 白名单解析
         raw_trace_ids = str(self.log_debug_trace_ids_raw or "").strip()
         self.log_debug_trace_ids = (
-            [s.strip() for s in raw_trace_ids.split(",") if s.strip()]
-            if raw_trace_ids else []
-        )
+            [s.strip() for s in raw_trace_ids.split(",")
+             if s.strip()] if raw_trace_ids else [])
 
         # executor_concurrency 防御性兜底：至少为 1
         try:
@@ -207,12 +253,14 @@ class Settings:
 
         # network 参数兜底：避免写错导致崩溃
         try:
-            self.network_requests_per_second = float(self.network_requests_per_second)
+            self.network_requests_per_second = float(
+                self.network_requests_per_second)
         except Exception:
             self.network_requests_per_second = 2.0
 
         try:
-            self.network_max_burst_tokens = max(1, int(self.network_max_burst_tokens))
+            self.network_max_burst_tokens = max(
+                1, int(self.network_max_burst_tokens))
         except Exception:
             self.network_max_burst_tokens = 3
 
@@ -226,7 +274,8 @@ class Settings:
 
         # runtime metrics interval 兜底
         try:
-            self.runtime_metrics_interval_seconds = float(self.runtime_metrics_interval_seconds)
+            self.runtime_metrics_interval_seconds = float(
+                self.runtime_metrics_interval_seconds)
             if self.runtime_metrics_interval_seconds <= 0:
                 self.runtime_metrics_interval_seconds = 1.0
         except Exception:
@@ -235,7 +284,6 @@ class Settings:
         # provider_limiters 兜底
         if not isinstance(self.provider_limiters, dict):
             self.provider_limiters = {}
-        # 逐项清洗
         cleaned: Dict[str, Dict[str, Any]] = {}
         for k, v in self.provider_limiters.items():
             if not isinstance(k, str) or not k.strip():
@@ -284,10 +332,10 @@ DATA_TYPE_DEFINITIONS = {
         "priority": 200,
         "sse_notify": True,
     },
-    "current_factors": {
-        "name": "当前复权因子",
+    "factor_events_snapshot": {
+        "name": "复权事件快照",
         "category": "factors",
-        "priority": 200,
+        "priority": 210,
         "sse_notify": True,
     },
     "symbol_index": {
@@ -309,7 +357,6 @@ DATA_TYPE_DEFINITIONS = {
         "sse_notify": True,
     },
 }
-
 
 # ==============================
 # 爬虫通用参数池（V7.2 新增）
@@ -350,7 +397,8 @@ class SpiderConfig:
     enable_random_delay: bool = os.getenv("SPIDER_RANDOM_DELAY", "1") == "1"
     random_delay_range: tuple = (0.5, 2.0)
 
-    enable_header_randomization: bool = os.getenv("SPIDER_HEADER_RANDOM", "1") == "1"
+    enable_header_randomization: bool = os.getenv("SPIDER_HEADER_RANDOM",
+                                                  "1") == "1"
 
 
 spider_config = SpiderConfig()

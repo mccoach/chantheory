@@ -6,6 +6,15 @@
 - 默认行为保持兼容：未传 columns 时，使用原有通用列
 - 新增 fileTime 列支持，供 local import 候选表显示“文件时间”
 - 候选表勾选框统一接入全局 std-check 链路，和快选栏完全同构
+
+本轮修复：
+- 修复“数据区横向滚动时，标题栏/底部横向滚动条不同步”的错位问题
+- 根因：原实现只处理了 hbar -> hcontent/thead 的单向同步，
+        但缺少 hcontent -> hbar/thead 的反向同步链路
+- 处理方式：
+    1) 给 hcontent 增加 @scroll 监听
+    2) 新增 syncHorizontalFromContent
+    3) 继续使用 syncing 锁，避免双向同步造成递归抖动
 ============================== -->
 <template>
   <div class="sut-wrap">
@@ -36,7 +45,7 @@
       </div>
 
       <div ref="vscrollRef" class="vscroll" @scroll="handleVScroll">
-        <div ref="hcontentRef" class="hcontent">
+        <div ref="hcontentRef" class="hcontent" @scroll="handleHContentScroll">
           <div class="table-inner" :style="{ width: totalWidthPx + 'px' }">
             <div class="tbody">
               <div :style="{ height: padTop + 'px' }"></div>
@@ -304,8 +313,26 @@ function syncHorizontalFromHBar() {
   }
 }
 
+// NEW: 数据区横向滚动时，反向同步标题栏与底部滚动条
+function syncHorizontalFromContent() {
+  if (syncing) return;
+  try {
+    syncing = true;
+    const left = hcontentRef.value?.scrollLeft || 0;
+    if (hbarRef.value) hbarRef.value.scrollLeft = left;
+    if (theadHRef.value) theadHRef.value.scrollLeft = left;
+  } finally {
+    syncing = false;
+  }
+}
+
 function handleHBarScroll() {
   syncHorizontalFromHBar();
+}
+
+// NEW: 绑定到 hcontent 的横向滚动事件
+function handleHContentScroll() {
+  syncHorizontalFromContent();
 }
 
 function initHorizontalAlignment() {

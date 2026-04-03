@@ -13,6 +13,11 @@
 //   - 不做 HTTP
 //   - 不做 dialog/footer 管理
 //   - 不做弹窗 UI 布局
+//
+// 本轮改动：
+//   - 明确 local-import 的唯一键始终是 (market, symbol, freq)
+//   - 保持候选/快选/提交全部基于三元组导入项，不做 symbol 合并
+//   - 频率快选展示顺序调整为 1d / 1m / 5m（仅展示顺序优化，不改数据语义）
 // ==============================
 
 import { computed, ref } from "vue";
@@ -35,8 +40,8 @@ const CLASS_LABELS = {
 
 const FIXED_FREQ_LABELS = {
   "1d": "1d",
-  "5m": "5m",
   "1m": "1m",
+  "5m": "5m",
 };
 
 const TYPE_GROUPS = {
@@ -69,6 +74,7 @@ function asUpper(x) {
   return asStr(x).toUpperCase();
 }
 
+// local-import 唯一键：market + symbol + freq
 function selectionKey(item) {
   const it = item && typeof item === "object" ? item : {};
   return `${asUpper(it.market)}:${asStr(it.symbol)}|${asStr(it.freq)}`;
@@ -149,8 +155,8 @@ export function useLocalImportSelection({ candidatesRef }) {
     map.set(scopeKey("class", "index"), buildScopeSetByPredicate((r) => r.class === "index"));
 
     map.set(scopeKey("freq", "1d"), buildScopeSetByPredicate((r) => r.freq === "1d"));
-    map.set(scopeKey("freq", "5m"), buildScopeSetByPredicate((r) => r.freq === "5m"));
     map.set(scopeKey("freq", "1m"), buildScopeSetByPredicate((r) => r.freq === "1m"));
+    map.set(scopeKey("freq", "5m"), buildScopeSetByPredicate((r) => r.freq === "5m"));
 
     for (const tp of TYPE_GROUPS.stock) {
       map.set(scopeKey("type", tp), buildScopeSetByPredicate((r) => r.class === "stock" && r.type === tp));
@@ -238,7 +244,7 @@ export function useLocalImportSelection({ candidatesRef }) {
       });
     }
 
-    for (const key of ["1d", "5m", "1m"]) {
+    for (const key of ["1d", "1m", "5m"]) {
       list.push({
         scopeKey: scopeKey("freq", key),
         universeSet: scopeUniverseMap.value.get(scopeKey("freq", key)) || new Set(),
@@ -317,8 +323,8 @@ export function useLocalImportSelection({ candidatesRef }) {
 
   const freqScopeItems = computed(() => [
     { scopeKey: scopeKey("freq", "1d"), label: FIXED_FREQ_LABELS["1d"] },
-    { scopeKey: scopeKey("freq", "5m"), label: FIXED_FREQ_LABELS["5m"] },
     { scopeKey: scopeKey("freq", "1m"), label: FIXED_FREQ_LABELS["1m"] },
+    { scopeKey: scopeKey("freq", "5m"), label: FIXED_FREQ_LABELS["5m"] },
   ]);
 
   const stockTypeScopeItems = computed(() =>

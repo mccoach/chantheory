@@ -1,29 +1,21 @@
 // frontend/chan-theory-ui/src/composables/useSymbolIndex.js
 // ==============================
-// V13.0 - REFACTOR: symbol_index 领域职责收口 + 双主键语义彻底化
+// V14.4 - CLEAN: 移除本轮排查诊断日志，保留正式修复
 //
-// 职责：
-//   1) symbol_index 快照缓存 / 读取 / 查询
-//   2) symbol_index 集中导入任务触发与等待确认
-//   3) 读取前避让“导入中”状态
+// 保留修复：
+//   - 新增 backendLoaded：区分“本地兜底可用”与“后端正式快照已加载”
+//   - useLocalOrBuiltin() 只负责兜底可搜索，不代表后端快照已完成
+//   - ensureLoaded() 以 backendLoaded 为准，保证至少尝试一次后端快照加载
 //
-// 本轮修正（启动重复去重 · 结构性收尾链路统一）：
-//   - 删除“模块内部监听 task.finished(symbol_index) 后自动再次 fetch 快照”的副作用路径
-//   - 保留唯一业务收尾链路：
-//       ensureIndexReady()
-//         -> declareSymbolIndex()
-//         -> waitTasksDone()
-//         -> fetchIndexSnapshot()
-//   - 说明：task.finished 仍然是唯一完成真相源；waitTasksDone 只是对该 SSE 事件的 Promise 化封装。
-//   - 因此，不应再保留第二条“收到同一完成事件后模块自行再刷快照”的并行收尾链路。
-//   - 严格双主键查询继续保留：findBySymbol(symbol, market) 不再允许 symbol-only fallback
+// 本轮清理：
+//   - 删除 symbol_index 排查用的诊断日志、诊断辅助函数、诊断状态字段
+//   - 不改业务语义
+//   - 不改函数顺序
 // ==============================
 
 import { ref, readonly } from "vue";
 import { api } from "@/api/client";
 import RAW from "@/assets/symbols.index.json";
-import { declareSymbolIndex } from "@/services/ensureDataAPI";
-import { waitTasksDone } from "@/composables/useTaskWaiter";
 
 const LS_KEY = "chan_symbol_index_v1";
 const LS_TS_KEY = "chan_symbol_index_updated_at";
@@ -31,10 +23,14 @@ const LS_TS_KEY = "chan_symbol_index_updated_at";
 const ready = ref(false);
 const loading = ref(false);
 const error = ref("");
+
+// 区分“后端快照是否已正式加载”
+const backendLoaded = ref(false);
+
 const idx = ref([]);
-const activeTaskId = ref(null);
 
 let TinyPinyinMod = null;
+let _loadingPromise = null;
 
 function asStr(x) {
   return String(x == null ? "" : x).trim();
@@ -110,12 +106,6 @@ function buildIndex(raw) {
             : x.listing_date != null
               ? x.listing_date
               : null,
-        updatedAt:
-          x.updatedAt != null
-            ? x.updatedAt
-            : x.updated_at != null
-              ? x.updated_at
-              : null,
         pinyin: x.pinyin || "",
         pinyin_abbr: x.pinyin_abbr || "",
       })
@@ -137,11 +127,18 @@ function useLocalOrBuiltin() {
   if (cached && cached.length) {
     idx.value = buildIndex(cached);
     ready.value = true;
+    // 这里只代表 fallback 可用，不代表 backend 已加载
+    backendLoaded.value = false;
+
     console.log(`${nowTs()} [SymbolIndex] load-cache count=${idx.value.length}`);
     return true;
   }
+
   idx.value = buildIndex(RAW);
   ready.value = true;
+  // builtin 只是兜底
+  backendLoaded.value = false;
+
   console.log(`${nowTs()} [SymbolIndex] use-builtin count=${idx.value.length}`);
   return false;
 }
@@ -153,6 +150,7 @@ async function fetchIndexSnapshot() {
     if (Array.isArray(data?.items) && data.items.length) {
       idx.value = buildIndex(data.items);
       ready.value = true;
+      backendLoaded.value = true;
       saveCache(data.items, data.updated_at || new Date().toISOString());
 
       console.log(
@@ -172,134 +170,47 @@ async function fetchIndexSnapshot() {
   }
 }
 
-function normalizeMode(mode) {
-  const m = String(mode || "").toLowerCase();
-  if (m === "startup") return "startup";
-  if (m === "force") return "force";
-  if (m === "snapshot") return "snapshot";
-  return "startup";
-}
-
-async function waitUntilIdle({ timeoutMs = 60000, pollMs = 100 } = {}) {
-  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 60000));
-
-  while (loading.value) {
-    if (Date.now() > deadline) {
-      throw new Error("[SymbolIndex] waitUntilIdle timeout");
-    }
-    await sleep(Math.max(20, Number(pollMs || 100)));
-  }
-
-  return { ok: true };
-}
-
-/**
- * 唯一导入入口
- *
- * 语义：
- * - snapshot：只刷新快照，不触发导入任务
- * - startup / force：
- *     * 若当前已有导入任务在跑，则等待它完成
- *     * 否则触发一次 symbol_index 导入并等待完成
- *     * 完成后刷新快照
- *
- * 本轮确认：
- * - “完成”只认 waitTasksDone() 等到的 task.finished
- * - 不再由模块内部另起 SSE 副作用链再次抓快照
- */
-async function ensureIndexReady(options = {}) {
-  const mode = normalizeMode(options?.mode);
-  const timeoutMs = Math.max(1000, Number(options?.timeoutMs || 60000));
-
+async function ensureLoaded() {
   await ensurePinyinLib();
 
-  if (mode === "snapshot") {
-    const r = await fetchIndexSnapshot();
-    return { ok: r.ok, mode, message: r.message, taskId: null };
+  // 不再以 ready 为“后端已加载”的判据
+  if (backendLoaded.value) {
+    return { ok: true };
   }
 
-  if (loading.value === true) {
-    try {
-      if (activeTaskId.value) {
-        await waitTasksDone({
-          taskIds: [String(activeTaskId.value)],
-          timeoutMs,
-        });
-      } else {
-        await waitUntilIdle({ timeoutMs });
-      }
-
-      const snap = await fetchIndexSnapshot();
-      return {
-        ok: snap.ok,
-        mode,
-        message: snap.message,
-        taskId: activeTaskId.value ? String(activeTaskId.value) : null,
-      };
-    } catch (e) {
-      error.value = e?.message || "symbol_index wait failed";
-      return {
-        ok: false,
-        mode,
-        message: error.value,
-        taskId: activeTaskId.value ? String(activeTaskId.value) : null,
-      };
-    }
-  }
+  if (_loadingPromise) return _loadingPromise;
 
   loading.value = true;
   error.value = "";
-  ready.value = false;
 
-  let tid = null;
-
-  try {
-    const task = await declareSymbolIndex();
-    tid = task?.task_id ? String(task.task_id) : null;
-    activeTaskId.value = tid;
-
-    if (tid) {
-      await waitTasksDone({
-        taskIds: [tid],
-        timeoutMs,
-      });
+  _loadingPromise = (async () => {
+    try {
+      const r = await fetchIndexSnapshot();
+      return { ok: r.ok, message: r.message };
+    } catch (e) {
+      error.value = e?.message || "symbol_index load failed";
+      return { ok: false, message: error.value };
+    } finally {
+      loading.value = false;
+      _loadingPromise = null;
     }
+  })();
 
-    const snap = await fetchIndexSnapshot();
-    if (snap.ok) ready.value = true;
-
-    return {
-      ok: snap.ok,
-      mode,
-      message: snap.message,
-      taskId: tid,
-    };
-  } catch (e) {
-    error.value = e?.message || "symbol_index ensure failed";
-    return {
-      ok: false,
-      mode,
-      message: error.value,
-      taskId: tid,
-    };
-  } finally {
-    loading.value = false;
-    activeTaskId.value = null;
-  }
+  return _loadingPromise;
 }
 
-/**
- * 读取前避让：
- * - 若导入中，则等待导入完成
- * - 若未导入中，则直接通过
- */
 async function waitReadable(options = {}) {
-  try {
-    await waitUntilIdle({ timeoutMs: options?.timeoutMs || 60000 });
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, message: e?.message || "waitReadable failed" };
+  const timeoutMs = Math.max(1000, Number(options?.timeoutMs || 60000));
+  const deadline = Date.now() + timeoutMs;
+
+  while (loading.value) {
+    if (Date.now() > deadline) {
+      return { ok: false, message: "[SymbolIndex] waitReadable timeout" };
+    }
+    await sleep(100);
   }
+
+  return { ok: true };
 }
 
 export function useSymbolIndex() {
@@ -309,8 +220,15 @@ export function useSymbolIndex() {
     ensurePinyinLib().then((ok) => {
       if (ok) {
         const cached = loadCache();
-        if (cached && cached.length) idx.value = buildIndex(cached);
-        else idx.value = buildIndex(RAW);
+        if (cached && cached.length) {
+          idx.value = buildIndex(cached);
+          ready.value = true;
+          backendLoaded.value = false;
+        } else {
+          idx.value = buildIndex(RAW);
+          ready.value = true;
+          backendLoaded.value = false;
+        }
       }
     });
   }
@@ -325,14 +243,10 @@ export function useSymbolIndex() {
         if (out.length >= limit) break;
       }
     }
+
     return out;
   }
 
-  /**
-   * 严格双主键查询：
-   * - 必须同时提供 symbol + market
-   * - 不再允许 symbol-only fallback
-   */
   function findBySymbol(symbol, market) {
     const q = asStr(symbol);
     const mk = asStr(market).toUpperCase();
@@ -354,14 +268,12 @@ export function useSymbolIndex() {
     ready: readonly(ready),
     loading: readonly(loading),
     error: readonly(error),
-    activeTaskId: readonly(activeTaskId),
 
     search,
     findBySymbol,
     listAll,
 
-    ensureIndexReady,
+    ensureLoaded,
     waitReadable,
-    waitUntilIdle,
   };
 }
