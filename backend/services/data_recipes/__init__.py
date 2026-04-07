@@ -1,14 +1,6 @@
 # backend/services/data_recipes/__init__.py
 # ==============================
 # 数据任务配方统一出口（包级）
-#
-# 对外导出：
-#   - run_trade_calendar
-#   - run_symbol_index
-#   - run_profile_snapshot
-#   - run_current_kline
-#   - run_factor_events_snapshot
-#   - run_watchlist_update
 # ==============================
 
 from __future__ import annotations

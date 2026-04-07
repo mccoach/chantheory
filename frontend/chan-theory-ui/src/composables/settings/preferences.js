@@ -2,16 +2,11 @@
 // ==============================
 // 设置子模块：应用偏好与历史记录
 //
-// V4.0 - BREAKING: 当前标的身份升级为双主键语义（symbol + market）
+// V5.0 - 行情实时刷新偏好收口
 // 改动：
-//   - 新增 lastMarket，与 lastSymbol 组成当前标的身份
-//   - symbolHistory 从“仅 symbol”升级为“symbol + market + ts”
-//   - 新增 getLastSymbolIdentity() 统一读取当前持久化身份
-//   - 新增 setLastSymbolIdentity() 统一写入当前持久化身份
-//   - addSymbolHistoryEntry 升级为写入双主键历史
-//
-// V3.1 兼容说明（已内化）：
-//   - setAtrBasePrice 对 null/空串 处理保持不变
+//   - 新增 autoRefreshEnabled
+//   - 新增 refreshIntervalSeconds
+//   - 统一使用 null 表示“静态查看/不自动刷新”
 // ==============================
 
 import { reactive } from "vue";
@@ -23,6 +18,14 @@ import {
 
 function asStr(x) {
   return String(x == null ? "" : x).trim();
+}
+
+function normalizeRefreshInterval(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  return i >= 1 ? i : null;
 }
 
 export function createPreferencesState(localData = {}) {
@@ -58,7 +61,6 @@ export function createPreferencesState(localData = {}) {
         }))
       : [],
 
-    // BREAKING: 历史记录升级为双主键语义
     symbolHistory: Array.isArray(localData.symbolHistory)
       ? localData.symbolHistory.filter(
           (x) =>
@@ -83,13 +85,21 @@ export function createPreferencesState(localData = {}) {
           .map((x) => Number(x))
           .filter((n) => Number.isFinite(n))
       : [],
+
+    // NEW
+    autoRefreshEnabled:
+      typeof localData.autoRefreshEnabled === "boolean"
+        ? localData.autoRefreshEnabled
+        : DEFAULT_APP_PREFERENCES.autoRefreshEnabled,
+    refreshIntervalSeconds: normalizeRefreshInterval(
+      localData.refreshIntervalSeconds ?? DEFAULT_APP_PREFERENCES.refreshIntervalSeconds
+    ),
   });
 
   const setters = {
     setLastSymbol: (s) => (state.lastSymbol = asStr(s)),
     setLastMarket: (m) => (state.lastMarket = asStr(m).toUpperCase()),
 
-    // NEW: 当前标的身份统一入口
     setLastSymbolIdentity: ({ symbol, market } = {}) => {
       state.lastSymbol = asStr(symbol);
       state.lastMarket = asStr(market).toUpperCase();
@@ -135,7 +145,6 @@ export function createPreferencesState(localData = {}) {
         : [];
     },
 
-    // BREAKING: 历史记录统一存 symbol + market
     addSymbolHistoryEntry: ({ symbol, market } = {}) => {
       const sym = asStr(symbol);
       const mk = asStr(market).toUpperCase();
@@ -219,6 +228,23 @@ export function createPreferencesState(localData = {}) {
         : [];
       return list.slice(0);
     },
+
+    // NEW
+    setAutoRefreshEnabled: (v) => {
+      state.autoRefreshEnabled = !!v;
+      if (!state.autoRefreshEnabled) {
+        state.refreshIntervalSeconds = null;
+      }
+    },
+
+    setRefreshIntervalSeconds: (v) => {
+      state.refreshIntervalSeconds = normalizeRefreshInterval(v);
+      state.autoRefreshEnabled = state.refreshIntervalSeconds != null;
+    },
+
+    getRefreshIntervalSeconds: () => {
+      return normalizeRefreshInterval(state.refreshIntervalSeconds);
+    },
   };
 
   const onStorage = (newLocal) => {
@@ -227,6 +253,12 @@ export function createPreferencesState(localData = {}) {
         state[key] = newLocal[key];
       }
     });
+
+    state.refreshIntervalSeconds = normalizeRefreshInterval(state.refreshIntervalSeconds);
+    state.autoRefreshEnabled =
+      state.refreshIntervalSeconds != null
+        ? true
+        : !!state.autoRefreshEnabled;
   };
 
   return { state, setters, onStorage };

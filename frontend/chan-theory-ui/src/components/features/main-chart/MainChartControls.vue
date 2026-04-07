@@ -1,16 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartControls.vue -->
-<!-- ============================== -->
-<!-- V8.3 - 当前标的链命令权收敛到 useCurrentSymbolData
-目标：
-  - 主图控制区只表达用户意图
-  - 频率切换按钮不再自己承担“半命令半执行”混合链
-  - 频率切换链路：
-      activateK(freq)
-        -> useCurrentSymbolData.prepare(...)
-        -> vm.setFreq(...)
-        -> vm.reload(...)
-  - 其余区间/Bars/ATR 控制职责保持原样
--->
 <template>
   <div class="controls-grid-2x2">
     <div class="row1 col-left">
@@ -289,6 +277,31 @@
             title="Enter/Tab/失焦提交后应用，可见根数"
           />
         </div>
+
+        <div class="refresh-inline">
+          <label class="refresh-toggle">
+            <input
+              type="checkbox"
+              :checked="autoRefreshEnabled"
+              @change="onToggleAutoRefresh"
+            />
+            <span>自动刷新</span>
+          </label>
+
+          <span class="label">秒：</span>
+          <NumberSpinner
+            class="refresh-input"
+            :model-value="refreshDraftSeconds"
+            @update:modelValue="(v) => (refreshDraftSeconds = v)"
+            :min="REFRESH_INTERVAL_LIMITS.min"
+            :max="REFRESH_INTERVAL_LIMITS.max"
+            :step="REFRESH_INTERVAL_LIMITS.step"
+            :integer="true"
+            :disabled="!autoRefreshEnabled"
+            @commit="applyRefreshSettings"
+            title="开启自动刷新后可设置秒数，Enter/Tab/失焦提交"
+          />
+        </div>
       </div>
     </div>
   </div>
@@ -296,13 +309,12 @@
 
 <script setup>
 import { inject, ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
-import { presetToBars } from "@/constants";
+import { presetToBars, ATR_INPUT_LIMITS, DEFAULT_ATR_STOP_SETTINGS, REFRESH_INTERVAL_LIMITS } from "@/constants";
 import { isMinuteFreq } from "@/utils/timeCheck";
 import { pad2 } from "@/utils/timeFormat";
 import NumberSpinner from "@/components/ui/NumberSpinner.vue";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewRenderHub } from "@/composables/viewRenderHub";
-import { ATR_INPUT_LIMITS, DEFAULT_ATR_STOP_SETTINGS } from "@/constants";
 import { useCurrentSymbolData } from "@/composables/useCurrentSymbolData";
 
 const vm = inject("marketView");
@@ -321,7 +333,6 @@ async function activateK(f) {
     market: vm.market.value,
     freq: f,
     adjust: vm.adjust.value,
-    force_refresh: false,
   });
 
   vm.setFreq(f);
@@ -430,12 +441,15 @@ onMounted(() => {
   });
 
   syncAtrDraftsFromSettings();
+  syncRefreshDraftsFromSettings();
+  ensureRefreshTimerState();
 });
 
 onBeforeUnmount(() => {
   if (hubUnsubscribe) {
     hub.offChange(hubUnsubscribe);
   }
+  stopAutoRefreshTimer();
 });
 
 function getLatestCloseAsDefaultBase() {
@@ -580,6 +594,94 @@ watch(
     settings.setAtrBasePrice(def);
 
     requestAtrPatch();
+  }
+);
+
+// ===== NEW: 自动刷新 =====
+const autoRefreshEnabled = computed(
+  () => settings.preferences.autoRefreshEnabled === true
+);
+const refreshDraftSeconds = ref(5);
+
+function readRefreshIntervalFromSettings() {
+  const v = settings.getRefreshIntervalSeconds?.();
+  return v != null && Number.isFinite(+v) ? +v : 5;
+}
+
+function syncRefreshDraftsFromSettings() {
+  refreshDraftSeconds.value = readRefreshIntervalFromSettings();
+}
+
+let refreshTimerId = null;
+
+function stopAutoRefreshTimer() {
+  if (refreshTimerId != null) {
+    clearInterval(refreshTimerId);
+    refreshTimerId = null;
+  }
+}
+
+function startAutoRefreshTimer() {
+  stopAutoRefreshTimer();
+
+  if (!autoRefreshEnabled.value) return;
+
+  const sec = Number(settings.getRefreshIntervalSeconds?.());
+  if (!Number.isFinite(sec) || sec < 1) return;
+
+  refreshTimerId = setInterval(async () => {
+    try {
+      await vm.reload({ with_profile: false });
+    } catch {}
+  }, sec * 1000);
+}
+
+function ensureRefreshTimerState() {
+  if (autoRefreshEnabled.value) {
+    startAutoRefreshTimer();
+  } else {
+    stopAutoRefreshTimer();
+  }
+}
+
+function onToggleAutoRefresh(e) {
+  const checked = e?.target?.checked === true;
+  settings.setAutoRefreshEnabled(checked);
+
+  if (checked) {
+    settings.setRefreshIntervalSeconds(refreshDraftSeconds.value || 5);
+  }
+
+  ensureRefreshTimerState();
+}
+
+function applyRefreshSettings() {
+  if (!autoRefreshEnabled.value) return;
+
+  const n = Number(refreshDraftSeconds.value);
+  if (!Number.isFinite(n) || n < REFRESH_INTERVAL_LIMITS.min) return;
+
+  settings.setRefreshIntervalSeconds(n);
+  syncRefreshDraftsFromSettings();
+  ensureRefreshTimerState();
+}
+
+watch(
+  () => [settings.preferences.autoRefreshEnabled, settings.preferences.refreshIntervalSeconds],
+  () => {
+    syncRefreshDraftsFromSettings();
+    ensureRefreshTimerState();
+  }
+);
+
+watch(
+  () => [vm.code.value, vm.market.value, vm.freq.value, vm.adjust.value],
+  async () => {
+    if (!autoRefreshEnabled.value) return;
+    ensureRefreshTimerState();
+    try {
+      await vm.reload({ with_profile: false });
+    } catch {}
   }
 );
 
@@ -888,5 +990,26 @@ function applyBarsInline() {
 
 .bars-inline .label {
   color: #bbb;
+}
+
+.refresh-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ddd;
+  user-select: none;
+}
+
+.refresh-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ddd;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.refresh-input {
+  width: 64px;
 }
 </style>

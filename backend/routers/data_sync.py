@@ -1,6 +1,6 @@
 # backend/routers/data_sync.py
 # ==============================
-# 数据同步API（非 bulk 版）
+# 数据同步API（正式收口版）
 #
 # 当前正式入口：
 #   - trade_calendar
@@ -9,11 +9,8 @@
 #   - current_kline
 #   - factor_events_snapshot
 #
-# 本轮改动：
-#   - 将原 factors_snapshot / current_factors 相关思路彻底废弃
-#   - 复权基础数据正式入口统一为：
-#       factor_events_snapshot
-#   - create_task 已正式支持 market 字段，本文件同步适配新签名
+# 本轮正式收口：
+#   - current_kline 明确要求 market + symbol + freq
 # ==============================
 
 from __future__ import annotations
@@ -27,10 +24,12 @@ from backend.services.priority_queue import get_priority_queue
 
 router = APIRouter(prefix="/api", tags=["data_sync"])
 
+
 class EnsureDataParams(BaseModel):
     force_fetch: bool = False
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+
 
 class EnsureDataRequest(BaseModel):
     type: Literal[
@@ -47,6 +46,7 @@ class EnsureDataRequest(BaseModel):
     freq: Optional[str] = Field(None, description="频率")
     adjust: Optional[str] = Field(None, description="复权方式：none/qfq/hfq")
     params: Optional[EnsureDataParams] = Field(default=None)
+
 
 @router.post("/ensure-data")
 async def ensure_data(request: Request, payload: EnsureDataRequest) -> Dict[str, Any]:
@@ -103,11 +103,18 @@ async def ensure_data(request: Request, payload: EnsureDataRequest) -> Dict[str,
                 params={},
                 source="api/ensure-data",
             )
-        else:
+        elif task_type == "current_kline":
+            if not payload.symbol or not payload.market or not payload.freq:
+                return {
+                    "ok": False,
+                    "error": "current_kline requires market + symbol + freq",
+                    "trace_id": trace_id,
+                }
+
             params_dict = payload.params.dict() if payload.params else {}
             task = create_task(
-                type=payload.type,
-                scope=payload.scope or "symbol",
+                type="current_kline",
+                scope="symbol",
                 symbol=payload.symbol,
                 market=payload.market,
                 freq=payload.freq,
@@ -116,6 +123,12 @@ async def ensure_data(request: Request, payload: EnsureDataRequest) -> Dict[str,
                 params=params_dict,
                 source="api/ensure-data",
             )
+        else:
+            return {
+                "ok": False,
+                "error": f"unsupported ensure-data type: {task_type}",
+                "trace_id": trace_id,
+            }
 
         queue = get_priority_queue()
         await queue.enqueue(task)

@@ -1,15 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\App.vue -->
-<!-- ============================== -->
-<!-- V17.0 - BREAKING: 启动编排回归单文件 composable + 唯一业务链
-     本轮目标：
-     - App.vue 只负责应用装配与 UI 容器
-     - 启动流程委托 useAppStartup.js
-     - 恢复当前标的身份后，不再额外显式 vm.reload()
-     - 唯一当前标的加载链路：
-         vm.setSymbolIdentity(...)
-           -> useMarketView watch([code, market])
-           -> reload()
--->
 <template>
   <div v-if="!backendReady" class="loading-screen">
     <div class="spinner"></div>
@@ -61,6 +50,7 @@ import { useDialogManager } from "./composables/useDialogManager";
 import { useExportController } from "./composables/useExportController";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useAppStartup } from "@/composables/useAppStartup";
+import { releaseCandlesCache } from "@/services/candlesCacheService";
 
 import {
   registerGlobalHandlers,
@@ -193,6 +183,19 @@ watch(activeDialog, (newDialog, oldDialog) => {
   }
 });
 
+async function tryReleaseCurrentCacheOnAppUnmount() {
+  try {
+    const code = String(vm.code?.value || "").trim();
+    const market = String(vm.market?.value || "").trim().toUpperCase();
+    const freq = String(vm.freq?.value || "").trim();
+    if (!code || !market || !freq) return;
+
+    await releaseCandlesCache({ market, code, freq });
+  } catch (e) {
+    console.warn("[App] release current cache on unmount failed:", e);
+  }
+}
+
 onMounted(async () => {
   registerGlobalHandlers({
     hotkeys,
@@ -224,6 +227,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unregisterAllHandlers({ hotkeys });
+  tryReleaseCurrentCacheOnAppUnmount();
 });
 
 if (import.meta.env.DEV) {

@@ -3,14 +3,9 @@
 # 说明：通用小型辅助工具函数
 #
 # 本轮改动：
-#   - 保留既有远程能力所需的兼容工具
-#   - 新增按 (market, symbol) 精确查询 symbol_index 的辅助函数
-#   - 新的本地导入 import 主链统一以 (market, symbol) 联合键为准
-#
-# 本轮修复：
-#   - 修复 get_symbol_record_from_db 查询已删除字段 updated_at 的问题
-#   - 当前 symbol_index 表已不再包含 updated_at
-#   - 因此该函数严格按现行 schema 返回真实存在字段
+#   - 保留既有基础工具
+#   - 强化 market+symbol 双键查询
+#   - 新增按双键精确获取 class/type 的辅助函数
 # ==============================
 
 from __future__ import annotations
@@ -43,13 +38,6 @@ def ak_symbol_with_prefix(symbol: str) -> str:
 
 
 def get_symbol_market_from_db(symbol: str) -> Optional[str]:
-    """
-    从 symbol_index 中按 symbol 查询 market。
-
-    说明：
-      - 当前仅用于旧远程能力中的轻量需求；
-      - 若同号跨市场并存，该函数只会返回按 market 排序后的第一条，不适合作为 K线主链联合键真相源。
-    """
     s = (symbol or "").strip()
     if not s:
         return None
@@ -71,12 +59,6 @@ def get_symbol_market_from_db(symbol: str) -> Optional[str]:
 
 
 def get_symbol_markets_from_db(symbol: str) -> List[str]:
-    """
-    获取某代码在 symbol_index 中出现过的全部市场（去重后，按 market ASC）。
-
-    用途：
-      - K线主链在需要识别同号跨市场歧义时可做辅助判断
-    """
     s = (symbol or "").strip()
     if not s:
         return []
@@ -99,19 +81,6 @@ def get_symbol_markets_from_db(symbol: str) -> List[str]:
 
 
 def get_symbol_record_from_db(symbol: str, market: str) -> Optional[Dict[str, Any]]:
-    """
-    按联合键 (symbol, market) 精确读取 symbol_index 单条记录。
-
-    用途：
-      - 本地导入候选快照补充展示信息
-      - 本地导入任务列表补充 name/class/type
-      - K线主链精确确定标的市场语义
-
-    说明：
-      - 当前 symbol_index 现行 schema 字段为：
-          symbol, name, market, class, type, listing_date
-      - updated_at 已从 symbol_index 表结构中移除，因此这里不能再查询该字段
-    """
     s = (symbol or "").strip()
     m = (market or "").strip().upper()
     if not s or not m:
@@ -139,6 +108,22 @@ def get_symbol_record_from_db(symbol: str, market: str) -> Optional[Dict[str, An
         return dict(row) if row else None
     except Exception:
         return None
+
+
+def get_symbol_class_from_db(symbol: str, market: str) -> Optional[str]:
+    item = get_symbol_record_from_db(symbol=symbol, market=market)
+    if not item:
+        return None
+    cls = str(item.get("class") or "").strip().lower()
+    return cls or None
+
+
+def get_symbol_type_from_db(symbol: str, market: str) -> Optional[str]:
+    item = get_symbol_record_from_db(symbol=symbol, market=market)
+    if not item:
+        return None
+    typ = str(item.get("type") or "").strip()
+    return typ or None
 
 
 def prefix_symbol_with_market(symbol: str) -> str:

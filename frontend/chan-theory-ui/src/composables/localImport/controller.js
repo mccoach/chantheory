@@ -5,18 +5,13 @@
 // 最终正式契约：
 //   - initialize(): 只做 settings/status/SSE 预热
 //   - refreshCandidates(): 只触发后端生成并持久化候选快照；成功返回即 snapshotValid=true
+//   - triggerStartupRefresh(): 启动链尾部异步触发 refreshCandidates，不阻塞 app-started
 //   - loadCandidates(): 只读候选快照并装入前端内存；前提是 snapshotValid=true
 //   - clearCandidates(): 只清理前端候选内存，不改变快照有效性
 //
-// 有效快照：
-//   - refreshCandidates() 成功返回 => 有效
-//   - saveSettingsDir() 修改目录 => 失效
-//
-// 不再保留：
-//   - 会话首刷状态
-//   - 等待 SSE 才算完成
-//   - 刷新失败状态机
-//   - 刷新后补读等待链
+// 唯一业务真相源：
+//   - snapshotValid=true：允许显示链触发读取
+//   - snapshotValid=false：禁止显示链读取
 // ==============================
 
 import { computed } from "vue";
@@ -125,11 +120,7 @@ export function useLocalImportController() {
 
   function validateSnapshot(message = "") {
     state.snapshotValid.value = true;
-    if (message) {
-      setCandidatesDisplayMessage(message);
-    } else {
-      setCandidatesDisplayMessage("");
-    }
+    setCandidatesDisplayMessage(message);
   }
 
   async function loadCandidates() {
@@ -161,7 +152,6 @@ export function useLocalImportController() {
         };
       }
 
-      // NEW: 快照已可读，但候选为空时，明确给提示，避免页面空白误导
       if (items.length === 0) {
         clearCandidates();
         setCandidatesDisplayMessage(
@@ -195,7 +185,6 @@ export function useLocalImportController() {
   }
 
   async function refreshCandidates() {
-    // 刷新一旦发起，旧显示立即失效；是否重新有效只看 refresh HTTP 成功返回
     invalidateSnapshot("候选尚未就绪，请刷新后等待完成。");
 
     state.refreshingCandidates.value = true;
@@ -211,10 +200,7 @@ export function useLocalImportController() {
         return { ok: false, message: state.candidatesDisplayMessage.value };
       }
 
-      // FIX: 后端已明确说明：refresh 成功返回即代表
-      // - 扫描完成
-      // - 快照已写入本地持久化
-      // - GET /candidates 已可读取
+      // 后端已确认：refresh 成功返回即代表新快照已可读
       validateSnapshot(
         asStr(resp?.ui_message) || ""
       );
@@ -226,6 +212,13 @@ export function useLocalImportController() {
     } finally {
       state.refreshingCandidates.value = false;
     }
+  }
+
+  // 启动链尾部异步触发刷新，不阻塞启动完成
+  function triggerStartupRefresh() {
+    Promise.resolve()
+      .then(() => refreshCandidates())
+      .catch(() => {});
   }
 
   async function loadStatus() {
@@ -493,6 +486,7 @@ export function useLocalImportController() {
 
     loadCandidates,
     refreshCandidates,
+    triggerStartupRefresh,
     clearCandidates,
     loadStatus,
 

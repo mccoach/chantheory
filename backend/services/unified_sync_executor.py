@@ -1,17 +1,6 @@
 # backend/services/unified_sync_executor.py
 # ==============================
-# 执行器（去除 old bulk 耦合版）
-#
-# 当前支持：
-#   - trade_calendar
-#   - symbol_index
-#   - profile_snapshot
-#   - current_kline
-#   - factor_events_snapshot
-#   - watchlist_update
-#
-# 本轮改动（Task market 字段接入）：
-#   - 执行日志显式打印 market，便于双主键任务排查
+# 执行器（正式版）
 # ==============================
 
 from __future__ import annotations
@@ -37,6 +26,7 @@ from backend.services.task_events import emit_task_finished, emit_job_finished
 
 _LOG = get_logger("sync_executor")
 
+
 def _primary_error(
     *,
     error_code: str,
@@ -50,6 +40,7 @@ def _primary_error(
         "details": str(details) if details is not None else None,
         "extra": extra or {},
     }
+
 
 class UnifiedSyncExecutor:
     def __init__(self):
@@ -212,7 +203,9 @@ class UnifiedSyncExecutor:
         else:
             _LOG.info("[执行器] worker-%s done task_id=%s type=%s", worker_id, task.task_id, task.type)
 
+
 _executor: Optional[UnifiedSyncExecutor] = None
+
 
 def get_sync_executor() -> UnifiedSyncExecutor:
     global _executor

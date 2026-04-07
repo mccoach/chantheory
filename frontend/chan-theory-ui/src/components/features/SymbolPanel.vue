@@ -172,6 +172,7 @@ import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { useWatchlist } from "@/composables/useWatchlist";
 import { useFoundationDataCenter } from "@/composables/useFoundationDataCenter";
 import { useCurrentSymbolData } from "@/composables/useCurrentSymbolData";
+import { releaseCandlesCache } from "@/services/candlesCacheService";
 
 import SymbolSearch from "./symbol/SymbolSearch.vue";
 import WatchlistMenu from "./symbol/WatchlistMenu.vue";
@@ -265,6 +266,19 @@ watch(
   }
 );
 
+async function tryReleaseCurrentCache() {
+  try {
+    const code = asStr(vm.code.value);
+    const market = asMarket(vm.market.value);
+    const freq = asStr(vm.freq.value);
+    if (!code || !market || !freq) return;
+
+    await releaseCandlesCache({ market, code, freq });
+  } catch (e) {
+    console.warn("[SymbolPanel] release current cache failed:", e);
+  }
+}
+
 async function selectItem(item) {
   const identity = normalizeIdentity(item);
   if (!identity.symbol || !identity.market) return;
@@ -280,6 +294,8 @@ async function selectItem(item) {
   }
 
   console.log(`[SymbolPanel] 🔄 标的变化: ${lastRenderedIdentity.value} → ${nextIdentity}`);
+
+  await tryReleaseCurrentCache();
 
   inputText.value = identity.symbol;
 
@@ -298,7 +314,6 @@ async function selectItem(item) {
       market: identity.market,
       freq: vm.freq.value,
       adjust: vm.adjust.value,
-      force_refresh: false,
     });
 
     vm.setSymbolIdentity({
@@ -360,7 +375,7 @@ async function toggleStarImmediate(item) {
 function onRefreshClick() {
   console.log("[SymbolPanel] 🔄 强制刷新当前标的");
   hub.execute("Refresh", {});
-  vm.reload?.({ force_refresh: true, with_profile: true });
+  vm.reload?.({ with_profile: true });
 }
 
 async function handleOpenLocalImportDialog() {
@@ -463,8 +478,6 @@ const showHistory = computed(
     asStr(inputText.value).length === 0
 );
 
-// FIX: 只要输入框里有内容且当前处于输入态，就稳定进入“候选模式”
-// 不再依赖 suggestions.length > 0 才显示，否则会表现成“有输入但没触发下拉”
 const showSuggest = computed(
   () =>
     isInputFocused.value &&
@@ -476,7 +489,6 @@ async function onFocus() {
   isInputFocused.value = true;
   invalidHint.value = "";
 
-  // FIX: focus 时主动确保索引已尝试加载，并刷新候选
   try {
     await ensureLoaded();
   } catch {}
@@ -498,7 +510,6 @@ function onBlur() {
 watch(inputText, async () => {
   invalidHint.value = "";
 
-  // FIX: 输入有内容时，确保候选刷新链稳定执行
   if (asStr(inputText.value)) {
     try {
       await ensureLoaded();
@@ -508,7 +519,6 @@ watch(inputText, async () => {
   updateSuggestions();
 });
 
-// FIX: 当索引 ready 状态或内容来源切换后，如果当前输入框里已有内容，也立即重算候选
 watch(
   () => ready.value,
   async () => {

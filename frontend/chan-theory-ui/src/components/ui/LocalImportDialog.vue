@@ -194,7 +194,6 @@ const tableColumns = [
   { key: "type", label: "类型", sortable: true, min: 90, max: 220, default: 110, align: "center" },
   { key: "freq", label: "周期", sortable: true, min: 70, max: 120, default: 60, align: "center", field: "freq" },
   { key: "fileTime", label: "文件时间", sortable: true, min: 150, max: 260, default: 160, align: "center", field: "fileTime", titleField: "fileTime" },
-  { key: "updatedAt", label: "更新时间", sortable: true, min: 140, max: 260, default: 160, align: "center", field: "updatedAt", titleField: "updatedAt" },
 ];
 
 function asStr(x) {
@@ -314,22 +313,13 @@ async function handleRefreshCandidates() {
   const r = await ctl.refreshCandidates();
   if (!r.ok) {
     alert(r.message || "刷新候选失败");
-    return;
-  }
-
-  // 若弹窗当前开着，且刷新成功使 snapshotValid=true，则立即触发一次显示
-  const dialog = dialogManager?.activeDialog?.value;
-  if (isLocalImportDialogOpen(dialog) && ctl.state.snapshotValid.value === true) {
-    await ctl.loadCandidates();
   }
 }
 
 function isLocalImportDialogOpen(dialog) {
-  const title = String(dialog?.title || "").trim();
-  return title === "盘后数据导入";
+  return String(dialog?.key || "") === "local-import";
 }
 
-// 唯一判定：弹窗打开 + snapshotValid
 watch(
   () => ({
     open: isLocalImportDialogOpen(dialogManager?.activeDialog?.value),
@@ -348,7 +338,7 @@ watch(
       await ctl.loadCandidates();
     }
   },
-  { immediate: true, deep: false }
+  { immediate: true }
 );
 
 const dialogFooterLeftProps = computed(() => ({

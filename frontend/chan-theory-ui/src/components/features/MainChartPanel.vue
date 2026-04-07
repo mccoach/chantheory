@@ -1,8 +1,4 @@
 <!-- E:\AppProject\ChanTheory\frontend\chan-theory-ui\src\components\features\main-chart\MainChartPanel.vue -->
-<!-- ============================== -->
-<!-- 本轮改动：
-     - 移除主图顶栏 ATR 三输入框（已迁移到 MainChartControls 第二行，Bars 左侧）
--->
 <template>
   <MainChartControls />
 
@@ -22,7 +18,7 @@
 
           <transition name="hintfade">
             <span
-              v-if="!vm.loading.value && refreshStatus.showRefreshed.value && vm.meta.value?.completeness === 'complete'"
+              v-if="!vm.loading.value && refreshStatus.showRefreshed.value && !hasGap"
               class="badge done"
             >
               已刷新 {{ refreshStatus.refreshedAtHHMMSS.value }}
@@ -30,11 +26,19 @@
           </transition>
 
           <span
-            v-if="!vm.loading.value && vm.meta.value?.completeness === 'incomplete'"
+            v-if="!vm.loading.value && hasGap"
             class="badge warn"
-            title="近端数据更新失败，当前为历史缓存"
+            :title="gapMessageTitle"
           >
             数据不完整 {{ refreshStatus.refreshedAtHHMMSS.value }}
+          </span>
+
+          <span
+            v-if="!vm.loading.value && actualAdjustTip"
+            class="badge info"
+            :title="actualAdjustTip"
+          >
+            {{ actualAdjustTip }}
           </span>
         </div>
 
@@ -72,7 +76,7 @@
 </template>
 
 <script setup>
-import { inject, ref, onBeforeUnmount, computed, watch } from "vue";
+import { inject, ref, onBeforeUnmount, computed } from "vue";
 import { openMainChartSettings } from "@/settings/mainShell";
 import { useChartPanel } from "@/composables/useChartPanel";
 import { useRefreshStatus } from "@/composables/useRefreshStatus";
@@ -106,12 +110,11 @@ const {
     try {
       renderHub.registerChart("main", instance);
 
-      // DEV ONLY: 暴露主图实例到 window，便于控制台导出中间数据
       if (import.meta.env.DEV) {
         try {
           window.__CHARTS__ = window.__CHARTS__ || {};
           window.__CHARTS__.main = instance;
-        } catch { }
+        } catch {}
       }
 
       host.value?.addEventListener("mouseenter", () => {
@@ -126,7 +129,6 @@ const {
               silent: true,
             });
 
-            // 关键时序信号：option 已落地，再更新 widthState 并触发最小重绘
             scheduleWidthUpdate?.();
           }
         } catch (e) {
@@ -135,11 +137,22 @@ const {
       });
 
       onBeforeUnmount(() => renderHub.offRender(unsubId));
-    } catch { }
+    } catch {}
   },
 });
 
 const currentAdjust = computed(() => String(vm.adjust?.value || "none"));
+const hasGap = computed(() => vm.meta.value?.has_gap === true);
+const gapMessageTitle = computed(() => {
+  const msg = String(vm.meta.value?.gap_message || "").trim();
+  return msg || "当前返回的是可用结果，但数据可能仍有缺口";
+});
+const actualAdjustTip = computed(() => {
+  const requested = String(vm.adjust?.value || "none");
+  const actual = String(vm.meta.value?.actual_adjust || requested);
+  if (!actual || actual === requested) return "";
+  return `已降级为${actual === "none" ? "不复权" : actual === "qfq" ? "前复权" : "后复权"}`;
+});
 
 function isAdjust(kind) {
   const k = kind === "qfq" || kind === "hfq" ? kind : "none";
@@ -150,6 +163,8 @@ function setAdjust(kind) {
   const k = kind === "qfq" || kind === "hfq" ? kind : "none";
   try {
     settings.setAdjust(k);
+    vm.setAdjust(k);
+    vm.reload?.({ with_profile: false });
   } catch (e) {
     console.error("setAdjust failed:", e);
   }
@@ -158,7 +173,7 @@ function setAdjust(kind) {
 function openSettingsDialog() {
   try {
     openMainChartSettings(dialogManager, { activeTab: "chan" });
-  } catch (e) { }
+  } catch (e) {}
 }
 
 onBeforeUnmount(() => {
@@ -167,7 +182,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 样式保持原样，仅 title 文案已在模板更新 */
 .top-info {
   position: absolute;
   left: 0;
@@ -240,6 +254,13 @@ onBeforeUnmount(() => {
   background: rgba(231, 76, 60, 0.15);
   border: 1px solid rgba(231, 76, 60, 0.4);
   color: #e74c3c;
+  cursor: help;
+}
+
+.badge.info {
+  background: rgba(52, 152, 219, 0.15);
+  border: 1px solid rgba(52, 152, 219, 0.35);
+  color: #5dade2;
   cursor: help;
 }
 

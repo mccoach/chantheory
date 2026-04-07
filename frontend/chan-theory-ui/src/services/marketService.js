@@ -1,55 +1,81 @@
 // src/services/marketService.js
 // ==============================
-// 说明：行情服务（V5.2 - 增加 adjust 透传版 + 精简日志）
+// 说明：行情服务（最终入口版）
+// 职责：
+//   - 只负责向 /api/candles 请求最终行情结果
+//   - 参数显式包含 market / code / freq / adjust / refresh_interval_seconds
+//   - 不做复权、不做重采样、不做因子相关逻辑
+//
+// 本轮修复：
+//   - 静态查看时传 0（而不是 "null" 字符串）
+//   - 自动刷新时传 >=1 的整数秒数
+//   - 始终显式传 refresh_interval_seconds，避免后端猜测
 // ==============================
 
-import { api } from "@/api/client"; // 统一 axios 客户端（含 trace_id 拦截）
+import { api } from "@/api/client";
+
+function asStr(x) {
+  return String(x == null ? "" : x).trim();
+}
+
+function asMarket(x) {
+  return asStr(x).toUpperCase();
+}
+
+function normalizeRefreshInterval(v) {
+  if (v == null || v === "") return 0;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  const i = Math.floor(n);
+  return i >= 1 ? i : 0;
+}
 
 /**
- * 查询K线数据（纯查询，不触发拉取，不计算指标）
+ * 查询K线数据（后端最终结果，唯一正式入口）
  *
  * @param {string} symbol - 标的代码
+ * @param {string} market - 市场代码（SH/SZ/BJ）
  * @param {string} freq   - 频率（1m|5m|15m|30m|60m|1d|1w|1M）
- * @param {Object} options - 可选参数 { signal?: AbortSignal, adjust?: 'none'|'qfq'|'hfq' }
+ * @param {Object} options - 可选参数
+ * @param {AbortSignal} [options.signal]
+ * @param {'none'|'qfq'|'hfq'} [options.adjust='none']
+ * @param {number|null} [options.refreshIntervalSeconds=0]
  * @returns {Promise<Object>} {ok, meta, candles}
- *
- * 响应格式：
- * {
- *   "ok": true,
- *   "meta": {
- *     "symbol": "600519",
- *     "freq": "1d",
- *     "all_rows": 5794,
- *     "is_latest": true,
- *     "latest_bar_time": "2025-11-05 15:00:00",
- *     "source": "akshare.get_stock_bars",
- *     "generated_at": "2025-11-05T15:00:05+08:00"
- *   },
- *   "candles": [
- *     {"ts": 1730444400000, "o": 1850.5, "h": 1865.0, "l": 1840.0, "c": 1855.2, "v": 12500000},
- *     ...
- *   ]
- * }
  */
-export async function fetchCandles(symbol, freq, options = {}) {
-  const search = new URLSearchParams();
-  search.set("code", symbol);
-  search.set("freq", freq);
+export async function fetchCandles(symbol, market, freq, options = {}) {
+  const code = asStr(symbol);
+  const mk = asMarket(market);
+  const fr = asStr(freq);
+  const adjust = asStr(options.adjust || "none") || "none";
+  const refreshIntervalSeconds = normalizeRefreshInterval(
+    options.refreshIntervalSeconds
+  );
 
-  // 若上层提供了复权类型（none/qfq/hfq），透传给后端，以便后端选择正确的数据源（尤其是基金）。
-  const adj = options.adjust;
-  if (typeof adj === "string" && adj) {
-    search.set("adjust", adj);
+  if (!code || !mk || !fr) {
+    throw new Error(
+      `[MarketService] fetchCandles requires valid symbol/market/freq, got symbol=${symbol}, market=${market}, freq=${freq}`
+    );
   }
+
+  const search = new URLSearchParams();
+  search.set("code", code);
+  search.set("market", mk);
+  search.set("freq", fr);
+  search.set("adjust", adjust);
+
+  // 始终显式传递：
+  // 0  = 静态查看
+  // >=1 = 自动刷新周期（秒）
+  search.set("refresh_interval_seconds", String(refreshIntervalSeconds));
 
   const { data } = await api.get(`/api/candles?${search.toString()}`, {
     timeout: 60000,
     meta: options.signal ? { signal: options.signal } : undefined,
   });
 
-  if (data.meta?.freq !== freq) {
+  if (data?.meta?.freq && String(data.meta.freq) !== fr) {
     console.error("[MarketService] freq-mismatch", {
-      requested: freq,
+      requested: fr,
       returned: data.meta?.freq,
     });
   }

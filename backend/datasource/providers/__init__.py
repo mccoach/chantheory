@@ -2,22 +2,18 @@
 # ==============================
 # providers 模块导出接口
 #
-# 说明：
-#   - symbol_index / profile_snapshot 主数据源已统一切换为 TDX 本地文件解析
-#   - remote profile 能力已彻底删除
-#   - baostock / eastmoney / sina 仍服务于 K线 / 因子 / 日历等业务
+# 正式收口：
+#   - 基础数据：TDX 本地文件解析
+#   - 普通行情：TDX 普通 HQ 远程
+#   - 扩展行情代码暂保留，但不进入当前正式普通行情主链
 # ==============================
 
 from __future__ import annotations
 
-from backend.datasource.providers import baostock_adapter
-from backend.datasource.providers import eastmoney_adapter
-from backend.datasource.providers import sina_adapter
 from backend.datasource.providers import tdx_local_adapter
+from backend.datasource.providers import tdx_remote_adapter
 
 __all__ = [
-    "baostock_adapter",
-    "eastmoney_adapter",
-    "sina_adapter",
     "tdx_local_adapter",
+    "tdx_remote_adapter",
 ]

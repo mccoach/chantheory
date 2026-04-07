@@ -1,24 +1,18 @@
 // src/composables/useCurrentSymbolData.js
 // ==============================
-// 当前标的命令中心（唯一命令权归口）
+// 当前标的命令中心（最终收口版）
 //
 // 职责：
-//   - 统一发起“当前标的相关”的后端准备命令
-//   - 统一等待当前标的相关任务完成
+//   - 当前链路只负责确保 symbol_index 可读
+//   - 不再声明 current_kline
+//   - 不再声明 current_factors
+//   - 不再等待任何当前行情任务
 //
-// 明确边界：
-//   - 这里只负责“命令 + 等待”
-//   - 不负责设置 vm 状态
-//   - 不负责调用 vm.reload()
-//   - 不负责读取结果
-//
-// 执行层（读取/展示）应由外部显式调用：
-//   - 启动链
-//   - 页面交互
+// 原因：
+//   - /api/candles 已成为单标的行情唯一正式入口
+//   - 后端会在 /api/candles 内部完成数据保障、补缺、复权和成品返回
 // ==============================
 
-import { declareCurrentKline, declareCurrentFactors } from "@/services/ensureDataAPI";
-import { waitTasksDone } from "@/composables/useTaskWaiter";
 import { useSymbolIndex } from "@/composables/useSymbolIndex";
 
 function asStr(x) {
@@ -41,7 +35,6 @@ export function useCurrentSymbolData() {
     market,
     freq,
     adjust = "none",
-    force_refresh = false,
   } = {}) {
     const sym = asStr(symbol);
     const mk = asMarket(market);
@@ -58,39 +51,10 @@ export function useCurrentSymbolData() {
     }
 
     const entry = symbolIndex.findBySymbol(sym, mk);
-    const cls = String(entry?.class || "").toLowerCase();
-    const isStock = cls === "stock";
-
-    const requestAdjust = isStock ? "none" : adj;
-    const shouldFetchFactors = isStock;
-
-    const taskIds = [];
-
-    const kTask = await declareCurrentKline({
-      symbol: sym,
-      freq: fr,
-      adjust: requestAdjust,
-      force_fetch: !!force_refresh,
-    });
-    if (kTask?.task_id) {
-      taskIds.push(String(kTask.task_id));
-    }
-
-    if (shouldFetchFactors) {
-      const fTask = await declareCurrentFactors({
-        symbol: sym,
-        force_fetch: !!force_refresh,
-      });
-      if (fTask?.task_id) {
-        taskIds.push(String(fTask.task_id));
-      }
-    }
-
-    if (taskIds.length) {
-      await waitTasksDone({
-        taskIds,
-        timeoutMs: 30000,
-      });
+    if (!entry) {
+      throw new Error(
+        `[useCurrentSymbolData] symbol not found in symbol_index: market=${mk}, symbol=${sym}`
+      );
     }
 
     return {
@@ -99,9 +63,6 @@ export function useCurrentSymbolData() {
       market: mk,
       freq: fr,
       adjust: adj,
-      requestAdjust,
-      isStock,
-      shouldFetchFactors,
     };
   }
 

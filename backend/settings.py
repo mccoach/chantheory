@@ -23,6 +23,14 @@
 #       * 全量解析本地 gbbq
 #       * 落库 gbbq 原始事件真相源
 #   - 明确不再把复权因子成品全量计算作为基础数据启动任务
+#
+# 本轮改动（TDX 远程行情链前置支撑）：
+#   - 新增 tdx_newhost_lst_path：通达信 newhost.lst 路径
+#   - 新增 tdx_hosts_json_path：主行情站同步落地 JSON 路径
+#   - 新增 tdx_hosts_sync_check_mtime：是否按 newhost.lst mtime 决定是否重解析
+#   - 新增 tdx_remote_connect_timeout_seconds：TDX socket 连接超时
+#   - 新增 tdx_remote_recv_timeout_seconds：TDX socket 接收超时
+#   - 新增 tdx_remote_ping_timeout_seconds：TDX host 选优 connect 测速超时
 # ==============================
 
 from __future__ import annotations
@@ -41,6 +49,9 @@ DEFAULT_TDX_HQ_CACHE_DIR: Path = Path(r"D:\TDX_new\T0002\hq_cache")
 DEFAULT_TDX_VIPDOC_DIR: Path = Path(r"D:\TDX_new\vipdoc")
 DEFAULT_TDX_MINUTE_ARCHIVE_DIR: Path = DEFAULT_DATA_DIR / "minute_archive"
 
+# NEW：TDX 远程行情主站相关默认路径
+DEFAULT_TDX_NEWHOST_LST_PATH: Path = Path(r"D:\TDX_new\T0002\newhost.lst")
+DEFAULT_TDX_HOSTS_JSON_PATH: Path = DEFAULT_DATA_DIR / "tdx_hosts.json"
 
 @dataclass
 class Settings:
@@ -98,6 +109,18 @@ class Settings:
     #       var/minute_archive/sh/lc1/sh600519.lc1
     #       var/minute_archive/sz/lc5/sz000001.lc5
     tdx_minute_archive_dir: Path = DEFAULT_TDX_MINUTE_ARCHIVE_DIR
+
+    # NEW：通达信主行情服务器列表文件（newhost.lst）
+    # 说明：
+    #   - 供 TDX 远程 socket 行情链路选主机使用
+    #   - 当前由 host_selector 模块解析
+    tdx_newhost_lst_path: Path = DEFAULT_TDX_NEWHOST_LST_PATH
+
+    # NEW：主行情服务器落地 JSON
+    # 说明：
+    #   - 解析 newhost.lst 后写入该 JSON
+    #   - 同时保存测速选优结果 top3
+    tdx_hosts_json_path: Path = DEFAULT_TDX_HOSTS_JSON_PATH
 
     # ==========================================================
     # 三、网络与重试（影响“稳定性”与“速度”）
@@ -179,6 +202,26 @@ class Settings:
     runtime_metrics_interval_seconds: float = 3.0
 
     # ==========================================================
+    # 五点三、TDX 远程行情 socket
+    # ==========================================================
+    # tdx_hosts_sync_check_mtime：
+    #   - True：仅当 newhost.lst 修改时间变化时才重新解析落地
+    #   - False：每次都重新解析
+    tdx_hosts_sync_check_mtime: bool = True
+
+    # tdx_remote_connect_timeout_seconds：
+    #   - TDX socket 连接超时
+    tdx_remote_connect_timeout_seconds: float = 5.0
+
+    # tdx_remote_recv_timeout_seconds：
+    #   - TDX socket 请求后的接收超时
+    tdx_remote_recv_timeout_seconds: float = 10.0
+
+    # tdx_remote_ping_timeout_seconds：
+    #   - host 选优时 TCP connect 测速超时
+    tdx_remote_ping_timeout_seconds: float = 1.0
+
+    # ==========================================================
     # 六、业务常量（一般不用动）
     # ==========================================================
     timezone: str = "Asia/Shanghai"
@@ -235,15 +278,19 @@ class Settings:
         self.user_config_path = Path(self.user_config_path).resolve()
         self.tdx_hq_cache_dir = Path(self.tdx_hq_cache_dir).resolve()
         self.tdx_vipdoc_dir = Path(self.tdx_vipdoc_dir).resolve()
-        self.tdx_minute_archive_dir = Path(
-            self.tdx_minute_archive_dir).resolve()
+        self.tdx_minute_archive_dir = Path(self.tdx_minute_archive_dir).resolve()
+        self.tdx_newhost_lst_path = Path(self.tdx_newhost_lst_path).resolve()
+        self.tdx_hosts_json_path = Path(self.tdx_hosts_json_path).resolve()
+
         self.tdx_minute_archive_dir.mkdir(parents=True, exist_ok=True)
+        self.tdx_hosts_json_path.parent.mkdir(parents=True, exist_ok=True)
 
         # trace_id 白名单解析
         raw_trace_ids = str(self.log_debug_trace_ids_raw or "").strip()
         self.log_debug_trace_ids = (
-            [s.strip() for s in raw_trace_ids.split(",")
-             if s.strip()] if raw_trace_ids else [])
+            [s.strip() for s in raw_trace_ids.split(",") if s.strip()]
+            if raw_trace_ids else []
+        )
 
         # executor_concurrency 防御性兜底：至少为 1
         try:
@@ -281,6 +328,33 @@ class Settings:
         except Exception:
             self.runtime_metrics_interval_seconds = 1.0
 
+        # TDX remote socket 参数兜底
+        try:
+            self.tdx_hosts_sync_check_mtime = bool(self.tdx_hosts_sync_check_mtime)
+        except Exception:
+            self.tdx_hosts_sync_check_mtime = True
+
+        try:
+            self.tdx_remote_connect_timeout_seconds = float(self.tdx_remote_connect_timeout_seconds)
+            if self.tdx_remote_connect_timeout_seconds <= 0:
+                self.tdx_remote_connect_timeout_seconds = 5.0
+        except Exception:
+            self.tdx_remote_connect_timeout_seconds = 5.0
+
+        try:
+            self.tdx_remote_recv_timeout_seconds = float(self.tdx_remote_recv_timeout_seconds)
+            if self.tdx_remote_recv_timeout_seconds <= 0:
+                self.tdx_remote_recv_timeout_seconds = 10.0
+        except Exception:
+            self.tdx_remote_recv_timeout_seconds = 10.0
+
+        try:
+            self.tdx_remote_ping_timeout_seconds = float(self.tdx_remote_ping_timeout_seconds)
+            if self.tdx_remote_ping_timeout_seconds <= 0:
+                self.tdx_remote_ping_timeout_seconds = 1.0
+        except Exception:
+            self.tdx_remote_ping_timeout_seconds = 1.0
+
         # provider_limiters 兜底
         if not isinstance(self.provider_limiters, dict):
             self.provider_limiters = {}
@@ -311,7 +385,6 @@ class Settings:
             "baostock_adapter": "WARN",
             "sina_adapter": "WARN",
         }
-
 
 settings = Settings()
 
@@ -361,7 +434,6 @@ DATA_TYPE_DEFINITIONS = {
 # ==============================
 # 爬虫通用参数池（V7.2 新增）
 # ==============================
-
 
 @dataclass
 class SpiderConfig:

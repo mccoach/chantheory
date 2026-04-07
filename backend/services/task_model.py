@@ -1,6 +1,6 @@
 # backend/services/task_model.py
 # ==============================
-# 说明：Task 模型与构建工具（统一 Task 结构）
+# Task 模型与构建工具（统一 Task 结构）
 #
 # 当前正式支持：
 #   - trade_calendar
@@ -10,10 +10,9 @@
 #   - factor_events_snapshot
 #   - watchlist_update
 #
-# 本轮改动（watchlist 双主键升级）：
-#   - Task 正式加入 market 字段
-#   - market 为可选字段：全局任务不需要 market，明确标的身份的任务可显式传入
-#   - 不再要求所有“明确标的身份”的任务只靠 symbol 单独定位
+# 本轮正式收口：
+#   - 明确标的任务统一按 market + symbol 双键
+#   - current_kline 不再允许只靠 symbol 猜市场
 # ==============================
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from backend.utils.time import now_iso
 from backend.utils.logger import get_logger
 
 _LOG = get_logger("task_model")
+
 
 @dataclass
 class Task:
@@ -46,14 +46,15 @@ class Task:
     params: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+
 def _infer_class_from_db(symbol: Optional[str], market: Optional[str] = None) -> Optional[str]:
     s = (symbol or "").strip()
     m = (market or "").strip().upper()
-    if not s:
+    if not s or not m:
         return None
 
     try:
-        rows = select_symbol_index(symbol=s, market=m or None)
+        rows = select_symbol_index(symbol=s, market=m)
         if not rows:
             return None
         cls = str(rows[0].get("class") or "").strip().lower()
@@ -67,13 +68,16 @@ def _infer_class_from_db(symbol: Optional[str], market: Optional[str] = None) ->
         )
         return None
 
+
 def _normalize_adjust(raw: Optional[str]) -> str:
     adj = (raw or "none").lower().strip()
     return adj if adj in ("none", "qfq", "hfq") else "none"
 
+
 def _normalize_market(raw: Optional[str]) -> Optional[str]:
     m = str(raw or "").strip().upper()
     return m or None
+
 
 def _generate_task_id(
     task_type: str,
@@ -88,11 +92,10 @@ def _generate_task_id(
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     base_parts = [task_type, scope]
 
-    if scope == "symbol" and symbol:
-        if market:
-            base_parts.append(f"{market}.{symbol}")
-        else:
-            base_parts.append(symbol)
+    if scope == "symbol" and symbol and market:
+        base_parts.append(f"{market}.{symbol}")
+    elif scope == "symbol":
+        base_parts.append(symbol or "UNKNOWN")
     else:
         base_parts.append("ALL")
 
@@ -106,6 +109,7 @@ def _generate_task_id(
     tid = trace_id or "NA"
 
     return f"{base}@{ts}(src={src},trace={tid})"
+
 
 def create_task(
     *,
@@ -126,6 +130,10 @@ def create_task(
     mkt = _normalize_market(market)
     fq = (freq or "").strip() or None
     adj = _normalize_adjust(adjust)
+
+    if sc == "symbol" and t == "current_kline":
+        if not sym or not mkt or not fq:
+            raise ValueError("current_kline task requires market + symbol + freq")
 
     cls = _infer_class_from_db(sym, mkt) if sc == "symbol" else None
 
@@ -150,11 +158,7 @@ def create_task(
         "source": source or "",
     }
 
-    if params:
-        p = dict(params)
-    else:
-        p = {}
-
+    p = dict(params) if params else {}
     if "force_fetch" not in p:
         p["force_fetch"] = False
 

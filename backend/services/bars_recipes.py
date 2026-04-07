@@ -1,286 +1,522 @@
 # backend/services/bars_recipes.py
 # ==============================
-# 说明：K线动作指令集（Bars Recipes · 日线收尾优化阶段）
+# 基础原始行情保障层（正式版）
 #
-# 本阶段改动：
-#   - 日线真相源已切到 candles_day_raw
-#   - 当前阶段只保证日线 DB 链路稳定
-#   - 分钟线后续将切换为“归档 + 实时拼接”独立链路
+# 正式职责：
+#   - ensure_local_day_bars
+#   - ensure_local_1m_bars
+#   - ensure_local_5m_bars
+#   - ensure_local_factors
 #
-# 本轮改动（复权因子本地化）：
-#   - 股票复权因子真相源已切到：
-#       * TDX 本地 gbbq category=1
-#       * 本地原始日线 candles_day_raw
-#   - 不再依赖 Baostock 远程因子
+# 设计原则：
+#   - 本地真相源优先
+#   - 单标的运行时缓存
+#   - SH/SZ 远程逐页补缺
+#   - BJ 不做远程补缺，只提示缺口
+#   - 原始数据统一“最终一次性落回”本地真相源
 # ==============================
 
 from __future__ import annotations
 
-from typing import Optional
-
+from typing import Dict, Any, Optional
 import asyncio
 import pandas as pd
 
-from backend.datasource import dispatcher
-from backend.services.normalizer import (
-    normalize_bars_df,
-    normalize_tdx_gbbq_adj_factors_df,
+from backend.db.candles import select_candles_day_raw, upsert_candles_day_raw
+from backend.datasource.providers.tdx_remote_adapter import get_auto_routed_bars_tdx_remote
+from backend.services.market_cache import get_market_cache
+from backend.services.market_gap import (
+    assess_day_gap,
+    assess_minute_gap,
+    assess_factor_state,
 )
-from backend.db.async_writer import get_async_writer
-from backend.db.candles import select_candles_day_raw
-from backend.db.symbols import select_symbol_index
-from backend.utils.common import get_symbol_market_from_db
-from backend.utils.gap_checker import check_kline_gap_to_current
-from backend.utils.logger import get_logger, log_event
+from backend.services.minute_archive import merge_and_write_minute_archive, read_minute_archive_df
+from backend.services.normalizer import normalize_tdx_gbbq_adj_factors_df
+from backend.db.gbbq_events import select_gbbq_events_raw
+from backend.db.factors import upsert_factors
+from backend.utils.logger import get_logger
 
 _LOG = get_logger("bars_recipes")
-_writer = get_async_writer()
+
+_CATEGORY_MAP = {
+    "1d": 4,
+    "5m": 0,
+    "1m": 8,
+}
 
 
-class RemoteEmptyDataError(RuntimeError):
-    """远程/本地真实拉取但返回空数据（强规则：应视为失败）。"""
+def _base_cache_freq_from_request_freq(request_freq: str) -> str:
+    f = str(request_freq or "").strip()
+    if f == "1m":
+        return "1m"
+    if f in ("5m", "15m", "30m", "60m"):
+        return "5m"
+    return "1d"
 
 
-def _get_symbol_class(symbol: str) -> Optional[str]:
-    try:
-        rows = select_symbol_index(symbol=symbol)
-        if not rows:
-            return None
-        cls = str(rows[0].get("class") or "").strip().lower()
-        return cls or None
-    except Exception:
-        return None
-
-
-def _get_symbol_market(symbol: str) -> Optional[str]:
-    try:
-        return get_symbol_market_from_db(symbol)
-    except Exception:
-        return None
-
-
-async def _load_day_bars_from_db(market: str, symbol: str) -> pd.DataFrame:
+async def _load_day_df_from_db(market: str, code: str) -> pd.DataFrame:
     rows = await asyncio.to_thread(
         select_candles_day_raw,
         market=market,
-        symbol=symbol,
+        symbol=code,
         start_ts=None,
         end_ts=None,
         limit=None,
         offset=0,
     )
     if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows)
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "amount", "turnover_rate"])
+    df = pd.DataFrame(rows)
+    if "turnover_rate" not in df.columns:
+        df["turnover_rate"] = None
+    return df[["ts", "open", "high", "low", "close", "volume", "amount", "turnover_rate"]].copy()
 
 
-async def _save_day_bars_df(
-    df_bars: pd.DataFrame,
+def _normalize_remote_day_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "amount", "turnover_rate"])
+
+    df = raw_df.copy()
+    if "datetime" in df.columns:
+        df["ts"] = pd.to_datetime(df["datetime"], errors="coerce").astype("int64") // 10**6
+
+    if "vol" in df.columns and "volume" not in df.columns:
+        df["volume"] = pd.to_numeric(df["vol"], errors="coerce")
+    if "amount" in df.columns:
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+
+    for col in ("open", "high", "low", "close"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "turnover_rate" not in df.columns:
+        df["turnover_rate"] = None
+
+    out_cols = ["ts", "open", "high", "low", "close", "volume", "amount", "turnover_rate"]
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[out_cols].dropna(subset=["ts", "open", "high", "low", "close"]).copy()
+    df["ts"] = df["ts"].astype("int64")
+    df = df.drop_duplicates(subset=["ts"], keep="last").sort_values("ts").reset_index(drop=True)
+    return df
+
+
+def _normalize_remote_minute_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=["date", "time", "open", "high", "low", "close", "amount", "volume"])
+
+    df = raw_df.copy()
+    if "datetime" not in df.columns:
+        return pd.DataFrame(columns=["date", "time", "open", "high", "low", "close", "amount", "volume"])
+
+    dt_series = pd.to_datetime(df["datetime"], errors="coerce")
+    df["date"] = dt_series.dt.strftime("%Y%m%d")
+    df["time"] = dt_series.dt.strftime("%H:%M")
+
+    for col in ("open", "high", "low", "close"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "vol" in df.columns and "volume" not in df.columns:
+        df["volume"] = pd.to_numeric(df["vol"], errors="coerce")
+    if "amount" in df.columns:
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+
+    out_cols = ["date", "time", "open", "high", "low", "close", "amount", "volume"]
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[out_cols].dropna(subset=["date", "time", "open", "high", "low", "close"]).copy()
+    df["date"] = df["date"].astype(int)
+    df["time"] = df["time"].astype(str)
+    df = df.drop_duplicates(subset=["date", "time"], keep="last").sort_values(["date", "time"]).reset_index(drop=True)
+    return df
+
+
+def _merge_day_frames(local_df: pd.DataFrame, remote_df: pd.DataFrame) -> pd.DataFrame:
+    if local_df is None or local_df.empty:
+        return remote_df.copy() if remote_df is not None else pd.DataFrame()
+    if remote_df is None or remote_df.empty:
+        return local_df.copy()
+
+    df = pd.concat([local_df, remote_df], axis=0, ignore_index=True)
+    df = df.drop_duplicates(subset=["ts"], keep="last").sort_values("ts").reset_index(drop=True)
+    return df
+
+
+def _merge_minute_frames(local_df: pd.DataFrame, remote_df: pd.DataFrame) -> pd.DataFrame:
+    if local_df is None or local_df.empty:
+        return remote_df.copy() if remote_df is not None else pd.DataFrame()
+    if remote_df is None or remote_df.empty:
+        return local_df.copy()
+
+    df = pd.concat([local_df, remote_df], axis=0, ignore_index=True)
+    df = df.drop_duplicates(subset=["date", "time"], keep="last").sort_values(["date", "time"]).reset_index(drop=True)
+    return df
+
+
+def _hot_page_size() -> int:
+    return 2
+
+
+def _cold_page_size() -> int:
+    return 800
+
+
+async def _fetch_remote_page(
+    *,
     market: str,
-    symbol: str,
+    code: str,
+    category: int,
+    start: int,
+    count: int,
+) -> pd.DataFrame:
+    return await get_auto_routed_bars_tdx_remote(
+        category=category,
+        market=market,
+        symbol=code,
+        start=start,
+        count=count,
+    )
+
+
+async def ensure_local_day_bars(
+    *,
+    market: str,
+    code: str,
+    refresh_interval_seconds: Optional[int],
+) -> Dict[str, Any]:
+    cache = get_market_cache()
+    cached = cache.get(market, code, "1d")
+    is_hot = cached is not None
+
+    if cached is None:
+        working_df = await _load_day_df_from_db(market, code)
+        cache.put(market, code, "1d", working_df)
+    else:
+        working_df = cached.copy()
+
+    page_size = _hot_page_size() if is_hot else _cold_page_size()
+    category = _CATEGORY_MAP["1d"]
+    start = 0
+    updated = False
+    remote_exhausted = False
+    escalated = False
+
+    while True:
+        gap = assess_day_gap(market=market, code=code, day_df=working_df)
+        if not gap["has_gap"]:
+            break
+        if not gap["can_continue_remote"]:
+            break
+
+        raw_page = await _fetch_remote_page(
+            market=market,
+            code=code,
+            category=category,
+            start=start,
+            count=page_size,
+        )
+        if raw_page is None or raw_page.empty:
+            remote_exhausted = True
+            break
+
+        norm_page = _normalize_remote_day_df(raw_page)
+        if norm_page.empty:
+            remote_exhausted = True
+            break
+
+        before_rows = len(working_df)
+        working_df = _merge_day_frames(working_df, norm_page)
+        if len(working_df) > before_rows:
+            updated = True
+
+        if len(norm_page) < page_size:
+            remote_exhausted = True
+            break
+
+        start += page_size
+
+        if is_hot and not escalated:
+            page_size = _cold_page_size()
+            escalated = True
+
+    if updated:
+        records = []
+        for _, row in working_df.iterrows():
+            records.append({
+                "market": market,
+                "symbol": code,
+                "ts": int(row["ts"]),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]) if row["volume"] is not None else 0.0,
+                "amount": float(row["amount"]) if row["amount"] is not None else None,
+            })
+        await asyncio.to_thread(upsert_candles_day_raw, records)
+        cache.put(market, code, "1d", working_df)
+
+    gap = assess_day_gap(market=market, code=code, day_df=working_df)
+    if gap["has_gap"] and gap["remote_supported"] and remote_exhausted:
+        gap["gap_message"] = "远程可用窗口已拉尽，日线仍存在缺口"
+
+    return {
+        "df": working_df,
+        "updated": updated,
+        "has_gap": bool(gap["has_gap"]),
+        "gap_message": str(gap["gap_message"] or ""),
+        "remote_supported": bool(gap["remote_supported"]),
+    }
+
+
+async def _write_minute_df_once(
+    *,
+    market: str,
+    code: str,
+    freq: str,
+    df: pd.DataFrame,
 ) -> None:
-    if df_bars is None or df_bars.empty:
-        return
-    df = df_bars.copy()
-    df["market"] = str(market or "").strip().upper()
-    df["symbol"] = symbol
-    await _writer.write_candles(df.to_dict("records"))
-
-
-async def run_stock_dwm_unadj(
-    symbol: str,
-    freq: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    """
-    当前阶段仅稳定支持股票日线（1d）同步入库。
-    """
-    cls = _get_symbol_class(symbol)
-    if cls != "stock":
-        _LOG.info(f"[S1] 跳过：{symbol} class={cls} 非 stock")
-        return False
-
-    if freq != "1d":
-        _LOG.warning(f"[S1] 当前阶段仅支持股票日线 1d，收到 freq={freq}")
-        return False
-
-    market = _get_symbol_market(symbol) or ""
-    has_gap = check_kline_gap_to_current(
-        symbol=symbol,
-        freq=freq,
-        market=market,
-        force_fetch=force_fetch,
-    )
-    if not has_gap:
-        _LOG.info(f"[S1] 无缺口：{market} {symbol} {freq} 本地已最新")
-        return False
-
-    category = "stock_daily_bars"
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="run_stock_dwm_unadj",
-        line=0,
-        trace_id=trace_id,
-        event="S1.fetch.start",
-        message=f"S1 拉取股票日线原始K线 {symbol} {freq}",
-        extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq,
-            "category": category
-        },
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        category,
-        freq=freq,
-        symbol=symbol,
-        fqt=0,
-    )
-
-    if raw_df is None or (isinstance(raw_df, pd.DataFrame) and raw_df.empty):
-        raise RemoteEmptyDataError(f"remote empty for {category} symbol={symbol} freq={freq}")
-
-    df_bars = normalize_bars_df(raw_df, source_id or "eastmoney.stock_daily_kline")
-    if df_bars is None or df_bars.empty:
-        raise RemoteEmptyDataError(f"normalized empty for {category} symbol={symbol} freq={freq}")
-
-    await _save_day_bars_df(
-        df_bars=df_bars,
-        market=market,
-        symbol=symbol,
-    )
-
-    _LOG.info(f"[S1] 完成：{market} {symbol} {freq} 行数={len(df_bars)}")
-    return True
-
-
-async def run_stock_intraday_unadj(
-    symbol: str,
-    freq: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    _LOG.warning(f"[S2] 当前阶段未启用股票分钟线链路 symbol={symbol} freq={freq}")
-    return False
-
-
-async def run_stock_factors(
-    symbol: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    """
-    股票复权因子本地化主链：
-
-      TDX 本地 gbbq(category=1)
-      + 本地原始日线 candles_day_raw
-      -> qfq_factor / hfq_factor
-      -> adj_factors
-    """
-    sym = (symbol or "").strip()
-    if not sym:
-        _LOG.warning("[S3] 空 symbol，跳过")
-        return False
-
-    market = _get_symbol_market(sym) or ""
-    cls = _get_symbol_class(sym)
-    if cls != "stock":
-        _LOG.info("[S3] 跳过：%s class=%s 非 stock", sym, cls)
-        return False
-
-    if not market:
-        raise ValueError(f"LOCAL_SYMBOL_MARKET_MISSING: symbol={sym}")
-
-    log_event(
-        logger=_LOG,
-        service="bars_recipes",
-        level="INFO",
-        file=__file__,
-        func="run_stock_factors",
-        line=0,
-        trace_id=trace_id,
-        event="S3.fetch.start",
-        message=f"S3 拉取本地股票复权事件 {symbol}",
-        extra={"symbol": symbol, "market": market},
-    )
-
-    raw_df, source_id = await dispatcher.fetch(
-        "adj_factor",
-        symbol=sym,
-    )
-
-    if raw_df is None:
-        raise RemoteEmptyDataError(f"local empty for adj_factor symbol={sym}")
-
-    if isinstance(raw_df, pd.DataFrame) and raw_df.empty:
-        _LOG.info("[S3] 本地无复权事件：%s", sym)
-        return False
-
-    day_df = await _load_day_bars_from_db(market=market, symbol=sym)
-    if day_df is None or day_df.empty:
-        raise ValueError(f"LOCAL_PRICE_DEPENDENCY_MISSING: no local day bars for {market}.{sym}")
-
-    df = normalize_tdx_gbbq_adj_factors_df(
-        raw_df,
-        day_df,
-        symbol=sym,
-        market=market,
-    )
-
     if df is None or df.empty:
-        _LOG.info("[S3] 复权事件存在，但标准化后无有效因子：%s", sym)
-        return False
+        return
 
-    df["symbol"] = sym
-    await _writer.write_factors(df.to_dict("records"))
+    records = []
+    for _, row in df.iterrows():
+        records.append({
+            "market": market,
+            "symbol": code,
+            "freq": freq,
+            "date": int(row["date"]),
+            "time": str(row["time"]),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "amount": float(row["amount"]) if row["amount"] is not None else 0.0,
+            "volume": float(row["volume"]) if row["volume"] is not None else 0.0,
+        })
 
-    _LOG.info(f"[S3] 完成：{market} {sym} 本地因子行数={len(df)} source_id={source_id}")
-    return True
+    await asyncio.to_thread(
+        merge_and_write_minute_archive,
+        market=market,
+        symbol=code,
+        freq=freq,
+        records=records,
+    )
 
 
-async def run_fund_dwm_unadj(
-    symbol: str,
+async def _ensure_local_minute_bars(
+    *,
+    market: str,
+    code: str,
     freq: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    _LOG.warning(f"[F1] 当前阶段未启用基金日线链路 symbol={symbol} freq={freq}")
-    return False
+    refresh_interval_seconds: Optional[int],
+) -> Dict[str, Any]:
+    cache = get_market_cache()
+    cached = cache.get(market, code, freq)
+    is_hot = cached is not None
+
+    if cached is None:
+        working_df = await asyncio.to_thread(
+            read_minute_archive_df,
+            market=market,
+            symbol=code,
+            freq=freq,
+        )
+        cache.put(market, code, freq, working_df)
+    else:
+        working_df = cached.copy()
+
+    page_size = _hot_page_size() if is_hot else _cold_page_size()
+    category = _CATEGORY_MAP[freq]
+    start = 0
+    updated = False
+    remote_exhausted = False
+    escalated = False
+
+    while True:
+        gap = assess_minute_gap(market=market, code=code, freq=freq, minute_df=working_df)
+        if not gap["has_gap"]:
+            break
+        if not gap["can_continue_remote"]:
+            break
+
+        raw_page = await _fetch_remote_page(
+            market=market,
+            code=code,
+            category=category,
+            start=start,
+            count=page_size,
+        )
+        if raw_page is None or raw_page.empty:
+            remote_exhausted = True
+            break
+
+        norm_page = _normalize_remote_minute_df(raw_page)
+        if norm_page.empty:
+            remote_exhausted = True
+            break
+
+        before_rows = len(working_df)
+        working_df = _merge_minute_frames(working_df, norm_page)
+        if len(working_df) > before_rows:
+            updated = True
+
+        if len(norm_page) < page_size:
+            remote_exhausted = True
+            break
+
+        start += page_size
+
+        if is_hot and not escalated:
+            page_size = _cold_page_size()
+            escalated = True
+
+    if updated:
+        await _write_minute_df_once(
+            market=market,
+            code=code,
+            freq=freq,
+            df=working_df,
+        )
+        cache.put(market, code, freq, working_df)
+
+    gap = assess_minute_gap(market=market, code=code, freq=freq, minute_df=working_df)
+    if gap["has_gap"] and gap["remote_supported"] and remote_exhausted:
+        gap["gap_message"] = f"远程可用窗口已拉尽，{freq} 数据仍存在缺口"
+
+    return {
+        "df": working_df,
+        "updated": updated,
+        "has_gap": bool(gap["has_gap"]),
+        "gap_message": str(gap["gap_message"] or ""),
+        "remote_supported": bool(gap["remote_supported"]),
+    }
 
 
-async def run_fund_dwm_adj(
-    symbol: str,
-    freq: str,
-    adjust: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    _LOG.warning(f"[F2] 当前阶段未启用基金复权日线链路 symbol={symbol} freq={freq} adjust={adjust}")
-    return False
+async def ensure_local_1m_bars(
+    *,
+    market: str,
+    code: str,
+    refresh_interval_seconds: Optional[int],
+) -> Dict[str, Any]:
+    return await _ensure_local_minute_bars(
+        market=market,
+        code=code,
+        freq="1m",
+        refresh_interval_seconds=refresh_interval_seconds,
+    )
 
 
-async def run_fund_intraday_unadj(
-    symbol: str,
-    freq: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    _LOG.warning(f"[F3] 当前阶段未启用基金分钟线链路 symbol={symbol} freq={freq}")
-    return False
+async def ensure_local_5m_bars(
+    *,
+    market: str,
+    code: str,
+    refresh_interval_seconds: Optional[int],
+) -> Dict[str, Any]:
+    return await _ensure_local_minute_bars(
+        market=market,
+        code=code,
+        freq="5m",
+        refresh_interval_seconds=refresh_interval_seconds,
+    )
 
 
-async def run_fund_intraday_adj(
-    symbol: str,
-    freq: str,
-    adjust: str,
-    force_fetch: bool = False,
-    trace_id: Optional[str] = None,
-) -> bool:
-    _LOG.warning(f"[F4] 当前阶段未启用基金分钟复权链路 symbol={symbol} freq={freq} adjust={adjust}")
-    return False
+async def ensure_local_factors(
+    *,
+    market: str,
+    code: str,
+    day_df: pd.DataFrame,
+    request_adjust: str,
+) -> Dict[str, Any]:
+    factor_state = assess_factor_state(
+        market=market,
+        code=code,
+        day_df=day_df,
+        request_adjust=request_adjust,
+    )
+
+    req_adj = str(request_adjust or "none").strip().lower()
+    if req_adj == "none":
+        return {
+            "factor_ready": False,
+            "factor_complete": False,
+            "message": "",
+        }
+
+    if factor_state["factor_ready"]:
+        return {
+            "factor_ready": True,
+            "factor_complete": True,
+            "message": "",
+        }
+
+    if not factor_state["can_compute"]:
+        return {
+            "factor_ready": False,
+            "factor_complete": False,
+            "message": factor_state["message"],
+        }
+
+    rows = await asyncio.to_thread(
+        select_gbbq_events_raw,
+        code,
+        market,
+        1,
+    )
+    gdf = pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    if gdf.empty:
+        return {
+            "factor_ready": False,
+            "factor_complete": False,
+            "message": "复权事件为空，当前返回不复权数据",
+        }
+
+    gdf = gdf.rename(columns={
+        "field1": "cash_dividend_per_10",
+        "field2": "rights_price",
+        "field3": "bonus_share_per_10",
+        "field4": "rights_share_per_10",
+    })
+
+    try:
+        factor_df = normalize_tdx_gbbq_adj_factors_df(
+            gdf,
+            day_df,
+            symbol=code,
+            market=market,
+        )
+    except Exception as e:
+        return {
+            "factor_ready": False,
+            "factor_complete": False,
+            "message": f"复权因子计算失败：{e}",
+        }
+
+    if factor_df is None or factor_df.empty:
+        return {
+            "factor_ready": False,
+            "factor_complete": False,
+            "message": "复权因子结果为空，当前返回不复权数据",
+        }
+
+    records = []
+    for _, row in factor_df.iterrows():
+        records.append({
+            "symbol": code,
+            "date": int(row["date"]),
+            "qfq_factor": float(row["qfq_factor"]),
+            "hfq_factor": float(row["hfq_factor"]),
+        })
+    await asyncio.to_thread(upsert_factors, records)
+
+    return {
+        "factor_ready": True,
+        "factor_complete": True,
+        "message": "",
+    }

@@ -5,13 +5,8 @@
 // 最终规则：
 //   - refresh 只负责请求后端生成并持久化候选快照
 //   - display 只负责只读候选快照并装入前端内存
-//   - 显示判定只看：
-//       1) 弹窗是否打开（UI 层判断）
-//       2) snapshotValid 是否为 true（controller 维护）
-//
-// 有效快照：
-//   - refreshCandidates() 成功返回 => snapshotValid = true
-//   - 源目录变更 => snapshotValid = false
+//   - 快照是否可用于显示，只认 snapshotValid
+//   - 目录变更会立即让 snapshotValid 失效
 // ==============================
 
 import { ref } from "vue";
@@ -53,7 +48,7 @@ export function createLocalImportState() {
     importRootDirBrowsing: ref(false),
     importRootDirSaving: ref(false),
 
-    // ===== 候选快照有效性（最终唯一业务态）=====
+    // ===== 唯一业务真相源：当前是否存在有效候选快照 =====
     snapshotValid: ref(false),
   };
 }

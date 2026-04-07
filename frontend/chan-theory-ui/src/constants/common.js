@@ -1,10 +1,11 @@
 // src/constants/common.js
 // ==============================
+// 重要：本文件中的注释务必保留，新增条目也应按同等标准写明注释
 // 说明：全局通用配置常量
 // 职责：提供配色方案、应用偏好、UI限制、选项源、预设映射
 // 设计：按用途分组，每个常量都有详细注释
-// V3.3 改动：
-//   1) 删除 BAR_USABLE_RATIO（旧 marker 宽度估算残留，已无真实消费）
+// V3.4 改动：
+//   1) 新增实时刷新默认值与输入限制
 // ==============================
 
 // ===== 基础调色板（所有图表共用）=====
@@ -47,6 +48,10 @@ export const DEFAULT_APP_PREFERENCES = {
   useKDJ: false,            // 是否启用KDJ指标（❌ 设置窗未暴露，通过副图下拉选择）
   useRSI: false,            // 是否启用RSI指标（❌ 设置窗未暴露，通过副图下拉选择）
   useBOLL: false,           // 是否启用BOLL指标（❌ 设置窗未暴露，通过副图下拉选择）
+
+  // NEW: 自动刷新默认关闭（null = 静态查看）
+  autoRefreshEnabled: false,
+  refreshIntervalSeconds: null,
 };
 
 // ===== UI 输入边界（通用限制）=====
@@ -104,6 +109,13 @@ export const UI_LIMITS = {
     min: 0,                 // 最小值（允许为0）
     step: 0.1,              // 调整步长（0.1精度）
   },
+};
+
+// ===== NEW: 自动刷新输入限制 =====
+export const REFRESH_INTERVAL_LIMITS = {
+  min: 1,
+  max: 3600,
+  step: 1,
 };
 
 // ===== UI 选项源（下拉框/选择器）=====

@@ -1,6 +1,9 @@
 // src/composables/useAppStartup.js
 // ==============================
-// V1.10 - 应用级启动器（local-import 候选刷新预热异步尾触发）
+// V2.0 - 应用级启动器（candles 唯一入口版）
+// 变更：
+//   - 废除 current_kline/current_factors 前置 declare/wait 依赖
+//   - restoreLastSymbolIdentityAndLoad 只做：恢复身份 + 直接 reload
 // ==============================
 
 import { waitBackendAlive } from "@/utils/backendReady";
@@ -85,7 +88,6 @@ export function useAppStartup({ backendReady, settings, vm }) {
         market: id.market,
         freq: settings.preferences.freq || "1d",
         adjust: settings.preferences.adjust || "none",
-        force_refresh: false,
       });
 
       vm.setSymbolIdentity({
@@ -120,30 +122,6 @@ export function useAppStartup({ backendReady, settings, vm }) {
     }
   }
 
-  function triggerLocalImportCandidateRefreshTail() {
-    try {
-      const ctl = useLocalImportController();
-
-      Promise.resolve()
-        .then(() => ctl.refreshCandidates())
-        .then((r) => {
-          if (r?.ok) {
-            console.log(`${nowTs()} [App] local_import-candidates-refreshed`);
-          } else {
-            console.warn(
-              `${nowTs()} [App] local_import-candidates-refresh-failed`,
-              r?.message || ""
-            );
-          }
-        })
-        .catch((e) => {
-          console.error(`${nowTs()} [App] local_import-candidates-refresh-failed`, e);
-        });
-    } catch (e) {
-      console.error(`${nowTs()} [App] local_import-candidates-refresh-failed`, e);
-    }
-  }
-
   async function realStartup() {
     const alive = await waitBackendAlive({ intervalMs: 200 });
     backendReady.value = !!alive;
@@ -164,8 +142,12 @@ export function useAppStartup({ backendReady, settings, vm }) {
 
     console.log(`${nowTs()} [App] app-started`);
 
-    // 启动链最后异步触发，不阻塞启动完成
-    triggerLocalImportCandidateRefreshTail();
+    try {
+      const ctl = useLocalImportController();
+      ctl.triggerStartupRefresh();
+    } catch (e) {
+      console.error(`${nowTs()} [App] local_import-candidates-refresh-failed`, e);
+    }
   }
 
   function startApp() {

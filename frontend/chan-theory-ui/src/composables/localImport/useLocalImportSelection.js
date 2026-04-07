@@ -122,7 +122,6 @@ export function useLocalImportSelection({ candidatesRef }) {
       classText: normalizeClassLabel(it.class),
       type: asStr(it.type),
       fileTime: normalizeFileTime(it.file_datetime),
-      updatedAt: "",
       _rowKey: selectionKey(it),
     }));
   });

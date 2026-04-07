@@ -19,6 +19,7 @@ export async function openLocalImportDialog(dialogManager) {
   const mod = await import("@/components/ui/LocalImportDialog.vue");
 
   dialogManager.open({
+    key: "local-import",
     title: "盘后数据导入",
     contentComponent: mod.default,
     props: {},

@@ -1,18 +1,14 @@
 # backend/services/market.py
 # ==============================
-# 说明：行情服务（V8.0 - 日线专用 DB 版 /api/candles 第一阶段）
+# 行情成品服务（正式版）
 #
-# 当前阶段职责：
-#   - 收到 /api/candles 请求后：
-#       * 若 freq='1d'：
-#           只从本地 DB 的 candles_day_raw 读取原始日线数据并返回
-#       * 若 freq!='1d'：
-#           当前阶段暂不由本模块提供分钟线/周月线数据
-#
-# 说明：
-#   - 本阶段是“日线收尾优化”阶段
-#   - 日线真相源已从 candles_raw 收缩为 candles_day_raw
-#   - 分钟线后续将走“归档 + 实时拼接”独立链路
+# 职责：
+#   - 接收 /api/candles 请求
+#   - 保障本地基础真相源
+#   - 按需远程补缺
+#   - 按需重采样
+#   - 按需复权
+#   - 返回前端最终可直接消费的 candles
 # ==============================
 
 from __future__ import annotations
@@ -22,53 +18,40 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import pandas as pd
 
-from backend.db.candles import select_candles_day_raw
-from backend.db.symbols import select_symbol_index
-from backend.utils.common import get_symbol_market_from_db
+from backend.services.freq_mapper import map_request_freq
+from backend.services.bars_recipes import (
+    ensure_local_day_bars,
+    ensure_local_1m_bars,
+    ensure_local_5m_bars,
+    ensure_local_factors,
+)
+from backend.services.resampler import resample_to_target
+from backend.services.candle_adjuster import apply_adjustment
+from backend.utils.common import get_symbol_record_from_db
 from backend.utils.logger import get_logger, log_event
 from backend.utils.time import to_iso_string
+from backend.utils.time_helper import calculate_theoretical_latest_for_frontend
 
 _LOG = get_logger("market")
 
 
-def _get_symbol_class(symbol: str) -> Optional[str]:
-    try:
-        rows = select_symbol_index(symbol=symbol)
-        if not rows:
-            return None
-        cls = str(rows[0].get("class") or "").strip().lower()
-        return cls or None
-    except Exception:
-        return None
-
-
-def _get_symbol_market(symbol: str) -> Optional[str]:
-    try:
-        return get_symbol_market_from_db(symbol)
-    except Exception:
-        return None
-
-
 async def get_candles(
+    *,
     symbol: str,
     freq: str,
     adjust: str = "none",
+    refresh_interval_seconds: Optional[int] = None,
     trace_id: Optional[str] = None,
+    market: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    获取 K 线数据（第一阶段：仅日线从 DB 读取）
+    code = str(symbol or "").strip()
+    market_u = str(market or "").strip().upper()
 
-    说明：
-      - candles_day_raw 底表只存原始不复权日线
-      - adjust 当前仅回显给前端，不参与 DB 查询
-      - 若调用方希望读取前确保数据最新，应先通过
-        POST /api/ensure-data + type='current_kline' 触发同步任务，
-        等 task.finished 后再调用本函数。
-      - 本阶段仅稳定支持 freq='1d'
-    """
-    cls = _get_symbol_class(symbol)
-    market = _get_symbol_market(symbol)
-    freq_norm = str(freq or "").strip()
+    req_adjust = str(adjust or "none").strip().lower()
+    if req_adjust not in ("none", "qfq", "hfq"):
+        req_adjust = "none"
+
+    item = get_symbol_record_from_db(symbol=code, market=market_u) if code and market_u else None
 
     log_event(
         logger=_LOG,
@@ -79,127 +62,173 @@ async def get_candles(
         line=0,
         trace_id=trace_id,
         event="get_candles.start",
-        message=f"查询K线 {symbol} {freq_norm} adjust={adjust}",
+        message="get_candles start",
         extra={
-            "symbol": symbol,
-            "market": market,
-            "freq": freq_norm,
-            "adjust": adjust,
-            "class": cls,
+            "symbol": code,
+            "market": market_u,
+            "freq": freq,
+            "adjust": req_adjust,
+            "refresh_interval_seconds": refresh_interval_seconds,
         },
     )
 
-    if not market:
+    if not code or not market_u:
         return {
             "ok": True,
             "meta": {
-                "symbol": symbol,
-                "market": None,
-                "freq": freq_norm,
-                "adjust": adjust,
-                "class": cls,
+                "symbol": code,
+                "market": market_u or None,
+                "freq": str(freq or "").strip(),
+                "adjust": req_adjust,
+                "actual_adjust": "none",
                 "all_rows": 0,
                 "is_latest": False,
                 "latest_bar_time": None,
-                "message": "无法确定标的市场，请先完成标的列表同步或明确选择市场",
+                "has_gap": True,
+                "gap_message": "缺少 market 或 code 参数",
                 "source": "none",
                 "generated_at": datetime.now().isoformat(),
             },
             "candles": [],
         }
 
-    if freq_norm != "1d":
+    if item is None:
         return {
             "ok": True,
             "meta": {
-                "symbol": symbol,
-                "market": market,
-                "freq": freq_norm,
-                "adjust": adjust,
-                "class": cls,
+                "symbol": code,
+                "market": market_u,
+                "freq": str(freq or "").strip(),
+                "adjust": req_adjust,
+                "actual_adjust": "none",
                 "all_rows": 0,
                 "is_latest": False,
                 "latest_bar_time": None,
-                "message": "当前阶段仅支持从本地数据库读取日线（1d）；分钟线后续将切换为归档读取链路",
+                "has_gap": True,
+                "gap_message": "标的不在 symbol_index 中，请先同步标的列表",
                 "source": "none",
                 "generated_at": datetime.now().isoformat(),
             },
             "candles": [],
         }
 
-    candles = await asyncio.to_thread(
-        select_candles_day_raw,
-        market=market,
-        symbol=symbol,
-        start_ts=None,
-        end_ts=None,
-        limit=None,
-        offset=0,
+    mapping = map_request_freq(freq)
+    request_freq = mapping["request_freq"]
+
+    day_result = await ensure_local_day_bars(
+        market=market_u,
+        code=code,
+        refresh_interval_seconds=refresh_interval_seconds,
+    )
+    day_df = day_result["df"]
+
+    factor_result = await ensure_local_factors(
+        market=market_u,
+        code=code,
+        day_df=day_df,
+        request_adjust=req_adjust,
     )
 
-    if not candles:
-        return {
-            "ok": True,
-            "meta": {
-                "symbol": symbol,
-                "market": market,
-                "freq": freq_norm,
-                "adjust": adjust,
-                "class": cls,
-                "all_rows": 0,
-                "is_latest": False,
-                "latest_bar_time": None,
-                "message": "本地暂无可用日线数据（可能尚未同步或同步失败，请检查 Task 状态与日志）",
-                "source": "none",
-                "generated_at": datetime.now().isoformat(),
-            },
-            "candles": [],
+    base_df = day_df
+    minute_gap = {"has_gap": False, "gap_message": ""}
+
+    if mapping["need_minute"]:
+        base_minute_freq = mapping["base_minute_freq"]
+        if base_minute_freq == "1m":
+            minute_result = await ensure_local_1m_bars(
+                market=market_u,
+                code=code,
+                refresh_interval_seconds=refresh_interval_seconds,
+            )
+        else:
+            minute_result = await ensure_local_5m_bars(
+                market=market_u,
+                code=code,
+                refresh_interval_seconds=refresh_interval_seconds,
+            )
+
+        base_df = minute_result["df"]
+        minute_gap = {
+            "has_gap": bool(minute_result["has_gap"]),
+            "gap_message": str(minute_result["gap_message"] or ""),
         }
 
-    df = pd.DataFrame(candles)
+    if mapping["need_resample"]:
+        result_df = await asyncio.to_thread(resample_to_target, base_df, request_freq)
+        if result_df is None:
+            result_df = pd.DataFrame()
+    else:
+        result_df = base_df.copy() if base_df is not None else pd.DataFrame()
 
-    from backend.utils.time_helper import calculate_theoretical_latest_for_frontend
+    adjusted_df, actual_adjust, adjust_message = await asyncio.to_thread(
+        apply_adjustment,
+        market=market_u,
+        code=code,
+        bars_df=result_df,
+        request_adjust=req_adjust,
+    )
 
-    latest_ts = int(candles[-1]["ts"]) if candles else 0
-    theoretical_ts = calculate_theoretical_latest_for_frontend(freq_norm)
-    is_latest = latest_ts >= theoretical_ts
+    final_df = adjusted_df if adjusted_df is not None else pd.DataFrame()
 
-    candles_list = df_to_candles_list(df)
+    has_gap = bool(day_result["has_gap"]) or bool(minute_gap["has_gap"])
+    gap_message = ""
+
+    if minute_gap["has_gap"]:
+        gap_message = minute_gap["gap_message"]
+    elif day_result["has_gap"]:
+        gap_message = day_result["gap_message"]
+
+    if factor_result.get("message"):
+        if gap_message:
+            gap_message = f"{gap_message}；{factor_result['message']}"
+        else:
+            gap_message = factor_result["message"]
+
+    if adjust_message:
+        if gap_message:
+            gap_message = f"{gap_message}；{adjust_message}"
+        else:
+            gap_message = adjust_message
+
+    candles = _df_to_candles_list(final_df)
+
+    latest_ts = int(final_df["ts"].iloc[-1]) if final_df is not None and not final_df.empty else 0
+    theoretical_ts = calculate_theoretical_latest_for_frontend(request_freq)
+    is_latest = bool(latest_ts >= theoretical_ts) if latest_ts > 0 else False
 
     meta = {
-        "symbol": symbol,
-        "market": market,
-        "freq": freq_norm,
-        "adjust": adjust,
-        "class": cls,
-        "all_rows": len(candles_list),
+        "symbol": code,
+        "market": market_u,
+        "freq": request_freq,
+        "adjust": req_adjust,
+        "actual_adjust": actual_adjust,
+        "all_rows": len(candles),
         "is_latest": is_latest,
         "latest_bar_time": to_iso_string(latest_ts) if latest_ts > 0 else None,
-        "source": "candles_day_raw",
+        "has_gap": has_gap,
+        "gap_message": gap_message or "",
+        "source": "local_truth_with_remote_gap_fill",
         "generated_at": datetime.now().isoformat(),
     }
 
     return {
         "ok": True,
         "meta": meta,
-        "candles": candles_list,
+        "candles": candles,
     }
 
 
-def df_to_candles_list(df: pd.DataFrame) -> list:
-    """DataFrame 转前端格式"""
-    if df.empty:
+def _df_to_candles_list(df: pd.DataFrame) -> list:
+    if df is None or df.empty:
         return []
 
-    required_cols = ["ts", "open", "high", "low", "close", "volume"]
-
-    for col in required_cols:
+    required = ["ts", "open", "high", "low", "close", "volume"]
+    for col in required:
         if col not in df.columns:
-            _LOG.warning(f"[格式转换] 缺少列: {col}")
             return []
 
-    return df[required_cols].rename(columns={
-        "ts": "ts",
+    x = df.copy()
+    return x[required].rename(columns={
         "open": "o",
         "high": "h",
         "low": "l",

@@ -25,6 +25,7 @@ const activeDialog = shallowRef(null);
 /**
  * 打开一个对话框
  * @param {object} options
+ * @param {string} [options.key]
  * @param {string} options.title
  * @param {object} options.contentComponent
  * @param {Function} [options.onClose]
@@ -48,6 +49,7 @@ function open(options) {
     : [];
 
   activeDialog.value = {
+    key: options.key || "",
     title: options.title || "设置",
     contentComponent: content,
 
@@ -57,7 +59,6 @@ function open(options) {
     tabs,
     activeTab,
 
-    // NEW: footerActions
     footerActions,
   };
 }

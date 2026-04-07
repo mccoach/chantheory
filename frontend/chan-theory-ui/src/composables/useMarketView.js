@@ -1,28 +1,21 @@
 // src/composables/useMarketView.js
 // ==============================
-// V24.0 - useMarketView 收敛为纯业务执行器
+// V25.0 - candles 唯一正式入口版
 //
 // 当前职责：
-//   - 读取后端当前标的结果
-//   - 应用复权
-//   - 计算指标
-//   - 更新页面状态
-//
-// 命令权收敛：
-//   - 不再自行 declareCurrentKline / declareCurrentFactors
-//   - 不再自行 waitTasksDone
-//   - 命令由 useCurrentSymbolData 在启动链/页面交互中显式发出
+//   - 直接读取后端 /api/candles 最终结果
+//   - 不再拉 factors
+//   - 不再做前端复权
+//   - 不再等待 current_kline/current_factors
+//   - 基于最终 candles 做前端指标计算与页面状态更新
 // ==============================
 
 import { ref, watch, computed } from "vue";
 import { fetchCandles } from "@/services/marketService";
-import { fetchFactors } from "@/services/factorsAPI";
 import { computeIndicators } from "@/composables/engines/indicators";
-import { applyAdjustment } from "@/composables/engines/adjustment";
 import { useUserSettings } from "@/composables/useUserSettings";
 import { useViewCommandHub } from "@/composables/useViewCommandHub";
 import { useViewRenderHub } from "@/composables/viewRenderHub";
-import { useSymbolIndex } from "@/composables/useSymbolIndex";
 import { fetchProfile } from "@/services/profileService";
 
 let _abortCtl = null;
@@ -54,11 +47,18 @@ function isValidIdentity(input = {}) {
   return !!(id.symbol && id.market);
 }
 
+function normalizeRefreshInterval(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  return i >= 1 ? i : null;
+}
+
 export function useMarketView(options = {}) {
   const autoStart = options?.autoStart !== false;
   const settings = useUserSettings();
   const renderHub = useViewRenderHub();
-  const symbolIndex = useSymbolIndex();
 
   const initialIdentity = settings.getLastSymbolIdentity
     ? settings.getLastSymbolIdentity()
@@ -79,14 +79,21 @@ export function useMarketView(options = {}) {
   const error = ref("");
   const meta = ref(null);
   const candles = ref([]);
-  const rawCandles = ref([]);
-  const factors = ref([]);
   const indicators = ref({});
   const profile = ref(null);
 
   const chartType = ref(settings.preferences.chartType || "kline");
   const visibleRange = ref({ startStr: "", endStr: "" });
   const displayBars = ref(0);
+
+  const autoRefreshEnabled = computed(
+    () => settings.preferences.autoRefreshEnabled === true
+  );
+  const refreshIntervalSeconds = computed(() =>
+    autoRefreshEnabled.value
+      ? normalizeRefreshInterval(settings.preferences.refreshIntervalSeconds)
+      : null
+  );
 
   const indicatorConfig = computed(() => ({
     maPeriodsMap: (() => {
@@ -125,13 +132,6 @@ export function useMarketView(options = {}) {
     const currentAdjust = adjust.value;
     const withProfile = opts.with_profile === true;
 
-    const entry = symbolIndex.findBySymbol(currentSymbol, currentMarket);
-    const cls = String(entry?.class || "").toLowerCase();
-    const isStock = cls === "stock";
-
-    const requestAdjust = isStock ? "none" : String(currentAdjust || "none");
-    const shouldFetchFactors = isStock;
-
     try {
       if (_abortCtl) _abortCtl.abort();
     } catch {}
@@ -145,89 +145,68 @@ export function useMarketView(options = {}) {
 
     try {
       await renderHub._executeBatch(async () => {
-        const [candlesRes, factorsRes] = await Promise.all([
-          fetchCandles(currentSymbol, currentFreq, {
+        const candlesRes = await fetchCandles(
+          currentSymbol,
+          currentMarket,
+          currentFreq,
+          {
             signal: ctl.signal,
-            adjust: requestAdjust,
-          }),
-          shouldFetchFactors ? fetchFactors(currentSymbol) : Promise.resolve([]),
-        ]);
+            adjust: currentAdjust,
+            refreshIntervalSeconds: refreshIntervalSeconds.value,
+          }
+        );
 
         if (!isLatestRequest(mySeq) || ctl.signal.aborted) {
           return;
         }
 
         const metaRaw = candlesRes.meta || {};
-        const completeness =
-          metaRaw.is_latest === true ? "complete" : "incomplete";
+        const hasGap = metaRaw.has_gap === true;
+        const gapMessage =
+          metaRaw.gap_message == null ? "" : String(metaRaw.gap_message);
+        const actualAdjust =
+          metaRaw.actual_adjust == null
+            ? String(currentAdjust || "none")
+            : String(metaRaw.actual_adjust || "none");
 
         meta.value = {
           ...metaRaw,
-          completeness,
+          has_gap: hasGap,
+          gap_message: gapMessage,
+          actual_adjust: actualAdjust,
+          completeness: hasGap ? "incomplete" : "complete",
         };
 
-        rawCandles.value = candlesRes.candles || [];
-        factors.value = Array.isArray(factorsRes) ? factorsRes : [];
+        const finalCandles = Array.isArray(candlesRes.candles)
+          ? candlesRes.candles
+          : [];
 
-        if (candlesRes.meta.all_rows > 0) {
-          const wantAdjust = String(currentAdjust || "none");
+        candles.value = finalCandles;
+        indicators.value = computeIndicators(finalCandles, indicatorConfig.value);
 
-          let finalCandles = [];
-
-          if (isStock) {
-            if (wantAdjust === "none") {
-              finalCandles = rawCandles.value;
-            } else {
-              const hasFactors =
-                Array.isArray(factors.value) && factors.value.length > 0;
-
-              if (!hasFactors) {
-                candles.value = [];
-                indicators.value = {};
-                error.value = "复权因子缺失，无法计算复权价格";
-                meta.value = {
-                  ...(meta.value || {}),
-                  completeness: "incomplete",
-                };
-                return;
-              }
-
-              finalCandles = applyAdjustment(
-                rawCandles.value,
-                factors.value,
-                wantAdjust
-              );
-            }
-          } else {
-            finalCandles = rawCandles.value;
-          }
-
-          candles.value = finalCandles;
-          indicators.value = computeIndicators(
-            finalCandles,
-            indicatorConfig.value
-          );
-
+        if (finalCandles.length > 0) {
           const allRows = finalCandles.length;
           const minTs = finalCandles[0]?.ts;
           const maxTs = finalCandles[allRows - 1]?.ts;
           hub.setDatasetBounds({ minTs, maxTs, totalRows: allRows });
 
+          visibleRange.value = {
+            startStr: meta.value.start || "",
+            endStr: meta.value.end || "",
+          };
+          displayBars.value = meta.value.view_rows || 0;
+
           error.value = "";
+
           console.log(
-            `${ts()} [MarketView] load-ok symbol=${currentSymbol} market=${currentMarket} freq=${currentFreq} rows=${allRows}`
+            `${ts()} [MarketView] load-ok symbol=${currentSymbol} market=${currentMarket} freq=${currentFreq} rows=${allRows} has_gap=${hasGap} actual_adjust=${actualAdjust}`
           );
         } else {
-          candles.value = [];
-          indicators.value = {};
+          hub.setDatasetBounds({ minTs: null, maxTs: null, totalRows: 0 });
+          visibleRange.value = { startStr: "", endStr: "" };
+          displayBars.value = 0;
           error.value = "暂无数据";
         }
-
-        visibleRange.value = {
-          startStr: meta.value.start || "",
-          endStr: meta.value.end || "",
-        };
-        displayBars.value = meta.value.view_rows || 0;
 
         settings.setFreq(freq.value);
 
@@ -265,9 +244,12 @@ export function useMarketView(options = {}) {
 
       meta.value = {
         ...(meta.value || {}),
+        has_gap: true,
+        gap_message: error.value,
         completeness: "incomplete",
       };
       profile.value = null;
+      hub.setDatasetBounds({ minTs: null, maxTs: null, totalRows: 0 });
     } finally {
       if (mySeq === _lastReqSeq && ctl === _abortCtl) {
         loading.value = false;
@@ -379,12 +361,12 @@ export function useMarketView(options = {}) {
     error,
     meta,
     candles,
-    rawCandles,
-    factors,
     indicators,
     profile,
     visibleRange,
     displayBars,
+    autoRefreshEnabled,
+    refreshIntervalSeconds,
     setSymbolIdentity,
     setFreq,
     setAdjust,

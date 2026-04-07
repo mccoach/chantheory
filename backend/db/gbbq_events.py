@@ -9,8 +9,6 @@
 #   - 该表只存 TDX gbbq 原始事件真相源
 #   - 保持字段尽量原始、稳定、可复用
 #   - 不提前做业务裁剪
-#   - 不存逐行 updated_at
-#   - 同步时间统一由 data_task_status 承担
 # ==============================
 
 from __future__ import annotations
